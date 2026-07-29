@@ -179,6 +179,93 @@ impl Cli {
             })
         }
     }
+
+    /// Write one setting into `proxy.yaml`.
+    ///
+    /// The only sanctioned way to change the file: `config set` was measured to
+    /// replace the single line and leave every surrounding comment intact,
+    /// which no YAML serialiser would (contract §5).
+    ///
+    /// Like every other subcommand it exits **0** on failure and explains
+    /// itself on stdout, so success is again defined positively — by the
+    /// `Config has been updated` line. Measured refusals, all at exit 0 and all
+    /// leaving the file untouched:
+    ///
+    /// ```text
+    /// $ adguard-cli config set bogus_key true
+    /// 'bogus_key' not found
+    /// $ adguard-cli config set stealthmode.enabled bogus
+    /// Invalid value type: The value of the setting must be an boolean
+    /// $ adguard-cli config set https_filtering.filter_secure_dns_mode nope
+    /// Invalid value for key `...`. Valid values are: off, transparent, redirect
+    /// $ adguard-cli config set filters something
+    /// This field is not a separate setting
+    /// ```
+    ///
+    /// # This is not proof the value changed
+    ///
+    /// `Config has been updated` is necessary but **not sufficient**. It is
+    /// printed for a no-op, and — measured — even when the CLI declined to make
+    /// the requested change at all:
+    ///
+    /// ```text
+    /// $ adguard-cli config set listen_address 0.0.0.0     # listen_auth off
+    /// Enter username for accessing proxy server:
+    /// Warning: No TTY for user input. ...
+    /// listen_address = 127.0.0.1        <- the old value; the file is untouched
+    /// Config has been updated
+    /// ```
+    ///
+    /// So `Ok` means only *"the CLI accepted the command"*. The caller must
+    /// still re-read `proxy.yaml` and render from that.
+    pub fn config_set(&self, key: &str, value: &str) -> Result<Applied, Error> {
+        let out = self.run(&["config", "set", key, value])?;
+
+        if out.stdout.lines().map(str::trim).any(|line| line == CONFIG_UPDATED) {
+            Ok(Applied {
+                restart_required: mentions_restart(&out.stdout),
+            })
+        } else {
+            Err(Error::Refused {
+                message: first_line(&out.stdout)
+                    .unwrap_or_else(|| format!("`config set {key}` said nothing at all")),
+            })
+        }
+    }
+
+    /// Set a boolean setting.
+    ///
+    /// Always writes lowercase `true`/`false`. The CLI also accepts `1`/`0`,
+    /// but that writes a literal integer into the YAML where a bool belongs —
+    /// legal to the CLI, a type-pun to every other reader. `True`, `TRUE`,
+    /// `yes` and `on` are all rejected outright.
+    pub fn set_bool(&self, key: &str, value: bool) -> Result<Applied, Error> {
+        self.config_set(key, if value { "true" } else { "false" })
+    }
+}
+
+/// What an accepted `config set` implies for the running proxy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Applied {
+    /// The CLI said the change will not reach the running proxy until it is
+    /// restarted. It only says this when the proxy is up and it could not
+    /// apply the setting live, so it is worth passing straight to the user.
+    pub restart_required: bool,
+}
+
+/// The line `config set` prints when it accepted the command.
+const CONFIG_UPDATED: &str = "Config has been updated";
+
+/// Did the CLI ask for a restart?
+///
+/// Two shapes exist in the binary — *"To apply changes, you need to restart the
+/// proxy server by running `… restart`"* and *"Failed to apply settings to
+/// running proxy server"*. Both mean the same thing to the user, and both are
+/// matched loosely because the first interpolates the binary's own path.
+fn mentions_restart(stdout: &str) -> bool {
+    let lowered = stdout.to_ascii_lowercase();
+    lowered.contains("restart the proxy server")
+        || lowered.contains("failed to apply settings to running proxy server")
 }
 
 /// Did the CLI confirm it acted, as in `Filter [Title: EasyList] enabled`?
@@ -366,5 +453,93 @@ mod tests {
     fn confirmation_survives_ansi_stripping() {
         let bold = "Filter [Title: \x1b[1mAdGuard Base filter\x1b[0m] enabled\n";
         assert!(confirms(&stripped(bold), FilterAction::Enable.confirmation()));
+    }
+
+    // ---- `config set`, all captured from v1.4.13 ----
+
+    /// The plain success: an echo of the resulting value, then the confirmation.
+    const SET_OK: &str = "stealthmode.enabled = true\nConfig has been updated\n";
+
+    /// With `show_hints: true` the hint lands **between** the echo and the
+    /// confirmation, which is why nothing may be matched positionally.
+    const SET_OK_WITH_HINT: &str = "https_filtering.enabled = true\n\
+         To use HTTPS filtering on your device, you need to install a certificate on it. \
+         You can find a guide on how to install it here: `https://link.adtidy.org/forward.html\
+         ?action=how_to_install_cert&from=certificate&app=corelibs`\n\
+         Config has been updated\n";
+
+    /// Setting a coupled key echoes more than one line before confirming.
+    const SET_OK_MULTILINE: &str =
+        "listen_address = 0.0.0.0\nlisten_auth = true\n  username = admin\nConfig has been updated\n";
+
+    const UNKNOWN_KEY: &str = "'bogus_key_xyz' not found\n";
+    const WRONG_TYPE: &str = "Invalid value type: The value of the setting must be an boolean\n";
+    const BAD_ENUM: &str = "Invalid value for key `https_filtering.filter_secure_dns_mode`. \
+         Valid values are: off, transparent, redirect\n";
+    const NOT_A_SETTING: &str = "This field is not a separate setting\n\
+         Please run `adguard-cli config list-add <key> <value>` to add a new value\n";
+
+    fn accepted(stdout: &str) -> bool {
+        stdout.lines().map(str::trim).any(|line| line == CONFIG_UPDATED)
+    }
+
+    #[test]
+    fn recognises_an_accepted_set() {
+        for output in [SET_OK, SET_OK_WITH_HINT, SET_OK_MULTILINE] {
+            assert!(accepted(output), "{output:?} should read as accepted");
+        }
+    }
+
+    /// Every one of these exits 0 and leaves the file untouched. Reading any of
+    /// them as success would leave a switch showing a state that never landed.
+    #[test]
+    fn set_failures_are_not_confirmations() {
+        for output in [UNKNOWN_KEY, WRONG_TYPE, BAD_ENUM, NOT_A_SETTING, "", "\n \n"] {
+            assert!(!accepted(output), "{output:?} read as success");
+        }
+    }
+
+    /// The refusal shown to the user is the CLI's own first line — it is
+    /// better wording than anything we would invent, and names the valid
+    /// values in the enum case.
+    #[test]
+    fn set_refusal_carries_the_cli_wording() {
+        assert_eq!(
+            first_line(BAD_ENUM).as_deref(),
+            Some(
+                "Invalid value for key `https_filtering.filter_secure_dns_mode`. \
+                 Valid values are: off, transparent, redirect"
+            )
+        );
+        assert_eq!(first_line(UNKNOWN_KEY).as_deref(), Some("'bogus_key_xyz' not found"));
+    }
+
+    /// A stray "Config has been updated" inside a longer sentence is not the
+    /// confirmation line; the match is on the whole trimmed line.
+    #[test]
+    fn confirmation_must_be_the_whole_line() {
+        assert!(!accepted("Config has been updated for some other thing\n"));
+        assert!(accepted("  Config has been updated  \n"));
+    }
+
+    /// Printed only when the proxy is running and the setting could not be
+    /// applied live — the user needs to know their change is not in effect yet.
+    #[test]
+    fn detects_the_restart_advice() {
+        assert!(mentions_restart(
+            "ad_blocking_enabled = false\n\
+             To apply changes, you need to restart the proxy server by running \
+             `/home/you/.local/bin/adguard-cli restart`\n\
+             Config has been updated\n"
+        ));
+        assert!(mentions_restart("Failed to apply settings to running proxy server\n"));
+    }
+
+    /// The common case is a stopped proxy, or one that took the change live.
+    #[test]
+    fn no_restart_advice_when_the_cli_did_not_ask() {
+        for output in [SET_OK, SET_OK_WITH_HINT, SET_OK_MULTILINE] {
+            assert!(!mentions_restart(output), "{output:?} should need no restart");
+        }
     }
 }

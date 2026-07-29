@@ -88,9 +88,11 @@ Verified ineffective: piping (no TTY), `NO_COLOR=1`, `TERM=dumb`.
 
 `proxy.yaml` is a **hand-commented file** — 221 lines, of which roughly half are explanatory comments documenting every key ("Supported proxy modes are: manual, auto", "Use -1 to disable SOCKS5 manual proxy", …).
 
-Serialising a parsed YAML document back over it would delete all of that. `serde_yaml` does not round-trip comments.
+Serialising a parsed YAML document back over it would delete all of that. No YAML serialiser round-trips comments.
 
-**Rule: all writes go through `adguard-cli config set|reset|list-add|list-remove`.** Read freely with `serde_yaml`; never write.
+**Rule: all writes go through `adguard-cli config set|reset|list-add|list-remove`.** Read the file freely; never write it.
+
+That rule rests on `config set` being surgical, which is measured: a write replaces the **single** line, leaves the line count unchanged, and preserves every comment. `config_mutate::a_write_disturbs_exactly_one_line` asserts exactly this, because if it ever stopped being true the GUI would be quietly shredding the file's documentation on every switch flip.
 
 `config show` is a **rendered view, not the file**:
 
@@ -103,6 +105,77 @@ Key syntax facts:
 - Dotted paths work for scalars: `config get stealthmode.enabled`, `config get listen_ports.http_proxy`.
 - `config show <section>` accepts **top-level** sections only. Nested ones fail: `config show anti_dpi` → `not found`, even though `stealthmode.anti_dpi` exists in the file. Expand the parent instead.
 - List-valued keys (`filters`, `userscripts`, `apps`) are not scalars — `config get filters` refuses. Use `list-add`/`list-remove`, or edit an auxiliary file via `--list-file`.
+
+### Reading `config set`'s answer
+
+Success is again defined **positively**, by the line `Config has been updated`. Every refusal exits 0, prints to stdout, and leaves the file untouched:
+
+| Invocation | stdout | Effect |
+| --- | --- | --- |
+| `config set stealthmode.enabled true` | `stealthmode.enabled = true` + `Config has been updated` | the one line is rewritten |
+| `config set bogus_key true` | `'bogus_key' not found` | nothing |
+| `config set stealthmode.enabled bogus` | `Invalid value type: The value of the setting must be an boolean` | nothing |
+| `config set https_filtering.filter_secure_dns_mode nope` | ``Invalid value for key `…`. Valid values are: off, transparent, redirect`` | nothing |
+| `config set filters something` | `This field is not a separate setting` | nothing |
+| `config set anti_dpi.enabled true` | `'anti_dpi.enabled' not found` | nothing — paths must start at the top level |
+
+Two shapes make positional parsing impossible:
+
+- With `show_hints: true` (the default) a hint lands **between** the echo and the confirmation — `config set https_filtering.enabled true` prints the certificate-install advice in the middle.
+- Setting a coupled key echoes several lines first: `config set listen_address …` echoes `listen_address`, then `listen_auth`, then `  username`.
+
+So match `Config has been updated` as a whole line **anywhere** in the output.
+
+### `Config has been updated` is not proof the value changed
+
+It is necessary but **not sufficient**. It is printed for a no-op, and — measured — even when the CLI declined to make the requested change:
+
+```
+$ adguard-cli config set listen_address 0.0.0.0      # with listen_auth.enabled = false
+Enter username for accessing proxy server:
+Warning: No TTY for user input. Use `adguard-cli config set listen_auth.username` to set the value.
+listen_address = 127.0.0.1        <- the OLD value; proxy.yaml is untouched
+listen_auth = false
+Config has been updated           <- ...and it still says this
+```
+
+`Ok` from the wrapper therefore means only *"the CLI accepted the command"*. **Re-read `proxy.yaml` to learn what actually happened** — act → re-read → reconcile, exactly as for filters.
+
+### Booleans have two spellings, and one of them lies
+
+| Written | Result |
+| --- | --- |
+| `true` / `false` | accepted; file gets `true` / `false` |
+| `1` / `0` | **accepted**; file gets a literal `1` / `0` — an *integer* where a bool belongs |
+| `True`, `TRUE`, `yes`, `on`, `false ` (trailing space) | rejected, file unchanged |
+
+**Always write lowercase `true`/`false`; read tolerantly.** A strict struct deserialise would fail the whole document on a single `enabled: 1`, taking every unrelated setting down with it — which is why [`config.rs`](../crates/adguard-core/src/config.rs) walks a generic value tree and coerces per key. One junk value then costs one row instead of the page.
+
+### `listen_address` needs authentication enabled *first*
+
+`architecture.md` §5 requires forcing `listen_auth` on when the listen address leaves loopback. Measurement turns that from a fix-up into a **precondition**: with auth off, the command above prompts for a username, finds no TTY, and silently no-ops. Enabling `listen_auth.enabled` first makes the identical command succeed:
+
+```
+$ adguard-cli config set listen_auth.enabled true
+$ adguard-cli config set listen_address 0.0.0.0
+listen_address = 0.0.0.0
+Config has been updated                            <- and this time the file really changed
+```
+
+The order is load-bearing. `config::listen_address_plan` returns the calls in it; reversed, the second silently does nothing while reporting success. Add `config set listen_address <non-loopback>` to the TTY-requiring list in [§7](#7-commands-that-need-a-tty).
+
+### Nothing enforces dependencies between settings
+
+`config set` will happily accept any key in any order, including combinations the file's own comments call invalid. Two that matter:
+
+- `https_filtering.encrypted_client_hello` and `filter_secure_dns_mode` are documented as *"Requires dns_filtering to be enabled"*, but both can be set while `dns_filtering.enabled` is `false`.
+- `dns_filtering.enabled: true` does nothing in `manual` proxy mode unless `dns_filtering.listen_port` names a real port — the file says *"N = listen on port N (e.g. 5353) — required for DNS filtering in manual proxy mode"*, and `-1` is the default. The switch reads on and filters nothing.
+
+The GUI has to own these. `Config::dns_filtering_is_inert` drives the caveat on the DNS filtering row.
+
+### A change may not reach the running proxy
+
+Two strings in the binary — *"To apply changes, you need to restart the proxy server by running `… restart`"* and *"Failed to apply settings to running proxy server"* — mean the daemon could not take the setting live. They appear only while the proxy is running, so they are absent from every capture above. `Applied::restart_required` carries this up to a toast rather than swallowing it.
 
 ---
 
@@ -197,10 +270,11 @@ Opening read-only is also verified not to create `-wal`/`-shm` side-car files ne
 
 ## 7. Commands that need a TTY
 
-`configure` and `activate` are interactive and cannot be driven headlessly.
+`configure` and `activate` are interactive and cannot be driven headlessly. So, conditionally, is one `config set`.
 
 - **`configure`** — a wizard that writes the same keys we can set individually. The GUI reimplements it as a first-run assistant calling `config set`. Never invoke it.
 - **`activate`** — browser-based licence flow. Without a TTY it prints: *"No TTY for user input. Please visit <url> to log in, then run `activate` again."* The GUI should open that URL with `gtk::UriLauncher` and then poll `license` until status becomes `APP_ACTIVE`. `activate` is absent from `--help-all` but is a real command.
+- **`config set listen_address <non-loopback>`**, but only while `listen_auth.enabled` is `false` — it prompts for a username. This one is the nastiest of the three because it does not *look* interactive and it reports success anyway; see [§5](#listen_address-needs-authentication-enabled-first). Enable `listen_auth.enabled` first and it needs no TTY at all.
 
 ---
 

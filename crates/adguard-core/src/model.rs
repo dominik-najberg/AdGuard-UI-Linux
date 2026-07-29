@@ -17,6 +17,73 @@ pub struct ProxyStatus {
     pub system_dns_filtering: bool,
 }
 
+/// A switch on the Protection page.
+///
+/// Each variant names one boolean in `proxy.yaml`. [`Self::key`] is both the
+/// dotted path used to read the file and the argument given to
+/// `adguard-cli config set`, so the two directions cannot drift apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Toggle {
+    AdBlocking,
+    HttpsFiltering,
+    StealthMode,
+    DnsFiltering,
+    SafeBrowsing,
+    Crlite,
+}
+
+impl Toggle {
+    /// In the order the page renders them: what AdGuard does to traffic first,
+    /// then the protections layered on top.
+    pub const ALL: [Self; 6] = [
+        Self::AdBlocking,
+        Self::HttpsFiltering,
+        Self::StealthMode,
+        Self::DnsFiltering,
+        Self::SafeBrowsing,
+        Self::Crlite,
+    ];
+
+    pub fn key(self) -> &'static str {
+        use crate::config::key;
+        match self {
+            Self::AdBlocking => key::AD_BLOCKING,
+            Self::HttpsFiltering => key::HTTPS_FILTERING,
+            Self::StealthMode => key::STEALTH_MODE,
+            Self::DnsFiltering => key::DNS_FILTERING,
+            Self::SafeBrowsing => key::SAFE_BROWSING,
+            Self::Crlite => key::CRLITE,
+        }
+    }
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::AdBlocking => "Ad blocking",
+            Self::HttpsFiltering => "HTTPS filtering",
+            Self::StealthMode => "Stealth mode",
+            Self::DnsFiltering => "DNS filtering",
+            Self::SafeBrowsing => "Safe Browsing",
+            Self::Crlite => "Certificate revocation checks",
+        }
+    }
+
+    /// Wording taken from the explanatory comments in `proxy.yaml` itself, so
+    /// the GUI and a user reading the file are told the same thing.
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::AdBlocking => "Apply ad-blocking filters to requests",
+            Self::HttpsFiltering => {
+                "Decrypt HTTPS so filters can see inside it. Requires the AdGuard \
+                 certificate to be installed"
+            }
+            Self::StealthMode => "Tracking protection: cookies, referrers, User-Agent and more",
+            Self::DnsFiltering => "Filter DNS queries through the local DNS proxy",
+            Self::SafeBrowsing => "Warn about malicious and phishing websites",
+            Self::Crlite => "Check certificates against CRLite revocation lists",
+        }
+    }
+}
+
 /// Which of the two filter catalogues an operation targets.
 ///
 /// They are genuinely separate: different databases, and a `dns` prefix on

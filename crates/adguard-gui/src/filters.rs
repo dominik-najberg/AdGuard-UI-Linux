@@ -8,7 +8,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use adguard_core::filters::{self, Catalogue};
@@ -17,7 +17,7 @@ use adw::prelude::*;
 use gtk4 as gtk;
 use libadwaita as adw;
 
-use crate::{toast, worker};
+use crate::{abbreviate, toast, worker};
 
 /// One read of everything the page renders.
 struct Loaded {
@@ -291,19 +291,4 @@ fn error_view(message: &str) -> adw::StatusPage {
         .title("Filters unavailable")
         .description(message)
         .build()
-}
-
-/// `/home/you/.local/share/...` -> `~/.local/share/...`, so the path fits in a
-/// subtitle.
-fn abbreviate(path: &Path) -> String {
-    let display = path.display().to_string();
-    match std::env::var_os("HOME") {
-        Some(home) if !home.is_empty() => {
-            let home = Path::new(&home).display().to_string();
-            display
-                .strip_prefix(&home)
-                .map_or(display.clone(), |rest| format!("~{rest}"))
-        }
-        _ => display,
-    }
 }

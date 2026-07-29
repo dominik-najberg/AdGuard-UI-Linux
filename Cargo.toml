@@ -27,3 +27,8 @@ async-channel = "2"
 strip-ansi-escapes = "0.2"
 thiserror = "2"
 rusqlite = { version = "0.37", features = ["bundled"] }
+# proxy.yaml is read through a generic value tree rather than deserialised into
+# structs: `config set <bool key> 1` is accepted by the CLI and writes a literal
+# `enabled: 1`, which a strict `bool` field would reject — taking the whole
+# document, and every switch on the page, down with it. See config.rs.
+yaml-rust2 = "0.11"

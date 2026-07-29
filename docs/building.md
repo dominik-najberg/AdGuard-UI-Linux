@@ -100,10 +100,32 @@ adguard-cli filters list --all > crates/adguard-core/tests/fixtures/filters-list
 
 Do not strip the escapes when recording — the stripper is part of what is under test.
 
+### The `#[ignore]`d suites
+
+Two suites are excluded from a plain `cargo test` because they invoke the real `adguard-cli` and mutate this machine's actual AdGuard configuration. Both restore whatever they found, but neither belongs in an unattended run:
+
+```bash
+cargo test -p adguard-core --test filters_mutate -- --ignored --nocapture
+```
+
+```bash
+cargo test -p adguard-core --test config_mutate -- --ignored --nocapture
+```
+
+They are the only tests that exercise the write path end to end — act → re-read → reconcile against the real binary — so run them after any change to `cli.rs`, and after an `adguard-cli` upgrade. `config_mutate` also asserts the claim the whole no-YAML-writes rule rests on: that `config set` rewrites exactly one line and preserves every comment.
+
+The `*_live` suites are safe and run by default; they read the real `proxy.yaml` and filter databases, and **skip** rather than fail when AdGuard CLI is not installed.
+
 GUI code needs a display. Under Wayland, headless CI requires a compositor:
 
 ```bash
 cargo test --workspace
+```
+
+For a quick look at the GUI without one, `Xvfb` is enough to render and screenshot it:
+
+```bash
+xvfb-run -n 99 -s "-screen 0 1000x820x24" env GDK_BACKEND=x11 ./target/debug/adguard-ui
 ```
 
 ---
@@ -113,7 +135,7 @@ cargo test --workspace
 Matching the pattern already used for other tools on this machine (`~/.local/bin` + a desktop entry):
 
 ```bash
-cargo build --release && install -Dm755 target/release/adguard-gui ~/.local/bin/adguard-gui
+cargo build --release && install -Dm755 target/release/adguard-ui ~/.local/bin/adguard-ui
 ```
 
 ```bash

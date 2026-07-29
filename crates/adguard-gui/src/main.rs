@@ -6,6 +6,7 @@
 //! measured CLI behaviour the wrapper encodes.
 
 mod filters;
+mod protection;
 mod status;
 mod worker;
 
@@ -57,11 +58,16 @@ fn missing_cli_view(message: &str) -> adw::ToolbarView {
 }
 
 /// Sidebar entries, in order. The id doubles as the stack child name.
-const PAGES: [Page; 2] = [
+const PAGES: [Page; 3] = [
     Page {
         id: "status",
         title: "Status",
         icon: "network-transmit-receive-symbolic",
+    },
+    Page {
+        id: "protection",
+        title: "Protection",
+        icon: "security-high-symbolic",
     },
     Page {
         id: "filters",
@@ -80,13 +86,15 @@ fn main_view(cli: &Cli) -> adw::NavigationSplitView {
     let toasts = adw::ToastOverlay::new();
 
     let status = status::StatusPage::new(cli.clone(), toasts.clone());
+    let protection = protection::ProtectionPage::new(cli.clone(), toasts.clone());
     // The DNS catalogue gets its own page later: its user-rules row cannot be
     // enabled through `dns filters enable` (see docs/cli-contract.md §6).
     let filters = filters::FiltersPage::new(cli.clone(), toasts.clone(), FilterSet::Http);
 
     let stack = gtk::Stack::new();
     stack.add_named(status.widget(), Some(PAGES[0].id));
-    stack.add_named(filters.widget(), Some(PAGES[1].id));
+    stack.add_named(protection.widget(), Some(PAGES[1].id));
+    stack.add_named(filters.widget(), Some(PAGES[2].id));
     toasts.set_child(Some(&stack));
 
     let content_header = adw::HeaderBar::new();
@@ -101,8 +109,10 @@ fn main_view(cli: &Cli) -> adw::NavigationSplitView {
     refresh.connect_clicked({
         let stack = stack.clone();
         let status = status.clone();
+        let protection = protection.clone();
         let filters = filters.clone();
         move |_| match stack.visible_child_name().as_deref() {
+            Some("protection") => protection.reload(),
             Some("filters") => filters.reload(),
             _ => status.refresh(),
         }
@@ -172,4 +182,19 @@ fn sidebar_row(page: &Page) -> gtk::ListBoxRow {
 /// same reason it does on the filter rows: the title is consumed as it is set.
 pub fn toast(message: &str) -> adw::Toast {
     adw::Toast::builder().use_markup(false).title(message).build()
+}
+
+/// `/home/you/.local/share/...` -> `~/.local/share/...`, so an AdGuard path
+/// fits in a subtitle without wrapping.
+pub fn abbreviate(path: &std::path::Path) -> String {
+    let display = path.display().to_string();
+    match std::env::var_os("HOME") {
+        Some(home) if !home.is_empty() => {
+            let home = std::path::Path::new(&home).display().to_string();
+            display
+                .strip_prefix(&home)
+                .map_or(display.clone(), |rest| format!("~{rest}"))
+        }
+        _ => display,
+    }
 }
