@@ -37,16 +37,12 @@ pub fn cli_binary() -> Option<PathBuf> {
     }
 
     let home = home()?;
-    for candidate in [
+    [
         home.join(".local/bin").join(BINARY),
         home.join(".local/opt/adguard-cli").join(BINARY),
-    ] {
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-    }
-
-    None
+    ]
+    .into_iter()
+    .find(|candidate| candidate.is_file())
 }
 
 /// AdGuard CLI's data directory: config, databases, logs, certificates.
@@ -69,6 +65,17 @@ pub fn data_dir() -> Option<PathBuf> {
 /// destroy — writes go through `adguard-cli config set`.
 pub fn config_file() -> Option<PathBuf> {
     Some(data_dir()?.join("proxy.yaml"))
+}
+
+/// The user's own HTTP filtering rules — the file behind the user-rules
+/// pseudo-filter. Hand-editable; the CLI itself suggests editing it directly.
+pub fn user_rules_file() -> Option<PathBuf> {
+    Some(data_dir()?.join("user.txt"))
+}
+
+/// The user's own DNS filtering rules.
+pub fn dns_user_rules_file() -> Option<PathBuf> {
+    Some(data_dir()?.join("dns_user.txt"))
 }
 
 /// SQLite catalogue of HTTP/HTTPS filters. Open read-only.

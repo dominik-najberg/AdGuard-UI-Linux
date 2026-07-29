@@ -1,36 +1,23 @@
 //! AdGuard UI — GTK4/libadwaita front-end for `adguard-cli`.
 //!
-//! Scaffold scope: one vertical slice through every layer — locate the CLI,
-//! read real status off the main thread, render it, and control the proxy.
-//! Feature pages (filters, protection toggles, advanced settings) come next;
-//! see `docs/architecture.md`.
+//! Reads state from AdGuard's own files (`proxy.yaml`, `agflm_*.db`) and the
+//! `status` command; writes only ever go through `adguard-cli`. See
+//! `docs/architecture.md` for the split and `docs/cli-contract.md` for the
+//! measured CLI behaviour the wrapper encodes.
 
-use std::cell::Cell;
-use std::rc::Rc;
-use std::time::Duration;
+mod filters;
+mod status;
+mod worker;
 
-use adguard_core::{Cli, ProxyStatus};
-use gtk4 as gtk;
-use gtk::glib;
-use gtk::prelude::*;
-use libadwaita as adw;
+use adguard_core::{Cli, FilterSet};
 use adw::prelude::*;
+use gtk::glib;
+use gtk4 as gtk;
+use libadwaita as adw;
 
 /// Must match the `.desktop` filename and its `StartupWMClass`, or GNOME
 /// shows a second unbranded icon instead of grouping with the launcher.
 const APP_ID: &str = "io.github.dominik-najberg.AdGuardUI";
-
-const POLL_INTERVAL: Duration = Duration::from_secs(2);
-
-const PLACEHOLDER: &str = "—";
-
-/// Messages from worker threads back to the UI.
-enum Msg {
-    Status(Result<ProxyStatus, String>),
-    /// Outcome of a start/stop/restart. The text is informational only —
-    /// success is confirmed by re-reading status, never by exit code.
-    Action(Result<String, String>),
-}
 
 fn main() -> glib::ExitCode {
     let app = adw::Application::builder().application_id(APP_ID).build();
@@ -42,12 +29,12 @@ fn build_ui(app: &adw::Application) {
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .title("AdGuard UI")
-        .default_width(560)
-        .default_height(620)
+        .default_width(820)
+        .default_height(680)
         .build();
 
     match Cli::discover() {
-        Ok(cli) => window.set_content(Some(&main_view(cli))),
+        Ok(cli) => window.set_content(Some(&main_view(&cli))),
         Err(err) => window.set_content(Some(&missing_cli_view(&err.to_string()))),
     }
 
@@ -69,230 +56,120 @@ fn missing_cli_view(message: &str) -> adw::ToolbarView {
     view
 }
 
-/// Widgets that reflect proxy state, grouped so refresh logic stays readable.
-/// GTK widgets are reference-counted, so `Clone` is cheap.
-#[derive(Clone)]
-struct StatusView {
-    state: adw::ActionRow,
-    http: adw::ActionRow,
-    socks5: adw::ActionRow,
-    manual_dns: adw::ActionRow,
-    system_filtering: adw::ActionRow,
-    system_dns: adw::ActionRow,
-    start: gtk::Button,
-    stop: gtk::Button,
-    restart: gtk::Button,
+/// Sidebar entries, in order. The id doubles as the stack child name.
+const PAGES: [Page; 2] = [
+    Page {
+        id: "status",
+        title: "Status",
+        icon: "network-transmit-receive-symbolic",
+    },
+    Page {
+        id: "filters",
+        title: "Filters",
+        icon: "view-list-symbolic",
+    },
+];
+
+struct Page {
+    id: &'static str,
+    title: &'static str,
+    icon: &'static str,
 }
 
-impl StatusView {
-    fn apply(&self, status: &ProxyStatus) {
-        self.state
-            .set_subtitle(if status.running { "Running" } else { "Stopped" });
-        self.http
-            .set_subtitle(status.http_proxy.as_deref().unwrap_or(PLACEHOLDER));
-        self.socks5
-            .set_subtitle(status.socks5_proxy.as_deref().unwrap_or(PLACEHOLDER));
-        self.manual_dns.set_subtitle(on_off(status.manual_dns_proxy));
-        self.system_filtering
-            .set_subtitle(on_off(status.system_wide_filtering));
-        self.system_dns.set_subtitle(on_off(status.system_dns_filtering));
+fn main_view(cli: &Cli) -> adw::NavigationSplitView {
+    let toasts = adw::ToastOverlay::new();
 
-        self.start.set_sensitive(!status.running);
-        self.stop.set_sensitive(status.running);
-        self.restart.set_sensitive(status.running);
-    }
+    let status = status::StatusPage::new(cli.clone(), toasts.clone());
+    // The DNS catalogue gets its own page later: its user-rules row cannot be
+    // enabled through `dns filters enable` (see docs/cli-contract.md §6).
+    let filters = filters::FiltersPage::new(cli.clone(), toasts.clone(), FilterSet::Http);
 
-    /// Disable the controls while a command is in flight.
-    fn set_busy(&self, busy: bool) {
-        if busy {
-            self.start.set_sensitive(false);
-            self.stop.set_sensitive(false);
-            self.restart.set_sensitive(false);
+    let stack = gtk::Stack::new();
+    stack.add_named(status.widget(), Some(PAGES[0].id));
+    stack.add_named(filters.widget(), Some(PAGES[1].id));
+    toasts.set_child(Some(&stack));
+
+    let content_header = adw::HeaderBar::new();
+    let content_title = adw::WindowTitle::new(PAGES[0].title, "");
+    content_header.set_title_widget(Some(&content_title));
+
+    // Refreshes whichever page is showing: status re-runs `status`, filters
+    // re-reads the catalogue. Both also refresh themselves after any change
+    // they make; this is for changes made behind our back, from a terminal.
+    let refresh = gtk::Button::from_icon_name("view-refresh-symbolic");
+    refresh.set_tooltip_text(Some("Refresh"));
+    refresh.connect_clicked({
+        let stack = stack.clone();
+        let status = status.clone();
+        let filters = filters.clone();
+        move |_| match stack.visible_child_name().as_deref() {
+            Some("filters") => filters.reload(),
+            _ => status.refresh(),
         }
-    }
+    });
+    content_header.pack_end(&refresh);
 
-    fn show_error(&self, message: &str) {
-        self.state.set_subtitle(message);
+    let content = adw::ToolbarView::new();
+    content.add_top_bar(&content_header);
+    content.set_content(Some(&toasts));
+
+    let split = adw::NavigationSplitView::builder()
+        .min_sidebar_width(180.0)
+        .max_sidebar_width(240.0)
+        .build();
+    split.set_content(Some(&adw::NavigationPage::new(&content, "AdGuard UI")));
+
+    let sidebar = gtk::ListBox::builder()
+        .selection_mode(gtk::SelectionMode::Single)
+        .build();
+    sidebar.add_css_class("navigation-sidebar");
+    for page in &PAGES {
+        sidebar.append(&sidebar_row(page));
     }
+    sidebar.connect_row_selected({
+        let stack = stack.clone();
+        let split = split.clone();
+        move |_, row| {
+            let Some(row) = row else { return };
+            let page = &PAGES[row.index().max(0) as usize];
+            stack.set_visible_child_name(page.id);
+            content_title.set_title(page.title);
+            // On a narrow window the sidebar and content are separate views;
+            // choosing a page should move to it.
+            split.set_show_content(true);
+        }
+    });
+    sidebar.select_row(sidebar.row_at_index(0).as_ref());
+
+    let sidebar_view = adw::ToolbarView::new();
+    sidebar_view.add_top_bar(&adw::HeaderBar::new());
+    sidebar_view.set_content(Some(&sidebar));
+    split.set_sidebar(Some(&adw::NavigationPage::new(&sidebar_view, "AdGuard UI")));
+
+    split
 }
 
-fn on_off(value: bool) -> &'static str {
-    if value {
-        "Enabled"
-    } else {
-        "Disabled"
-    }
-}
-
-fn main_view(cli: Cli) -> adw::ToolbarView {
-    let page = adw::PreferencesPage::new();
-
-    let proxy_group = adw::PreferencesGroup::builder().title("Proxy").build();
-    let state = row("Status", "Checking…");
-    let http = row("HTTP proxy", PLACEHOLDER);
-    let socks5 = row("SOCKS5 proxy", PLACEHOLDER);
-    for r in [&state, &http, &socks5] {
-        proxy_group.add(r);
-    }
-
-    let filtering_group = adw::PreferencesGroup::builder().title("Filtering").build();
-    let manual_dns = row("Manual DNS proxy", PLACEHOLDER);
-    let system_filtering = row("System-wide filtering", PLACEHOLDER);
-    let system_dns = row("System-wide DNS filtering", PLACEHOLDER);
-    for r in [&manual_dns, &system_filtering, &system_dns] {
-        filtering_group.add(r);
-    }
-
-    let controls_group = adw::PreferencesGroup::new();
-    let start = gtk::Button::with_label("Start");
-    start.add_css_class("suggested-action");
-    let stop = gtk::Button::with_label("Stop");
-    let restart = gtk::Button::with_label("Restart");
-    let button_box = gtk::Box::builder()
+fn sidebar_row(page: &Page) -> gtk::ListBoxRow {
+    let box_ = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
         .spacing(12)
-        .halign(gtk::Align::Center)
+        .margin_top(6)
+        .margin_bottom(6)
+        .margin_start(6)
+        .margin_end(6)
         .build();
-    for b in [&start, &stop, &restart] {
-        b.set_sensitive(false);
-        button_box.append(b);
-    }
-    controls_group.add(&button_box);
+    box_.append(&gtk::Image::from_icon_name(page.icon));
+    box_.append(&gtk::Label::new(Some(page.title)));
 
-    for g in [&proxy_group, &filtering_group, &controls_group] {
-        page.add(g);
-    }
-
-    let view = StatusView {
-        state,
-        http,
-        socks5,
-        manual_dns,
-        system_filtering,
-        system_dns,
-        start: start.clone(),
-        stop: stop.clone(),
-        restart: restart.clone(),
-    };
-
-    let (tx, rx) = async_channel::unbounded::<Msg>();
-
-    // Poll `status`; each call costs ~10 ms, so a 2 s timer is free.
-    // There is no push/event mechanism in the CLI, so polling is the only option.
-    let refresh: Rc<dyn Fn()> = {
-        let cli = cli.clone();
-        let tx = tx.clone();
-        Rc::new(move || {
-            let cli = cli.clone();
-            let tx = tx.clone();
-            std::thread::spawn(move || {
-                let result = cli.status().map_err(|e| e.to_string());
-                let _ = tx.send_blocking(Msg::Status(result));
-            });
-        })
-    };
-
-    // Suppress polling while a command runs, so a stale poll cannot overwrite
-    // the busy state and re-enable the buttons mid-flight.
-    let busy = Rc::new(Cell::new(false));
-
-    for (button, action) in [
-        (&start, Action::Start),
-        (&stop, Action::Stop),
-        (&restart, Action::Restart),
-    ] {
-        let cli = cli.clone();
-        let tx = tx.clone();
-        let view = view.clone();
-        let busy = busy.clone();
-        button.connect_clicked(move |_| {
-            busy.set(true);
-            view.set_busy(true);
-            let cli = cli.clone();
-            let tx = tx.clone();
-            std::thread::spawn(move || {
-                let result = action.run(&cli).map_err(|e| e.to_string());
-                let _ = tx.send_blocking(Msg::Action(result));
-            });
-        });
-    }
-
-    glib::timeout_add_local(POLL_INTERVAL, {
-        let refresh = refresh.clone();
-        let busy = busy.clone();
-        move || {
-            if !busy.get() {
-                refresh();
-            }
-            glib::ControlFlow::Continue
-        }
-    });
-
-    let toast_overlay = adw::ToastOverlay::new();
-    toast_overlay.set_child(Some(&page));
-
-    glib::spawn_future_local({
-        let view = view.clone();
-        let refresh = refresh.clone();
-        let overlay = toast_overlay.clone();
-        let busy = busy.clone();
-        async move {
-            while let Ok(msg) = rx.recv().await {
-                match msg {
-                    Msg::Status(Ok(status)) => view.apply(&status),
-                    Msg::Status(Err(err)) => view.show_error(&err),
-                    Msg::Action(result) => {
-                        // act -> re-read -> reconcile: the command's own output
-                        // is not evidence that it worked (see cli-contract.md).
-                        busy.set(false);
-                        if let Err(err) = result {
-                            overlay.add_toast(adw::Toast::new(&err));
-                        }
-                        refresh();
-                    }
-                }
-            }
-        }
-    });
-
-    refresh();
-
-    let refresh_button = gtk::Button::from_icon_name("view-refresh-symbolic");
-    refresh_button.set_tooltip_text(Some("Refresh"));
-    refresh_button.connect_clicked({
-        let refresh = refresh.clone();
-        move |_| refresh()
-    });
-
-    let header = adw::HeaderBar::new();
-    header.pack_end(&refresh_button);
-
-    let toolbar = adw::ToolbarView::new();
-    toolbar.add_top_bar(&header);
-    toolbar.set_content(Some(&toast_overlay));
-    toolbar
+    gtk::ListBoxRow::builder().child(&box_).build()
 }
 
-#[derive(Copy, Clone)]
-enum Action {
-    Start,
-    Stop,
-    Restart,
-}
-
-impl Action {
-    fn run(self, cli: &Cli) -> Result<String, adguard_core::Error> {
-        match self {
-            Action::Start => cli.start(),
-            Action::Stop => cli.stop(),
-            Action::Restart => cli.restart(),
-        }
-    }
-}
-
-fn row(title: &str, subtitle: &str) -> adw::ActionRow {
-    adw::ActionRow::builder()
-        .title(title)
-        .subtitle(subtitle)
-        .build()
+/// A toast carrying text we did not write.
+///
+/// CLI messages and filter names contain `&` ("uBlock Origin & AdGuard"), and
+/// `AdwToast:use-markup` defaults to true — left on, Pango fails to parse the
+/// string and the message renders mangled. `use_markup` comes first for the
+/// same reason it does on the filter rows: the title is consumed as it is set.
+pub fn toast(message: &str) -> adw::Toast {
+    adw::Toast::builder().use_markup(false).title(message).build()
 }

@@ -7,8 +7,13 @@
 
 pub mod cli;
 pub mod filters;
+pub mod locale;
 pub mod model;
 pub mod paths;
 
 pub use cli::{Cli, Error};
-pub use model::ProxyStatus;
+pub use filters::Catalogue;
+pub use locale::Locale;
+pub use model::{
+    Filter, FilterAction, FilterCatalogue, FilterGroup, FilterSet, FilterState, ProxyStatus,
+};

@@ -17,7 +17,7 @@
 use std::path::PathBuf;
 use std::process::Command;
 
-use crate::model::ProxyStatus;
+use crate::model::{FilterAction, FilterSet, ProxyStatus};
 use crate::paths;
 
 #[derive(Debug, thiserror::Error)]
@@ -44,6 +44,12 @@ pub enum Error {
 
     #[error("could not interpret output of `adguard-cli {args}`: {output}")]
     Unparseable { args: String, output: String },
+
+    /// A command the CLI accepted but refused to carry out. Exit code was 0
+    /// and the explanation came back on stdout, so `message` is the CLI's own
+    /// wording — suitable to show the user verbatim.
+    #[error("{message}")]
+    Refused { message: String },
 }
 
 /// Captured, ANSI-stripped result of one invocation.
@@ -127,6 +133,72 @@ impl Cli {
     pub fn restart(&self) -> Result<String, Error> {
         Ok(self.run(&["restart"])?.stdout.trim().to_owned())
     }
+
+    /// Add, enable or disable one filter.
+    ///
+    /// Exit status proves nothing here (contract §3): every semantic failure
+    /// prints to stdout and exits 0 —
+    ///
+    /// ```text
+    /// $ adguard-cli filters enable 3        # never added
+    /// Before filters can be enabled, they must be added
+    /// $ adguard-cli filters add 99999       # no such filter
+    /// All specified filters have already been added or do not exist
+    /// ```
+    ///
+    /// So success is defined positively, as the confirmation line the CLI
+    /// prints when it did the work (`Filter [Title: ...] enabled`), and every
+    /// other output shape becomes [`Error::Refused`] carrying the CLI's own
+    /// first line. Treating an unrecognised shape as failure is deliberate:
+    /// the alternative is reporting success for a no-op.
+    ///
+    /// This is an early, explanatory check only — the caller must still
+    /// re-read the database to learn the resulting state.
+    ///
+    /// Negative IDs need no `--` guard: the user-rules sentinel
+    /// (`-2147483648`) is measured to parse as a positional, not a flag.
+    pub fn filter_action(
+        &self,
+        set: FilterSet,
+        action: FilterAction,
+        filter_id: i64,
+    ) -> Result<(), Error> {
+        let filter_id = filter_id.to_string();
+        let mut args = set.cli_prefix().to_vec();
+        args.push(action.subcommand());
+        args.push(&filter_id);
+
+        let out = self.run(&args)?;
+        if confirms(&out.stdout, action.confirmation()) {
+            Ok(())
+        } else {
+            Err(Error::Refused {
+                message: first_line(&out.stdout).unwrap_or_else(|| {
+                    format!("`adguard-cli {}` said nothing at all", args.join(" "))
+                }),
+            })
+        }
+    }
+}
+
+/// Did the CLI confirm it acted, as in `Filter [Title: EasyList] enabled`?
+///
+/// `add` prints two lines — added, then enabled — so a match anywhere in the
+/// output counts. The `Filter [` prefix keeps this from matching the advice
+/// line of a failure ("To add a filter, run `adguard-cli filters add`").
+fn confirms(stdout: &str, verb: &str) -> bool {
+    stdout
+        .lines()
+        .map(str::trim)
+        .any(|line| line.starts_with("Filter [") && line.contains(']') && line.ends_with(verb))
+}
+
+fn first_line(stdout: &str) -> Option<String> {
+    stdout
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(str::to_owned)
 }
 
 /// Strip ANSI escapes from raw process output and lossily decode as UTF-8.
@@ -233,5 +305,66 @@ mod tests {
     fn distinguishes_enabled_from_disabled() {
         assert!(is_enabled("Manual DNS proxy is enabled"));
         assert!(!is_enabled("Manual DNS proxy is disabled"));
+    }
+
+    /// Captured from v1.4.13. `add` confirms twice; the failures are the ones
+    /// that arrive with exit code 0 and must not read as success.
+    const ADDED: &str = "Filter [Title: AdGuard Tracking Protection filter] added\n\
+         Filter [Title: AdGuard Tracking Protection filter] enabled\n";
+    const ENABLED: &str = "Filter [Title: AdGuard Base filter] enabled\n";
+    const DISABLED: &str = "Filter [Title: AdGuard Base filter] disabled\n";
+    const NOT_ADDED: &str = "Before filters can be enabled, they must be added\n\
+         To add a filter, run `adguard-cli filters add`\n";
+    const NO_SUCH_FILTER: &str = "All specified filters have already been added or do not exist\n";
+
+    #[test]
+    fn recognises_each_confirmation() {
+        assert!(confirms(ADDED, FilterAction::Add.confirmation()));
+        assert!(confirms(ENABLED, FilterAction::Enable.confirmation()));
+        assert!(confirms(DISABLED, FilterAction::Disable.confirmation()));
+    }
+
+    /// `add` enables as a side effect, which is what lets one switch flip
+    /// handle a filter that was never subscribed to.
+    #[test]
+    fn add_also_confirms_enabled() {
+        assert!(confirms(ADDED, FilterAction::Enable.confirmation()));
+    }
+
+    /// "disabled" ends in "abled" — close enough to trip a sloppy match.
+    #[test]
+    fn disabled_is_not_read_as_enabled() {
+        assert!(!confirms(DISABLED, FilterAction::Enable.confirmation()));
+        assert!(!confirms(ENABLED, FilterAction::Disable.confirmation()));
+    }
+
+    /// Both of these exit 0. Reporting them as success would leave a switch
+    /// on for a filter that is still off.
+    #[test]
+    fn semantic_failures_are_not_confirmations() {
+        for output in [NOT_ADDED, NO_SUCH_FILTER, "", "\n \n"] {
+            for action in [FilterAction::Add, FilterAction::Enable, FilterAction::Disable] {
+                assert!(
+                    !confirms(output, action.confirmation()),
+                    "{output:?} read as {action:?} success"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn refusal_message_is_the_cli_first_line() {
+        assert_eq!(
+            first_line(NOT_ADDED).as_deref(),
+            Some("Before filters can be enabled, they must be added")
+        );
+        assert_eq!(first_line("\n\n"), None);
+    }
+
+    /// The confirmation arrives bold, like everything else the CLI prints.
+    #[test]
+    fn confirmation_survives_ansi_stripping() {
+        let bold = "Filter [Title: \x1b[1mAdGuard Base filter\x1b[0m] enabled\n";
+        assert!(confirms(&stripped(bold), FilterAction::Enable.confirmation()));
     }
 }

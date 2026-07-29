@@ -124,7 +124,9 @@ Row 216's title is 62 characters. There is no delimiter between title and status
 | `filter` | 86 / 65 | The catalogue and its state |
 | `filter_group` | 8 / 5 | Categories (`group_id`, `name`, `display_number`) |
 | `filter_localisation` | 3828 / 1900 | Translated `name`/`description` per `lang` |
-| `filter_tag`, `filter_filter_tag` | 71 / 19 | Tagging |
+| `filter_group_localisation` | — | Translated category headings per `lang` |
+| `filter_tag`, `filter_filter_tag`, `filter_tag_localisation` | 71 / 19 | Tagging |
+| `filter_locale`, `filter_includes` | — | Language targeting; filter composition |
 | `rules_list`, `diff_updates`, `metadata` | — | Internal |
 
 `filter` columns:
@@ -153,6 +155,37 @@ Consequences, both encoded in `adguard-core`:
 - Any join or lookup of `filter.group_id` against `filter_group` must exclude the user-rules row first, or it will fail to resolve group 0.
 
 `Catalogue::filters()` therefore excludes `filter_id = Filter::USER_RULES_ID` and exposes it separately via `Catalogue::user_rules()`, since it belongs in the UI as a "your own rules" toggle rather than as a subscribable list.
+
+### Localisation tags are POSIX, not BCP-47
+
+`filter_localisation.lang` and `filter_group_localisation.lang` use an underscore and an uppercase region — `en`, `pl`, `pt_BR`, `pt_PT`, `es_ES`, `zh_TW` (44 languages in `agflm_standard.db`, 34 in `agflm_dns.db`). A hyphenated `pt-BR` matches **nothing**, and because a missing translation is not an error, the failure is silent: every name quietly falls back to English.
+
+So a locale must be normalised before use, and looked up twice — full tag, then bare language — since region-specific rows are the exception. `agflm_standard.db` also has one `filter` row with no `en` row at all (the user-rules pseudo-filter), so the English `filter.title` column remains the last fallback. This is [`locale::Locale`](../crates/adguard-core/src/locale.rs), and the two lookups are the two `LEFT JOIN`s in `filters.rs`.
+
+### Writing filter state
+
+Measured on v1.4.13. All four commands exit **0**, including the failures.
+
+| Invocation | stdout | Effect |
+| --- | --- | --- |
+| `filters add 3` (not installed) | `Filter [Title: …] added` + `Filter [Title: …] enabled` | `is_installed=1`, `is_enabled=1` |
+| `filters add 2` (already installed) | the same two lines | nothing — the message is not evidence |
+| `filters add 99999` | `All specified filters have already been added or do not exist` | nothing |
+| `filters enable 3` (not installed) | `Before filters can be enabled, they must be added` | **nothing** |
+| `filters enable 3` (installed) | `Filter [Title: …] enabled` | `is_enabled=1` |
+| `filters disable 3` | `Filter [Title: …] disabled` | `is_enabled=0`, `is_installed` **stays 1** |
+| `filters remove 3` | `Filter [ID: 3, Title: …] removed` | `is_installed=0` |
+
+Consequences for a switch-per-filter UI:
+
+- **Turning a switch on is not always `enable`.** For a filter that was never added it must be `add`, which adds *and* enables in one step. `Filter::action_for` encodes this.
+- **Turning a switch off is `disable`, never `remove`** — off should not silently unsubscribe.
+- **`add`'s confirmation is unreliable**: it prints the same two lines whether it did anything or not. Since it cannot distinguish a no-op, success must be read from the database, not the message.
+- The confirmation shape is `Filter [<something>] <verb>`. Matching that positively — and treating every other shape as failure — is the only way to tell the refusals apart from the successes, since both exit 0.
+- The database is updated **immediately**, and while the proxy is **stopped**. No restart is needed for the UI to observe a change.
+- Negative IDs need no `--` guard: `filters enable -2147483648` parses as a positional, not a flag, and resolves to `User rules`. (`filters enable 'User rules'` works too — the argument is `TEXT`, matched against ID *or* title.)
+
+**The DNS user-rules row cannot be enabled this way.** In `agflm_dns.db` it is `is_enabled=1, is_installed=0`, and `dns filters enable -2147483648` is refused with *"Before filters can be enabled, they must be added"*. Its real switch is the presence of `dns_user.txt` in the `dns_filtering.filters` list in `proxy.yaml` (`user.txt` sits in the top-level `filters` list the same way), which means `config list-add` / `list-remove`. The HTTP row does not have this problem — it is `is_installed=1`, so `filters enable|disable` drives it. Solve the DNS case when the DNS page lands.
 
 **Open these read-only** (`file:...?mode=ro`, `rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY`). They are the daemon's live databases; never write to them. All mutations go through `filters add|remove|enable|disable|set-trusted|set-title`.
 
