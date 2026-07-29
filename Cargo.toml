@@ -1,0 +1,29 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/adguard-core",
+    "crates/adguard-gui",
+    "crates/adguard-tray",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+rust-version = "1.85"
+
+[workspace.dependencies]
+adguard-core = { path = "crates/adguard-core" }
+
+# GUI
+gtk4 = { version = "0.11", features = ["v4_10"] }
+libadwaita = { version = "0.9", features = ["v1_7"] }
+
+# tray
+ksni = "0.3"
+
+# plumbing
+async-channel = "2"
+strip-ansi-escapes = "0.2"
+thiserror = "2"
+rusqlite = { version = "0.37", features = ["bundled"] }

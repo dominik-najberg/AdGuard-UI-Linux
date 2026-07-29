@@ -1,0 +1,12 @@
+[package]
+name = "adguard-core"
+description = "Logic layer for AdGuard UI: adguard-cli process wrapper, config and filter reads"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+strip-ansi-escapes.workspace = true
+thiserror.workspace = true
+rusqlite.workspace = true

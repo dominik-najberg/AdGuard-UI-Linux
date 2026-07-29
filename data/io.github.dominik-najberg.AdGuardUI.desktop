@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=AdGuard UI
+GenericName=Ad Blocker Settings
+Comment=Desktop front-end for AdGuard CLI
+Exec=adguard-ui
+Icon=io.github.dominik-najberg.AdGuardUI
+Terminal=false
+Categories=Network;Security;GTK;
+Keywords=adguard;adblock;proxy;filter;privacy;
+StartupNotify=true
+# Must equal the GTK application ID and this file's basename, or GNOME fails to
+# group the window with its pinned launcher and shows a duplicate icon.
+StartupWMClass=io.github.dominik-najberg.AdGuardUI

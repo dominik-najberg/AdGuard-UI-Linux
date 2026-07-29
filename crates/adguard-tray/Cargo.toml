@@ -1,0 +1,16 @@
+[package]
+name = "adguard-tray"
+description = "StatusNotifierItem tray indicator for AdGuard UI"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "adguard-tray"
+path = "src/main.rs"
+
+[dependencies]
+adguard-core.workspace = true
+ksni.workspace = true
+tokio = { version = "1", features = ["rt", "macros", "time"] }

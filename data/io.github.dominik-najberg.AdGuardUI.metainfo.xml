@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.dominik-najberg.AdGuardUI</id>
+
+  <name>AdGuard UI</name>
+  <summary>Desktop front-end for AdGuard CLI</summary>
+
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+
+  <description>
+    <p>
+      A GTK4 and libadwaita interface for controlling AdGuard CLI on Linux:
+      start and stop the filtering proxy, manage filter lists, and configure
+      protection settings without using the terminal.
+    </p>
+    <p>
+      This is an unofficial, community-built interface. It requires AdGuard CLI
+      to be installed separately and is not affiliated with or endorsed by
+      AdGuard.
+    </p>
+  </description>
+
+  <launchable type="desktop-id">io.github.dominik-najberg.AdGuardUI.desktop</launchable>
+
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+    <control>touch</control>
+  </supports>
+
+  <releases>
+    <release version="0.1.0" type="development">
+      <description>
+        <p>Initial scaffold: proxy status display and lifecycle control.</p>
+      </description>
+    </release>
+  </releases>
+</component>

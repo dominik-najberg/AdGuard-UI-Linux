@@ -1,0 +1,17 @@
+[package]
+name = "adguard-gui"
+description = "GTK4/libadwaita desktop front-end for AdGuard CLI"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "adguard-ui"
+path = "src/main.rs"
+
+[dependencies]
+adguard-core.workspace = true
+gtk4.workspace = true
+libadwaita.workspace = true
+async-channel.workspace = true
