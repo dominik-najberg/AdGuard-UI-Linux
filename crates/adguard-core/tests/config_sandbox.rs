@@ -856,13 +856,13 @@ fn list_remove_of_an_absent_value_is_a_silent_success() {
     );
 }
 
-/// Emptying the list writes a bare `filters:` — a YAML null, not `[]` — so
-/// `list_at` answers `None` for a list the user just successfully emptied.
-/// `Config::lists` is the read that survives it; this test is what stops
-/// someone "simplifying" it back into `list_at`.
+/// Emptying a list writes `filters: []`, which reads back cleanly — despite an
+/// echo that prints a bare `filters:` and looks like a null. This asserts the
+/// bytes rather than the message, which is the whole point: an earlier version
+/// of this suite recorded the echo and got the claim backwards.
 #[test]
 #[ignore = "invokes the real adguard-cli"]
-fn emptying_a_list_leaves_a_null_that_lists_still_reads() {
+fn emptying_a_list_leaves_a_readable_empty_list() {
     let Some(sandbox) = Sandbox::new("list-empty") else { return };
 
     let seeded = sandbox.config();
@@ -879,15 +879,23 @@ fn emptying_a_list_leaves_a_null_that_lists_still_reads() {
             .unwrap_or_else(|err| panic!("list-remove {entry} refused: {err}"));
     }
 
+    let text = std::fs::read_to_string(sandbox.config_path()).expect("read sandbox config");
+    assert!(
+        text.contains("filters: []"),
+        "an emptied list should be written as `[]`; the file says: {:?}",
+        text.lines().find(|line| line.contains("filters:")),
+    );
+
     let config = sandbox.config();
+    assert_eq!(
+        config.list_at(key::DNS_FILTERS).as_deref(),
+        Some(&[][..]),
+        "an emptied list must still read as a list"
+    );
     assert_eq!(
         config.lists(key::DNS_FILTERS, "dns_user.txt"),
         Some(false),
         "an emptied list must read as empty, never as unreadable"
-    );
-    eprintln!(
-        "after emptying, list_at reads {:?} — `lists` is what makes that harmless",
-        config.list_at(key::DNS_FILTERS)
     );
 }
 

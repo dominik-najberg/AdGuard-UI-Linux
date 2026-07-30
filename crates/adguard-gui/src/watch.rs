@@ -25,6 +25,7 @@ use gtk::prelude::*;
 use gtk4 as gtk;
 
 use crate::advanced::AdvancedPage;
+use crate::dns::DnsPage;
 use crate::protection::ProtectionPage;
 use crate::status::StatusPage;
 use crate::worker;
@@ -55,6 +56,9 @@ struct State {
     /// Every table-driven page. Both render from `proxy.yaml`, so both are
     /// reconciled from one reading of it.
     tables: Vec<Rc<AdvancedPage>>,
+    /// Its settings half renders from `proxy.yaml` too; its catalogue half
+    /// does not, and is left alone by this.
+    dns: Rc<DnsPage>,
 }
 
 /// Start watching, returning `None` if the file cannot be located or the
@@ -66,6 +70,7 @@ pub fn install(
     status: &Rc<StatusPage>,
     protection: &Rc<ProtectionPage>,
     tables: &[Rc<AdvancedPage>],
+    dns: &Rc<DnsPage>,
 ) -> Option<ConfigWatch> {
     let mut watch = Watch::on_config()?;
     let file = gio::File::for_path(watch.path());
@@ -90,6 +95,7 @@ pub fn install(
         status: status.clone(),
         protection: protection.clone(),
         tables: tables.to_vec(),
+        dns: dns.clone(),
     });
 
     monitor.connect_changed({
@@ -145,6 +151,7 @@ fn look(state: &Rc<State>) {
                 for page in &state.tables {
                     page.reconcile(&config);
                 }
+                state.dns.reconcile(&config);
             }
 
             // Something arrived mid-read; the file may have moved again since.

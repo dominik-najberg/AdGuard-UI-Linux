@@ -193,13 +193,16 @@ impl Config {
     ///
     /// `None` only when the key holds something that cannot be a list at all —
     /// a scalar, or a mapping. An **absent** key and a **null** one both answer
-    /// `Some(false)`, and the distinction matters more than it looks:
-    /// `config list-remove` of the last element leaves a bare `filters:`, which
-    /// is `Yaml::Null`, so [`Self::list_at`] returns `None` for a list the user
-    /// just successfully emptied. Rendering that by the usual "None means
-    /// unavailable" rule would grey out the row at the exact moment it worked,
-    /// and the next invocation of anything rewrites the key as `[]` and heals
-    /// it — so the bug would vanish before anyone could reproduce it.
+    /// `Some(false)`, because both have an unambiguous reading: whatever is
+    /// being looked for, it is not in there.
+    ///
+    /// The null case comes from a hand edit rather than from the CLI. Emptying
+    /// a list with `config list-remove` writes `filters: []`, which
+    /// [`Self::list_at`] reads perfectly well — the command's *echo* prints a
+    /// bare `filters:` and looks like a null, which is a different thing and
+    /// has misled at least one reader of this crate. A bare `filters:` typed by
+    /// hand is still `Yaml::Null` though, and `list_at` cannot read it, which
+    /// is the gap this method closes.
     ///
     /// Entries are compared trimmed. `list_at` already drops non-string
     /// entries, so a hand-written `- 53` is invisible here; that is the same

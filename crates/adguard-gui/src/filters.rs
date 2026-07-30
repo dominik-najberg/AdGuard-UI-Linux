@@ -37,6 +37,29 @@ struct Row {
     filter: RefCell<Filter>,
 }
 
+/// What a page hosting a catalogue contributes to it, and what it takes over.
+///
+/// The DNS page needs both halves. Its settings come from `proxy.yaml` and the
+/// catalogue from `agflm_dns.db`, and they belong in one scrolling page rather
+/// than two — so the host supplies the groups that go above, and says that the
+/// user-rules row is its own.
+pub struct Host {
+    /// Groups rendered above the catalogue. Called on every build, and must
+    /// return **fresh** widgets each time: the page they were added to is
+    /// dropped when the catalogue is rebuilt, and a widget cannot be re-parented
+    /// out of a dying one.
+    pub prelude: Box<dyn Fn() -> Vec<adw::PreferencesGroup>>,
+
+    /// The host renders the user-rules row itself, so the catalogue must not.
+    ///
+    /// Set for DNS, where the built-in row is wrong three ways over: the
+    /// database has it permanently `is_enabled = 1`, `Filter::action_for` would
+    /// send `dns filters enable -2147483648`, which is refused outright
+    /// (contract §6), and the verification read afterwards looks at a database
+    /// that cannot see the `proxy.yaml` list where the real switch lives.
+    pub owns_user_rules: bool,
+}
+
 pub struct FiltersPage {
     /// The page content is swapped wholesale — spinner, error, or catalogue —
     /// which is simpler and less error-prone than reconciling child lists.
@@ -50,10 +73,21 @@ pub struct FiltersPage {
     /// tell a user's click from our own reconcile. Property notifications are
     /// synchronous, so a plain flag around the write is enough.
     reconciling: Cell<bool>,
+    host: Option<Host>,
 }
 
 impl FiltersPage {
     pub fn new(cli: Cli, toasts: adw::ToastOverlay, set: FilterSet) -> Rc<Self> {
+        Self::hosted(cli, toasts, set, None)
+    }
+
+    /// A catalogue rendered inside another page's content. See [`Host`].
+    pub fn hosted(
+        cli: Cli,
+        toasts: adw::ToastOverlay,
+        set: FilterSet,
+        host: Option<Host>,
+    ) -> Rc<Self> {
         let this = Rc::new(Self {
             bin: adw::Bin::new(),
             cli,
@@ -62,6 +96,7 @@ impl FiltersPage {
             locale: Locale::from_env(),
             rows: RefCell::new(HashMap::new()),
             reconciling: Cell::new(false),
+            host,
         });
         this.reload();
         this
@@ -109,8 +144,18 @@ impl FiltersPage {
 
         let page = adw::PreferencesPage::new();
 
+        // The host's groups go above the catalogue, and are rebuilt with it.
+        if let Some(host) = &self.host {
+            for group in (host.prelude)() {
+                page.add(&group);
+            }
+        }
+
+        let host_owns_user_rules = self.host.as_ref().is_some_and(|host| host.owns_user_rules);
         if let Some(user_rules) = &loaded.catalogue.user_rules {
-            page.add(&self.user_rules_group(user_rules, loaded));
+            if !host_owns_user_rules {
+                page.add(&self.user_rules_group(user_rules, loaded));
+            }
         }
 
         for (group, filters) in loaded.catalogue.grouped() {

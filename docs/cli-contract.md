@@ -288,7 +288,7 @@ A handful of keys hold YAML sequences rather than scalars — `filters`, `usersc
 | `list-add -- dns_filtering.filters extra.txt` | 0 | the whole list, then `Config has been updated` | **one** line added |
 | `list-add` of a value **already in the list** | 0 | the same shape, showing the value twice | **a duplicate is appended** |
 | `list-remove` of a value **not** in the list | 0 | the unchanged list + `Config has been updated` | nothing |
-| `list-remove` of the **last** element | 0 | `filters:` with nothing after it | the key is left **null**, not `[]` |
+| `list-remove` of the **last** element | 0 | `filters:` with nothing after it | the file gets `filters: []` |
 | `list-add -- <a scalar key> <value>` | 0 | `This field is not a list setting` + advice to use `config set` | nothing |
 | `list-add <key> -leading-dash` (no `--`) | **1** | *(empty)* — `<value> is required` on **stderr** | nothing |
 
@@ -298,7 +298,11 @@ Five things follow, and three of them are traps.
 
 **`list-add` does not deduplicate.** Adding a value the list already holds appends it a second time and reports success, which makes the confirmation line useless as evidence yet again. Anything driving a *toggle* off a list — the DNS user-rules row is exactly this — must read the list, decide membership itself, and issue the call only when it would change something. Re-issuing on a stale read silently corrupts the list rather than no-opping.
 
-**Removing the last element leaves a null, and a null is not an empty list.** The key becomes a bare `filters:`, which `yaml-rust2` reads as `Yaml::Null`, so `Config::list_at` — which matches `Yaml::Array` only — answers `None`. `None` is the crate's "unreadable" answer, so a row rendering it by the usual rule would go *unavailable* the instant the user emptied the list, having just successfully emptied it. The next invocation normalises the key to `[]` (§5, "every invocation rewrites `proxy.yaml`"), so the state is transient — which makes it worse, not better, because it heals before anyone investigating can see it. A membership test therefore has to read null and absent as *"the list does not contain this"*, and reserve `None` for a key that is a scalar or a mapping — something that genuinely cannot be interpreted as a list at all.
+**Emptying the list is safe, and the echo says otherwise.** The file gets a proper `filters: []`, which `Config::list_at` reads as `Some(vec![])` and a row renders as *off*, correctly. What the command *prints* is `filters:` with nothing after it — the echo's rendering of an empty sequence, not the bytes it wrote.
+
+That gap is worth stating because an earlier revision of this section got it wrong in exactly that way: the echo was read as the outcome, and a whole paragraph was written about a null the file never contained. **Read the file, not the confirmation** — the rule this document already gives for `config set` applies just as much to a command whose echo happens to look like YAML.
+
+A bare `filters:` *is* still reachable, by hand edit, and it reads as `Yaml::Null`, which `list_at` — matching `Yaml::Array` only — answers `None` for. Since `None` is this crate's "unreadable" answer, a membership test should read null and absent as *"the list does not contain this"* and reserve `None` for a scalar or a mapping, which genuinely cannot be a list. `Config::lists` does that; it is a smaller point than the retracted one, but it is the right behaviour for a file the CLI invites the user to edit.
 
 **The `--` guard is mandatory here too**, and for the same reason: without it a value beginning with `-` is read as an option and the command exits 1 with `<value> is required` on stderr, writing nothing. `Cli::config_list` applies it unconditionally, exactly as `Cli::config_set` does. Note the usage dump also reveals `list-add` accepts **up to three values** in one call and carries a `--list-file` option. Use one value per call regardless: a three-value call whose middle value is refused cannot be attributed.
 

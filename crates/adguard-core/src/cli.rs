@@ -636,16 +636,13 @@ impl Cli {
     /// unchanged list echoed, `Config has been updated` — so this is safe to
     /// issue speculatively in a way [`Self::list_add`] is not.
     ///
-    /// # Emptying the list leaves a null, not `[]`
+    /// # The echo of an empty list is not what lands in the file
     ///
-    /// Removing the **last** element writes a bare `filters:`, which reads back
-    /// as `Yaml::Null` rather than an empty sequence, so
-    /// [`crate::config::Config::list_at`] answers `None` — the crate's
-    /// "unreadable" answer — for a list the caller just successfully emptied.
-    /// The next invocation of anything normalises the key to `[]`, which makes
-    /// the state transient and therefore easy to miss.
-    /// [`crate::config::Config::lists`] is the membership test that reads it
-    /// correctly; do not ask `list_at` this question directly.
+    /// Removing the **last** element prints `filters:` with nothing after it,
+    /// which looks like a null. The file gets a proper `filters: []`, which
+    /// [`crate::config::Config::list_at`] reads as `Some(vec![])`. An earlier
+    /// revision of this comment believed the echo; re-read the file, as for
+    /// every other write in this module.
     pub fn list_remove(&self, key: &str, value: &str) -> Result<Applied, Error> {
         self.config_list("list-remove", key, value)
     }

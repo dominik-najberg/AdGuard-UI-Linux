@@ -6,6 +6,7 @@
 //! measured CLI behaviour the wrapper encodes.
 
 mod advanced;
+mod dns;
 mod filters;
 mod protection;
 mod status;
@@ -326,7 +327,7 @@ fn missing_cli_view(message: &str) -> adw::ToolbarView {
 }
 
 /// Sidebar entries, in order. The id doubles as the stack child name.
-const PAGES: [Page; 5] = [
+const PAGES: [Page; 6] = [
     Page {
         id: "status",
         title: "Status",
@@ -341,6 +342,11 @@ const PAGES: [Page; 5] = [
         id: "filters",
         title: "Filters",
         icon: "view-list-symbolic",
+    },
+    Page {
+        id: "dns",
+        title: "DNS",
+        icon: "network-server-symbolic",
     },
     Page {
         id: "stealth",
@@ -380,9 +386,12 @@ fn main_view(cli: &Cli) -> MainView {
 
     let status = status::StatusPage::new(cli.clone(), toasts.clone());
     let protection = protection::ProtectionPage::new(cli.clone(), toasts.clone());
-    // The DNS catalogue gets its own page later: its user-rules row cannot be
-    // enabled through `dns filters enable` (see docs/cli-contract.md §6).
     let filters = filters::FiltersPage::new(cli.clone(), toasts.clone(), FilterSet::Http);
+    // The DNS catalogue plus the `dns_filtering` settings around it, on one
+    // page: its user-rules row cannot go through `dns filters enable`
+    // (contract §6), so that page owns the row and writes it with the list
+    // commands instead.
+    let dns = dns::DnsPage::new(cli.clone(), toasts.clone());
     let advanced = advanced::AdvancedPage::new(cli.clone(), toasts.clone(), &ADVANCED);
     // The same page against a different table: 26 settings behind the one
     // stealth switch Protection shows (handoff §3 gap 4). The master switch
@@ -393,8 +402,9 @@ fn main_view(cli: &Cli) -> MainView {
     stack.add_named(status.widget(), Some(PAGES[0].id));
     stack.add_named(protection.widget(), Some(PAGES[1].id));
     stack.add_named(filters.widget(), Some(PAGES[2].id));
-    stack.add_named(stealth.widget(), Some(PAGES[3].id));
-    stack.add_named(advanced.widget(), Some(PAGES[4].id));
+    stack.add_named(&dns.widget(), Some(PAGES[3].id));
+    stack.add_named(stealth.widget(), Some(PAGES[4].id));
+    stack.add_named(advanced.widget(), Some(PAGES[5].id));
     toasts.set_child(Some(&stack));
 
     let content_header = adw::HeaderBar::new();
@@ -414,9 +424,11 @@ fn main_view(cli: &Cli) -> MainView {
         let filters = filters.clone();
         let advanced = advanced.clone();
         let stealth = stealth.clone();
+        let dns = dns.clone();
         move |_| match stack.visible_child_name().as_deref() {
             Some("protection") => protection.reload(),
             Some("filters") => filters.reload(),
+            Some("dns") => dns.reload(),
             Some("stealth") => stealth.reload(),
             Some("advanced") => advanced.reload(),
             _ => status.reload(),
@@ -472,7 +484,7 @@ fn main_view(cli: &Cli) -> MainView {
 
     // After the pages are built, so priming the snapshot cannot race the first
     // render, and so a repaint always has rows to patch rather than a spinner.
-    let watch = watch::install(&status, &protection, &[advanced, stealth]);
+    let watch = watch::install(&status, &protection, &[advanced, stealth], &dns);
 
     MainView {
         root: split,
