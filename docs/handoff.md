@@ -15,6 +15,7 @@ Working state as of the commit that added `--background` and the autostart entry
 | Filters (HTTP) | Done. SQLite-backed catalogue with localised names. |
 | Advanced | Done. Ports, listen address, auth, outbound proxy, worker threads, log level. |
 | Tray | Done. Start/stop plus the six Protection toggles, in the GUI process. |
+| Config monitor | Done. External edits to `proxy.yaml` reconcile Protection and Advanced live, without churning on our own CLI traffic. |
 | Autostart | Done. `--background` starts windowless; `data/autostart/` installs into `~/.config/autostart/`. |
 | DNS | Not started. |
 | Userscripts | Not started. |

@@ -9,6 +9,7 @@ mod advanced;
 mod filters;
 mod protection;
 mod status;
+mod watch;
 mod worker;
 
 use std::cell::RefCell;
@@ -358,6 +359,10 @@ struct MainView {
     root: adw::NavigationSplitView,
     status: Rc<status::StatusPage>,
     protection: Rc<protection::ProtectionPage>,
+    /// The `proxy.yaml` subscription. Dropping it ends the subscription, so it
+    /// lives exactly as long as the pages it reconciles — and it is what keeps
+    /// the Advanced page reachable, since nothing else here holds one.
+    _watch: Option<watch::ConfigWatch>,
 }
 
 fn main_view(cli: &Cli) -> MainView {
@@ -438,10 +443,15 @@ fn main_view(cli: &Cli) -> MainView {
     sidebar_view.set_content(Some(&sidebar));
     split.set_sidebar(Some(&adw::NavigationPage::new(&sidebar_view, "AdGuard UI")));
 
+    // After the pages are built, so priming the snapshot cannot race the first
+    // render, and so a repaint always has rows to patch rather than a spinner.
+    let watch = watch::install(&protection, &advanced);
+
     MainView {
         root: split,
         status,
         protection,
+        _watch: watch,
     }
 }
 

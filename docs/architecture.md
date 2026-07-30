@@ -77,12 +77,14 @@ Three channels, each with a single direction and purpose:
 There is no push/event mechanism anywhere in the CLI, so:
 
 - **Runtime status** — poll `adguard-cli status` on a ~2 s timer while a window is open; slow to ~10 s when only the tray is visible. At 10 ms per call this is negligible. Implemented in `status.rs` as one tick in five while the window is hidden, which is only possible because the tray shares this process (§4).
-- **Config** — watch `proxy.yaml` with `gio::FileMonitor`. External edits (the user is expected to hand-edit; the CLI even suggests it) then appear live in the UI.
+- **Config** — watched with `gio::FileMonitor`, in `adguard-gui/src/watch.rs`. External edits (the user is expected to hand-edit; the CLI even suggests it) appear live in the UI.
 - **Filters** — watch the `.db` files with the same mechanism, debounced; the daemon rewrites them on update.
 
 **A file monitor on `proxy.yaml` cannot trust its events.** Measured (contract §5): *every* `adguard-cli` invocation rewrites the file and touches its mtime, even `--version`, and even when no byte changes. Combined with the 2 s `status` poll above, a naive monitor would fire continuously against changes we caused ourselves — and each reload would repaint the page under the user's pointer.
 
-So the monitor must compare content, not react to notification: keep a hash of the last-read file and ignore events where it has not moved. Debouncing alone does not help, because the churn never stops. The same measurement has a small silver lining — a key deleted from the file is silently restored with its default by the next invocation, so a missing setting is self-healing.
+So the monitor compares content, not notification: `config::Watch` holds the text behind the last reading and answers whether anything actually moved, and that answer — not the event — drives the repaint. Debouncing alone would not help, because the churn never stops. Measured with the app running: 40 s of idling moves the mtime and produces no reconcile at all; an edit produces exactly one; a bare `touch` produces none. The same measurement has a small silver lining — a key deleted from the file is silently restored with its default by the next invocation, so a missing setting is self-healing.
+
+A repaint driven from outside goes to `reconcile`, never `reload`: reload swaps in a spinner and rebuilds every widget, which would discard the Advanced page's per-row `painted` guard and with it any half-typed entry. The one case that does rebuild is a page showing a spinner or an error, which has no rows to patch — so a config that was unreadable and becomes readable heals itself.
 
 ### Verify, don't trust
 

@@ -32,6 +32,7 @@ Done already, this session:
 | --- | --- |
 | `5ebe8d7` | Every CLI invocation is bounded in time — closes the `cli.rs` TODO and handoff §3 gap 2 |
 | `a9a03ff` | That bound can no longer hang on a descendant holding the pipe |
+| *item 1* | The `proxy.yaml` config monitor — acceptance test met: 40 s idle with the mtime moving produces zero reconciles, an edit produces exactly one, a bare `touch` produces none |
 
 Remaining, in order. Each lands as its own commit with its own proof.
 

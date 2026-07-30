@@ -487,6 +487,91 @@ pub fn listen_address_plan(address: &str, auth: AuthState) -> AddressPlan {
     AddressPlan::Calls(calls)
 }
 
+/// Notices when `proxy.yaml` has actually *changed*.
+///
+/// # Why a file monitor cannot trust its own events
+///
+/// Every `adguard-cli` invocation rewrites `proxy.yaml` and touches its mtime —
+/// `--version` included, and even when not one byte differs (contract §5). The
+/// app polls `status` every 2 s with a window open, so a `gio::FileMonitor`
+/// wired straight to a repaint would fire against the app's own traffic, for
+/// the whole life of the session, redrawing pages under the user's pointer.
+/// Debouncing does not help: the churn never stops, so there is no quiet period
+/// to debounce *to*.
+///
+/// So the event is only a prompt to look. The content decides.
+///
+/// # Bytes, not a digest
+///
+/// The file is ~9 KB. Comparing it whole costs less than the read that produced
+/// it, needs no hashing crate, and cannot collide — an edit that a digest
+/// happened to hash identically would be an edit the UI silently ignored.
+pub struct Watch {
+    path: PathBuf,
+    /// The text behind the last [`Config`] this handed out.
+    ///
+    /// Held as the raw text rather than the parsed value because that is what
+    /// the comparison needs, and because `Config` is a lossy view of it: two
+    /// different files can parse to the same tree, and one of them may be the
+    /// user's comments.
+    seen: Option<String>,
+}
+
+impl Watch {
+    /// Start watching, having seen nothing. The first [`Self::changed`] call
+    /// therefore reports a change — which is what a caller priming itself at
+    /// startup wants.
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self {
+            path: path.into(),
+            seen: None,
+        }
+    }
+
+    /// Watch AdGuard's own `proxy.yaml`.
+    pub fn on_config() -> Option<Self> {
+        paths::config_file().map(Self::new)
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Record the file as it is now, without reporting it.
+    ///
+    /// For a caller that has just read the file itself and only wants to hear
+    /// about what happens *next*. Priming with [`Self::changed`] instead would
+    /// hand back a change that is really the state already on screen — costing
+    /// a redundant repaint, and making a startup indistinguishable from an edit
+    /// in whatever the caller does with the answer.
+    pub fn prime(&mut self) {
+        let _ = self.changed();
+    }
+
+    /// Re-read the file, and return a [`Config`] only if the bytes moved.
+    ///
+    /// `None` covers four cases that all mean "nothing to repaint from":
+    /// unchanged, unreadable, absent, and unparseable.
+    ///
+    /// The snapshot advances **only on a successful parse**. The CLI rewrites
+    /// this file in place, so a read can catch it half-written; storing that
+    /// text would mean the completed write — differing from the torn read —
+    /// looked like just another change, but storing *nothing* means the next
+    /// look tries again. It also makes a genuinely malformed file retry
+    /// harmlessly rather than latch.
+    pub fn changed(&mut self) -> Option<Config> {
+        let text = std::fs::read_to_string(&self.path).ok()?;
+        if self.seen.as_deref() == Some(text.as_str()) {
+            return None;
+        }
+
+        // Parse before storing: see above.
+        let config = Config::parse(&text, &self.path).ok()?;
+        self.seen = Some(text);
+        Some(config)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -933,5 +1018,90 @@ stealthmode:
                 "{address} should always be reachable",
             );
         }
+    }
+
+    // ---- Watch ----
+
+    /// A `proxy.yaml` in a directory of its own, so these can run in parallel.
+    fn scratch(name: &str, text: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("adguard-watch-{name}"));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let path = dir.join("proxy.yaml");
+        std::fs::write(&path, text).expect("write scratch config");
+        path
+    }
+
+    /// The whole reason this type exists. Every `adguard-cli` invocation
+    /// rewrites the file without changing it, and the app causes one every
+    /// 2 seconds — if a byte-identical rewrite read as a change, the pages
+    /// would repaint continuously for the life of the session.
+    #[test]
+    fn a_byte_identical_rewrite_is_not_a_change() {
+        let path = scratch("identical", SAMPLE);
+        let mut watch = Watch::new(&path);
+        assert!(watch.changed().is_some(), "the first look primes");
+
+        for _ in 0..5 {
+            std::fs::write(&path, SAMPLE).expect("rewrite");
+            assert!(
+                watch.changed().is_none(),
+                "an unchanged rewrite must not read as a change"
+            );
+        }
+    }
+
+    #[test]
+    fn a_real_edit_is_a_change() {
+        let path = scratch("edited", SAMPLE);
+        let mut watch = Watch::new(&path);
+        watch.changed().expect("prime");
+
+        std::fs::write(&path, SAMPLE.replace("proxy_mode: 'manual'", "proxy_mode: 'auto'"))
+            .expect("edit");
+        let config = watch.changed().expect("an edit should be seen");
+        assert_eq!(config.proxy_mode(), Some("auto"));
+        assert!(watch.changed().is_none(), "and only once");
+    }
+
+    /// A comment-only edit changes no value, but the file did move — reporting
+    /// it costs one repaint that renders identically, while suppressing it
+    /// would mean diffing parsed trees and guessing what counts.
+    #[test]
+    fn a_comment_only_edit_is_still_a_change() {
+        let path = scratch("comment", SAMPLE);
+        let mut watch = Watch::new(&path);
+        watch.changed().expect("prime");
+
+        std::fs::write(&path, format!("# a note to self\n{SAMPLE}")).expect("edit");
+        assert!(watch.changed().is_some());
+    }
+
+    /// A torn read must not become the baseline: the completed write would then
+    /// look like an ordinary change, and a file that is briefly invalid must
+    /// not latch the watch into ignoring it.
+    #[test]
+    fn a_broken_file_does_not_advance_the_snapshot() {
+        let path = scratch("broken", SAMPLE);
+        let mut watch = Watch::new(&path);
+        watch.changed().expect("prime");
+
+        std::fs::write(&path, "listen_ports:\n  - [unclosed\n").expect("write junk");
+        assert!(watch.changed().is_none(), "unparseable yields nothing");
+        assert!(watch.changed().is_none(), "and stays that way while it is");
+
+        std::fs::write(&path, SAMPLE.replace("proxy_mode: 'manual'", "proxy_mode: 'auto'"))
+            .expect("repair");
+        let config = watch
+            .changed()
+            .expect("the repaired file must still be seen as a change");
+        assert_eq!(config.proxy_mode(), Some("auto"));
+    }
+
+    #[test]
+    fn a_missing_file_is_not_a_change() {
+        let path = std::env::temp_dir().join("adguard-watch-absent/proxy.yaml");
+        let _ = std::fs::remove_file(&path);
+        let mut watch = Watch::new(&path);
+        assert!(watch.changed().is_none());
     }
 }

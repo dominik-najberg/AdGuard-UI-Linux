@@ -13,7 +13,7 @@ pub mod model;
 pub mod paths;
 
 pub use cli::{Applied, Cli, Error};
-pub use config::{AddressPlan, AuthState, Config};
+pub use config::{AddressPlan, AuthState, Config, Watch};
 pub use filters::Catalogue;
 pub use locale::Locale;
 pub use model::{

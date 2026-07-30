@@ -167,6 +167,26 @@ impl AdvancedPage {
         );
     }
 
+    /// Repaint from a reading of `proxy.yaml` that this page did not ask for.
+    ///
+    /// The external-edit entry point, driven by [`crate::watch`]. Deliberately
+    /// not `reload`: that swaps in a spinner and rebuilds every widget, which
+    /// on this page loses nothing but on Advanced discards the `painted` guard
+    /// and with it any half-typed entry. `apply` patches the rows in place and
+    /// already skips any row with a write in flight.
+    ///
+    /// The one case that does need a rebuild is a page showing a spinner or an
+    /// error, which has no rows to patch — so an unreadable config that becomes
+    /// readable heals itself rather than staying stuck on "unavailable".
+    pub fn reconcile(self: &Rc<Self>, config: &Config) {
+        let unbuilt = self.rows.borrow().is_empty();
+        if unbuilt {
+            self.reload();
+        } else {
+            self.apply(config);
+        }
+    }
+
     fn build(self: &Rc<Self>, config: &Config) -> adw::PreferencesPage {
         self.rows.borrow_mut().clear();
         self.listen_group.replace(None);
