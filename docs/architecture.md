@@ -112,6 +112,16 @@ So the GUI binary owns the process, and `adguard-tray` is a library holding the 
 
 The single-instance behaviour that `adw::Application` gives us for free matters more now: launching `adguard-ui` twice activates the running one rather than starting a rival writer.
 
+### Starting without a window
+
+`adguard-ui --background` registers the tray and presents nothing; the autostart entry in `data/autostart/` runs it, so the tray is there from login. Three things follow from that, and none of them are free:
+
+- **The UI is built on the first activation and kept.** Activation used to build a window unconditionally, which was invisible while the only way in was clicking a launcher for a process that was not running yet. With `--background` a later activation is routine, and each one would otherwise raise a rival window with its own poll timer and its own tray registration — inside the single process the whole model rests on.
+- **The flag has to reach the instance that acts on it**, so the application takes `HANDLES_COMMAND_LINE` rather than parsing options locally and discarding them. Otherwise a second `adguard-ui --background` — autostart racing a manual launch, or a session restoring both — arrives at the running process as a bare `activate` and pulls the window on screen, which is the one thing the flag asks us not to do. It is also the only place GApplication offers to set an exit status.
+- **A tray that will not register is fatal here, and only here.** The rule above is that the application carries on windowed; with `--background` there is no window to carry on with, so the process would be left with nothing on screen and no way to be reached or quit. It reports why and exits 1. Being the inverse of the surrounding rule, it is stated in the code rather than left to be inferred.
+
+The Status page is told the window is hidden before the first poll rather than after the first close, so a background session polls at the 10 s rate from the start.
+
 Fast reads (`status`, `config get`) can be `tokio::process::Command` awaits. Network commands (`check-update`, `filters update`, `update`) need a visible progress state and a generous timeout — a real `HttpClientNetworkError` reaching `filters.adtidy.org` is already in this machine's logs, so failure is a normal path, not an edge case.
 
 ---
@@ -173,7 +183,7 @@ Because `adguard-cli` and its data live under `~/.local`, a root-invoked helper 
 
 Ship the tray + core controls first; it is the part that replaces day-to-day terminal use.
 
-Status: Status, Protection, Filters (HTTP) and Advanced are done, and the tray carries start/stop plus the six Protection toggles as quick toggles (§4). Still open for v1: the first-run assistant, the DNS page, auto-mode via polkit, and autostart so the tray is there at login without launching the window.
+Status: Status, Protection, Filters (HTTP) and Advanced are done; the tray carries start/stop plus the six Protection toggles as quick toggles (§4); and `--background` plus the autostart entry put that tray on screen at login without a window. Still open for v1: the first-run assistant, the DNS page, and auto-mode via polkit.
 
 ---
 

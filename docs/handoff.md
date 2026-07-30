@@ -1,12 +1,12 @@
 # Handoff
 
-Working state as of commit `a7a91ab`. Read [`cli-contract.md`](cli-contract.md) and [`architecture.md`](architecture.md) first — the contract doc records measured CLI behaviour and the code depends on it. §5 of the contract is the part that matters for anything touching config; §4 of architecture.md is the part that matters for anything touching the tray.
+Working state as of the commit that added `--background` and the autostart entry. Read [`cli-contract.md`](cli-contract.md) and [`architecture.md`](architecture.md) first — the contract doc records measured CLI behaviour and the code depends on it. §5 of the contract is the part that matters for anything touching config; §4 of architecture.md is the part that matters for anything touching the tray or the way the process starts.
 
 ---
 
 ## 1. Where things stand
 
-`HEAD` is `a7a91ab`, tree clean, **90 tests pass by default** and 23 more are `#[ignore]`d. Nothing is uncommitted.
+**90 tests pass by default** and 23 more are `#[ignore]`d.
 
 | Page | State |
 | --- | --- |
@@ -15,6 +15,7 @@ Working state as of commit `a7a91ab`. Read [`cli-contract.md`](cli-contract.md) 
 | Filters (HTTP) | Done. SQLite-backed catalogue with localised names. |
 | Advanced | Done. Ports, listen address, auth, outbound proxy, worker threads, log level. |
 | Tray | Done. Start/stop plus the six Protection toggles, in the GUI process. |
+| Autostart | Done. `--background` starts windowless; `data/autostart/` installs into `~/.config/autostart/`. |
 | DNS | Not started. |
 | Userscripts | Not started. |
 | First-run assistant | Not started. |
@@ -27,28 +28,17 @@ cargo run -p adguard-gui
 
 One binary, `adguard-ui`, serves the window and the tray. `adguard-tray` is a library. Seeing the icon needs a real session plus an AppIndicator extension — see `building.md`.
 
----
-
-## 2. Next step: autostart, so the tray is there at login
-
-Everything the tray needs now exists, but nothing starts it. This is the last piece that makes the tray actually replace day-to-day terminal use, which `architecture.md` §7 calls the point of v1.
-
-The work:
-
-1. **A `--background` (or `--hidden`) flag** that starts the process with the tray registered and no window presented. `build_ui` currently always calls `window.present()`; it needs to skip that when the flag is set, while still holding the app alive. Note the ordering constraint already in the code: the window is presented *before* the tray is wired, so a slow or absent StatusNotifierItem host cannot delay it. With `--background` there is no window to delay, but the hold must be taken before anything can quit the main loop.
-2. **An autostart desktop entry** in `~/.config/autostart/`, running `adguard-ui --background`. Keep it separate from the launcher entry in `data/`, which must keep presenting a window.
-3. **Handle the no-tray case.** If registration fails and there is no window, the process has nothing to show and no way to be reached — it must exit with a message rather than linger invisibly. This is the one place where a failed registration is fatal, and it is the inverse of the current rule, so make it explicit.
-4. GApplication already gives the right behaviour for the launcher afterwards: clicking the dock icon while the background process is running activates it, and `Command::ShowWindow` presents the window. Worth confirming that `activate` presents a window when the process started windowless — `build_ui` runs once per activation, so it may need to distinguish "first activation, background" from "later activation, show me".
-
-Point 4 is the one with a real chance of surprising you; the rest is mechanical.
+Three things about startup are worth knowing before touching `main.rs`. The UI is built by the **first** activation and kept, so a later one presents that window instead of building a rival with its own poll timer and tray. The application takes `HANDLES_COMMAND_LINE`, so `--background` reaches the instance that acts on it rather than being parsed and dropped by the launching process. And under `--background` a tray that will not register is **fatal** — the inverse of the rule everywhere else, because there is no window to fall back to. `architecture.md` §4 has the reasoning.
 
 ---
 
-## 3. Then: the config file monitor
+## 2. Next step: the config file monitor
 
-Second priority, and it unblocks a class of staleness rather than a feature. All four pages are refresh-button-only, so an edit made in a terminal — which the CLI itself suggests — never reaches the UI.
+It unblocks a class of staleness rather than a feature. All four pages are refresh-button-only, so an edit made in a terminal — which the CLI itself suggests — never reaches the UI.
 
-**The trap, measured this cycle:** every `adguard-cli` invocation rewrites `proxy.yaml` and touches its mtime, `--version` included, even when no byte changes (contract §5). Since the app polls `status` every 2 s, a `gio::FileMonitor` would fire continuously against changes we caused ourselves, repainting pages under the user's pointer. **It must compare content, not trust the event** — keep a hash of the last-read file and ignore events where it has not moved. Debouncing does not help; the churn never stops.
+**The trap, measured an earlier cycle:** every `adguard-cli` invocation rewrites `proxy.yaml` and touches its mtime, `--version` included, even when no byte changes (contract §5). Since the app polls `status` every 2 s, a `gio::FileMonitor` would fire continuously against changes we caused ourselves, repainting pages under the user's pointer. **It must compare content, not trust the event** — keep a hash of the last-read file and ignore events where it has not moved. Debouncing does not help; the churn never stops.
+
+Autostart made this slightly worse and slightly better at once: a background session polls at the 10 s rate, so the self-inflicted churn is a fifth of what a windowed one produces — but it now runs from login, so the monitor has to see through it for the whole session rather than for as long as a window is open.
 
 Two things already in place to build on:
 
@@ -59,7 +49,7 @@ Also from the same measurement: a key *deleted* from the file is silently restor
 
 ---
 
-## 4. Known gaps, in the order I would fix them
+## 3. Known gaps, in the order I would fix them
 
 1. **A lapsed licence reports as our bug.** `status`, `license` and `filters list` exit 1 on stderr in an unlicensed install, and `Cli` maps exit 1 to `BadInvocation` — "adguard-cli rejected `status`" — because contract §3 originally assumed exit 1 only ever meant a malformed command line. Not reachable on this machine (`APP_ACTIVE`), but it would be a baffling error for anyone whose licence expired. Belongs with the activation flow (`architecture.md` §5: open the URL with `gtk::UriLauncher`, poll `license` until `APP_ACTIVE`).
 2. **`cli.rs`'s timeout TODO.** Still outstanding, still blocking any network command. Nothing network-touching has been wired, so it has not bitten — but `filters update` and `check-update` cannot land before it does.
@@ -71,7 +61,7 @@ Also from the same measurement: a key *deleted* from the file is silently restor
 
 ---
 
-## 5. Things that will bite you if you do not know them
+## 4. Things that will bite you if you do not know them
 
 **Config writes.** `Config has been updated` is necessary but not sufficient — it prints for a no-op *and* for a change the CLI silently declined. Always re-read `proxy.yaml`. Only ever write lowercase `true`/`false`. Pass `--` before any user-supplied key or value, or a value starting with `-` is eaten as an option. `config set` type-checks and never range-checks, so bounds are ours. Nothing enforces dependencies between settings; the GUI owns them.
 

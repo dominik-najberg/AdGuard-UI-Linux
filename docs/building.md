@@ -86,6 +86,34 @@ gdbus call --session --dest org.kde.StatusNotifierItem-<pid>-1 --object-path /Me
 
 Note `GetLayout`'s recursion depth is given as `3` rather than `-1`: `gdbus` reads a leading `-` as one of its own options, the same trap the `--` guard exists for in `cli-contract.md` §5.
 
+### Starting it at login
+
+```bash
+adguard-ui --background
+```
+
+Registers the tray and presents no window. The window is built either way, so it appears without a pause the first time you ask for it — from the tray's "Open AdGuard UI", or by running `adguard-ui` again. A second `--background` launch while one is already running does *not* pull the window up; a launch without the flag does, which is what makes the dock icon behave.
+
+Install the autostart entry to get that at login:
+
+```bash
+install -Dm644 data/autostart/*.desktop ~/.config/autostart/
+```
+
+It runs `adguard-ui --background` off `$PATH`, so it needs the `~/.local/bin` install in §4. Remove the file to undo it, or flip `X-GNOME-Autostart-enabled` in a startup-applications editor.
+
+**`--background` is the one place where a tray that will not register is fatal.** Everywhere else a missing AppIndicator extension is one line on stderr and a windowed app. Here there is no window either, so the process would be running with nothing on screen and no way to reach or quit it — it says so and exits 1 instead. Started from the autostart entry that message goes to the session journal:
+
+```bash
+journalctl --user -b -g adguard-ui
+```
+
+A private session bus carries no `org.kde.StatusNotifierWatcher`, so that path can be provoked in one command:
+
+```bash
+dbus-run-session -- adguard-ui --background
+```
+
 Release build:
 
 ```bash
@@ -208,6 +236,12 @@ install -Dm644 data/*.desktop ~/.local/share/applications/
 
 ```bash
 update-desktop-database ~/.local/share/applications
+```
+
+The autostart entry is a separate file in a separate directory, and the glob above deliberately does not reach it — installed among the launchers it would show up as a second, windowless entry in the app grid:
+
+```bash
+install -Dm644 data/autostart/*.desktop ~/.config/autostart/
 ```
 
 **The desktop file, the GTK application ID, and `StartupWMClass` must all be the same reverse-DNS string.** If they diverge, GNOME shows a second, unbranded icon below the dock separator instead of grouping the window with its launcher.

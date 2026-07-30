@@ -1,0 +1,17 @@
+[Desktop Entry]
+Type=Application
+# Belongs in ~/.config/autostart/, never in ~/.local/share/applications/. It is
+# kept out of data/ alongside the launcher entry for that reason: the launcher
+# must keep presenting a window, and installing both from one glob would put a
+# second, windowless launcher in the app grid.
+Name=AdGuard UI (tray)
+Comment=Keep the AdGuard tray icon available from login
+Exec=adguard-ui --background
+Icon=io.github.dominik-najberg.AdGuardUI
+Terminal=false
+# Nothing appears when this runs, so a startup notification would leave the
+# cursor spinning until the shell timed it out.
+StartupNotify=false
+# What GNOME's startup-applications editor flips to disable this entry. Stated
+# rather than defaulted, so there is something to find when it is off.
+X-GNOME-Autostart-enabled=true

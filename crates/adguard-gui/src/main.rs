@@ -16,6 +16,7 @@ use std::rc::Rc;
 
 use adguard_core::{Cli, FilterSet, Toggle};
 use adw::prelude::*;
+use gtk::gio;
 use gtk::glib;
 use gtk4 as gtk;
 use libadwaita as adw;
@@ -28,13 +29,115 @@ use libadwaita as adw;
 /// this one instead of starting a rival that would write the same config.
 const APP_ID: &str = "io.github.dominik-najberg.AdGuardUI";
 
+/// `--background`: register the tray and leave the window closed.
+///
+/// What the autostart entry in `data/autostart/` runs, so the tray is there
+/// from login without a window opening in the user's face. The launcher entry
+/// in `data/` keeps its plain `Exec`, because clicking a dock icon means the
+/// opposite.
+const BACKGROUND: &str = "background";
+
 fn main() -> glib::ExitCode {
-    let app = adw::Application::builder().application_id(APP_ID).build();
-    app.connect_activate(build_ui);
+    let app = adw::Application::builder()
+        .application_id(APP_ID)
+        // `--background` has to reach whichever instance acts on it. Without
+        // this the flag is parsed and dropped by the launching process, so a
+        // second `adguard-ui --background` — autostart racing a manual launch,
+        // or a session restoring both — arrives at the running one as a bare
+        // "activate" and pulls the window on screen, which is the single thing
+        // the flag asks us not to do. It is also the only place GApplication
+        // offers to set an exit status.
+        .flags(gio::ApplicationFlags::HANDLES_COMMAND_LINE)
+        .build();
+
+    app.add_main_option(
+        BACKGROUND,
+        glib::Char::from(b'b'),
+        glib::OptionFlags::NONE,
+        glib::OptionArg::None,
+        "Start with only the tray icon, leaving the window closed",
+        None,
+    );
+
+    // Built by the first launch that gets this far, and kept. Activation used
+    // to build the whole UI unconditionally, which was invisible while the only
+    // way in was a launcher click on a process that was not running yet;
+    // `--background` makes a second activation the normal case, and each one
+    // would otherwise raise a rival window with its own poll timer and its own
+    // tray registration.
+    let ui: Rc<RefCell<Option<Instance>>> = Rc::new(RefCell::new(None));
+
+    // Activation with no command line behind it: `gapplication launch`, or the
+    // shell calling org.freedesktop.Application.Activate on a running process.
+    // Always means "show me".
+    app.connect_activate({
+        let ui = ui.clone();
+        move |app| {
+            if let Err(reason) = start(app, &ui, false) {
+                eprintln!("adguard-ui: {reason}");
+            }
+        }
+    });
+
+    app.connect_command_line(move |app, cmdline| {
+        let background = cmdline.options_dict().contains(BACKGROUND);
+        match start(app, &ui, background) {
+            Ok(()) => glib::ExitCode::SUCCESS,
+            Err(reason) => {
+                // Our own stderr, not the caller's: this handler runs in the
+                // running process when there is one, but the only failure it
+                // can report comes from building the UI, which only ever
+                // happens in the process that is starting up.
+                eprintln!("adguard-ui: {reason}");
+                glib::ExitCode::FAILURE
+            }
+        }
+    });
+
     app.run()
 }
 
-fn build_ui(app: &adw::Application) {
+/// What the first launch built, so a later one has something to present.
+struct Instance {
+    window: adw::ApplicationWindow,
+    /// `None` when `adguard-cli` is missing: the window explains why, and there
+    /// are no pages behind it.
+    view: Option<MainView>,
+}
+
+impl Instance {
+    /// Put the window on screen, and take the Status page back to the 2 s poll
+    /// rate — it drops to 10 s while only the tray is showing.
+    fn present(&self) {
+        self.window.present();
+        if let Some(view) = &self.view {
+            view.status.set_window_visible(true);
+        }
+    }
+}
+
+/// Bring the application up, or bring it forward if it is already up.
+///
+/// `background` is the autostart case: build everything, register the tray, and
+/// present nothing. Because the window is what a user would otherwise reach the
+/// app by, that is the one situation where a tray icon failing to register is
+/// fatal — the inverse of the rule everywhere else, so it is spelled out below
+/// rather than left to be inferred.
+fn start(
+    app: &adw::Application,
+    ui: &Rc<RefCell<Option<Instance>>>,
+    background: bool,
+) -> Result<(), String> {
+    if let Some(instance) = ui.borrow().as_ref() {
+        // Launched again. Under `--background` that is the autostart entry
+        // arriving second and it must not drag the window on screen; anything
+        // else is someone asking for exactly that.
+        if !background {
+            instance.present();
+        }
+        return Ok(());
+    }
+
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .title("AdGuard UI")
@@ -46,23 +149,56 @@ fn build_ui(app: &adw::Application) {
         Ok(cli) => {
             let view = main_view(&cli);
             window.set_content(Some(&view.root));
-            Some(view)
+            Ok(view)
         }
         Err(err) => {
             window.set_content(Some(&missing_cli_view(&err.to_string())));
-            None
+            Err(err.to_string())
         }
     };
 
-    // Before the tray, so a slow or absent StatusNotifierItem host cannot delay
-    // the window appearing.
-    window.present();
-
-    // No tray without a working CLI: every menu item would be inert, and the
-    // window is already explaining why.
-    if let Some(view) = view {
-        connect_tray(app, &window, &view);
+    if background {
+        // Nothing will be presented, so the Status page starts at the
+        // tray-only poll rate instead of arriving there after a first hide.
+        if let Ok(view) = &view {
+            view.status.set_window_visible(false);
+        }
+    } else {
+        // Before the tray, so a slow or absent StatusNotifierItem host cannot
+        // delay the window appearing.
+        window.present();
     }
+
+    let tray = match &view {
+        Ok(view) => connect_tray(app, &window, view),
+        // No tray without a working CLI: every menu item would be inert, and
+        // the window is already explaining why.
+        Err(reason) => Err(reason.clone()),
+    };
+
+    if let Err(reason) = tray {
+        if background {
+            // Nothing on screen and nothing on the bus: the process could not
+            // be reached, quit, or even noticed. Say so and stop, rather than
+            // linger where only a process list would find us.
+            window.destroy();
+            return Err(format!(
+                "--{BACKGROUND} leaves the window closed and there is no tray either \
+                 ({reason}). Start it without --{BACKGROUND} to use the app in a window."
+            ));
+        }
+        // A normal outcome, not a failure: GNOME has no native tray, so this is
+        // what a missing or disabled AppIndicator extension looks like. Carry
+        // on windowed — quitting because an icon could not be drawn would be
+        // far worse than going without it.
+        eprintln!("adguard-ui: continuing without a tray icon ({reason})");
+    }
+
+    ui.replace(Some(Instance {
+        window,
+        view: view.ok(),
+    }));
+    Ok(())
 }
 
 /// Register the tray icon and connect it to the pages.
@@ -78,17 +214,18 @@ fn build_ui(app: &adw::Application) {
 ///   the page cannot disagree.
 /// - **lifetime** — with a tray, closing the window hides it and the app keeps
 ///   running; without one, closing quits as usual.
-fn connect_tray(app: &adw::Application, window: &adw::ApplicationWindow, view: &MainView) {
+///
+/// Returns why there is no tray, rather than deciding what that means: with a
+/// window on screen it is a line on stderr, and under `--background` it is the
+/// end of the process. [`start`] holds that judgement.
+fn connect_tray(
+    app: &adw::Application,
+    window: &adw::ApplicationWindow,
+    view: &MainView,
+) -> Result<(), String> {
     let tray = match adguard_tray::spawn(adguard_tray::State::default()) {
         Ok(tray) => tray,
-        Err(err) => {
-            // A normal outcome, not a failure: GNOME has no native tray, so
-            // this is what a missing or disabled AppIndicator extension looks
-            // like. Carry on windowed — quitting because an icon could not be
-            // drawn would be far worse than going without it.
-            eprintln!("adguard-ui: continuing without a tray icon ({err})");
-            return;
-        }
+        Err(err) => return Err(err.to_string()),
     };
     let tray = Rc::new(tray);
 
@@ -163,6 +300,8 @@ fn connect_tray(app: &adw::Application, window: &adw::ApplicationWindow, view: &
             }
         }
     });
+
+    Ok(())
 }
 
 /// Shown when `adguard-cli` is not installed. Failing with an explanation
