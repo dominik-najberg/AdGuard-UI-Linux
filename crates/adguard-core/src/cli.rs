@@ -14,11 +14,36 @@
 //! 3. Consequently a caller must never infer success from exit status. State
 //!    changes follow act -> re-read -> reconcile.
 
+use std::io::Read;
 use std::path::PathBuf;
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 use crate::model::{FilterAction, FilterSet, ProxyStatus};
 use crate::paths;
+
+/// Deadline for the local commands — `status`, `config get/set`, `start`.
+///
+/// They cost 10–30 ms measured, so this is not a performance budget; it is the
+/// point past which the command is not coming back and the UI should say so
+/// rather than hold a worker thread. Generous enough that a machine under load
+/// does not trip it.
+const LOCAL_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Deadline for the commands that reach the network — `filters update`,
+/// `check-update`, `update` (`architecture.md` §4).
+///
+/// Nothing wires these up yet. The constant exists so that when something does,
+/// the choice is to name a deadline rather than to invent the whole mechanism.
+#[allow(dead_code)]
+pub const NETWORK_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// How often the deadline is checked while a child runs.
+///
+/// A plain sleep-poll rather than a signal or a `wait_timeout` dependency:
+/// commands here finish in 10–30 ms, so this costs a couple of wake-ups on the
+/// worker thread and keeps `adguard-core` free of another crate.
+const POLL: Duration = Duration::from_millis(5);
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -44,6 +69,16 @@ pub enum Error {
 
     #[error("could not interpret output of `adguard-cli {args}`: {output}")]
     Unparseable { args: String, output: String },
+
+    /// The command outlived its deadline and was killed. Distinct from
+    /// [`Self::BadInvocation`] because nothing was rejected and nothing is
+    /// known: the command may equally have done its work and hung on the way
+    /// out, so a caller must re-read state rather than assume it did nothing.
+    #[error("`adguard-cli {args}` did not finish within {}s and was stopped", timeout.as_secs())]
+    TimedOut {
+        args: String,
+        timeout: std::time::Duration,
+    },
 
     /// A command the CLI accepted but refused to carry out. Exit code was 0
     /// and the explanation came back on stdout, so `message` is the CLI's own
@@ -126,28 +161,94 @@ impl Cli {
     /// the way the contract doc records however the app was launched. Nothing
     /// here ever has anything to say on stdin.
     ///
-    /// TODO(v1): apply a timeout. Not needed for the fast local commands used
-    /// here (~10-30 ms each), but mandatory before wiring up the network ones
-    /// (`check-update`, `filters update`, `update`), which can hang.
+    /// # It is also bounded in time
+    ///
+    /// Closing stdin removes the one *known* way to hang, but not the general
+    /// one: [`Self::run_within`] kills anything that outlives its deadline, so
+    /// a worker thread cannot be held forever by a command that never returns.
     pub fn run(&self, args: &[&str]) -> Result<Output, Error> {
+        self.run_within(args, LOCAL_TIMEOUT)
+    }
+
+    /// [`Self::run`] with an explicit deadline.
+    ///
+    /// Two deadlines rather than one, because the two kinds of command differ
+    /// by three orders of magnitude: the local ones cost 10–30 ms, while
+    /// `filters update` reaches `filters.adtidy.org` and a real
+    /// `HttpClientNetworkError` is already in this machine's logs
+    /// (`architecture.md` §4). One value generous enough for the second would
+    /// leave the first able to wedge a page for minutes, and one tight enough
+    /// for the first would fail every update on a slow link.
+    ///
+    /// **The child is killed, not abandoned.** Returning while it still runs
+    /// would leave a process writing `proxy.yaml` behind the back of a UI that
+    /// has already given up on it — and the next invocation would contend with
+    /// it for the same file.
+    ///
+    /// A timeout says nothing about whether the work happened, so
+    /// [`Error::TimedOut`] is a distinct variant rather than folded into
+    /// [`Error::BadInvocation`]: the caller still owes itself a re-read.
+    pub fn run_within(&self, args: &[&str], timeout: Duration) -> Result<Output, Error> {
         let mut command = Command::new(&self.binary);
-        command.args(args).stdin(std::process::Stdio::null());
+        command
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            // Piped rather than `output()`, which offers no way back in once it
+            // has started waiting. Owning the pipes means owning the deadline.
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
         if let Some(home) = &self.xdg_data_home {
             command.env("XDG_DATA_HOME", home);
         }
 
-        let raw = command.output().map_err(|source| Error::Spawn {
+        let mut child = command.spawn().map_err(|source| Error::Spawn {
             binary: self.binary.display().to_string(),
             source,
         })?;
 
-        let stdout = strip_ansi(&raw.stdout);
-        let stderr = strip_ansi(&raw.stderr);
+        // Both pipes are drained on threads of their own for the whole life of
+        // the child. A pipe holds ~64 KB before it blocks the writer, and
+        // `filters list --all` is larger than that — so waiting on the child
+        // first and reading afterwards would deadlock: we would be waiting for
+        // an exit that cannot happen until someone empties the pipe.
+        let stdout = child.stdout.take().map(drain);
+        let stderr = child.stderr.take().map(drain);
 
-        if !raw.status.success() {
+        let deadline = Instant::now() + timeout;
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break Some(status),
+                Ok(None) if Instant::now() >= deadline => break None,
+                Ok(None) => std::thread::sleep(POLL),
+                Err(source) => {
+                    return Err(Error::Spawn {
+                        binary: self.binary.display().to_string(),
+                        source,
+                    })
+                }
+            }
+        };
+
+        let Some(status) = status else {
+            // Kill first, then collect: the reader threads only finish once the
+            // pipes close, which only happens once the child is gone.
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = stdout.map(|handle| handle.join());
+            let _ = stderr.map(|handle| handle.join());
+            return Err(Error::TimedOut {
+                args: args.join(" "),
+                timeout,
+            });
+        };
+
+        let stdout = strip_ansi(&joined(stdout));
+        let stderr = strip_ansi(&joined(stderr));
+
+        if !status.success() {
             return Err(Error::BadInvocation {
                 args: args.join(" "),
-                code: raw.status.code().unwrap_or(-1),
+                code: status.code().unwrap_or(-1),
                 stderr: stderr.trim().to_owned(),
             });
         }
@@ -368,11 +469,16 @@ fn redact(message: &str, secret: &str) -> String {
 /// Scrub a secret out of every error field that could be carrying it.
 ///
 /// Matched per variant rather than over `to_string()`, so the error keeps its
-/// type. Two of these three variants quote the command line we built, which is
+/// type. Three of these four variants quote the command line we built, which is
 /// where a credential would appear: `BadInvocation` should now be unreachable
 /// for a user-supplied value — that is what the `--` guard in
 /// [`Cli::config_set`] is for — but a leak that depends on another function
 /// staying correct is not one worth leaving in place.
+///
+/// The match is exhaustive on purpose. A new variant that quotes `args` will
+/// not compile until it has been considered here, which is how `TimedOut`
+/// arrived: `config set listen_auth.password <secret>` is exactly the kind of
+/// call that could hit a deadline.
 fn redact_error(err: Error, secret: &str) -> Error {
     match err {
         Error::Refused { message } => Error::Refused {
@@ -386,6 +492,10 @@ fn redact_error(err: Error, secret: &str) -> Error {
         Error::Unparseable { args, output } => Error::Unparseable {
             args: redact(&args, secret),
             output: redact(&output, secret),
+        },
+        Error::TimedOut { args, timeout } => Error::TimedOut {
+            args: redact(&args, secret),
+            timeout,
         },
         // Carry no echo of the value.
         other @ (Error::BinaryNotFound | Error::Spawn { .. }) => other,
@@ -439,6 +549,29 @@ fn first_line(stdout: &str) -> Option<String> {
 /// Strip ANSI escapes from raw process output and lossily decode as UTF-8.
 fn strip_ansi(raw: &[u8]) -> String {
     String::from_utf8_lossy(&strip_ansi_escapes::strip(raw)).into_owned()
+}
+
+/// Read one of the child's pipes to exhaustion on a thread of its own.
+///
+/// See [`Cli::run_within`]: the child cannot exit while a full pipe is blocking
+/// its writes, so the reading has to overlap the waiting rather than follow it.
+fn drain(mut pipe: impl Read + Send + 'static) -> std::thread::JoinHandle<Vec<u8>> {
+    std::thread::spawn(move || {
+        let mut buffer = Vec::new();
+        // A read error means a truncated capture, not a failed command. The
+        // exit status is what decides success, and partial output parses or it
+        // does not — both are already handled.
+        let _ = pipe.read_to_end(&mut buffer);
+        buffer
+    })
+}
+
+/// Collect what [`drain`] read. A panicked reader yields empty output rather
+/// than taking the caller down: the exit status still stands.
+fn joined(handle: Option<std::thread::JoinHandle<Vec<u8>>>) -> Vec<u8> {
+    handle
+        .and_then(|handle| handle.join().ok())
+        .unwrap_or_default()
 }
 
 /// Parse `adguard-cli status`.
@@ -748,5 +881,95 @@ mod tests {
             "hunter2",
         );
         assert!(!leaked(&refused), "{refused}");
+
+        let timed_out = redact_error(
+            Error::TimedOut {
+                args: "config set listen_auth.password hunter2".to_owned(),
+                timeout: Duration::from_secs(15),
+            },
+            "hunter2",
+        );
+        assert!(!leaked(&timed_out), "{timed_out}");
+    }
+
+    /// A `Cli` pointed at something other than `adguard-cli`.
+    ///
+    /// The fields are private and `discover` only ever finds the real binary,
+    /// but this module is a child of the one that defines them — which is the
+    /// whole reason the timeout can be tested against `sleep` and `cat` instead
+    /// of against AdGuard.
+    fn cli_for(binary: &str) -> Cli {
+        Cli {
+            binary: PathBuf::from(binary),
+            xdg_data_home: None,
+        }
+    }
+
+    /// The point of the whole exercise: a command that would never return is
+    /// stopped, and says so, rather than holding the worker thread that ran it.
+    #[test]
+    fn a_command_that_hangs_is_killed_and_reported() {
+        let started = Instant::now();
+        let err = cli_for("/bin/sleep")
+            .run_within(&["60"], Duration::from_millis(300))
+            .expect_err("sleep 60 should not finish inside 300ms");
+
+        assert!(
+            matches!(err, Error::TimedOut { .. }),
+            "expected a timeout, got {err:?}"
+        );
+        // Generously bounded: the assertion is that it returned near the
+        // deadline rather than near the sleep, not that the timer is precise.
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "returned after {:?}, so it waited for the command",
+            started.elapsed()
+        );
+    }
+
+    /// The deadline must not cost anything in the ordinary case.
+    #[test]
+    fn a_command_that_finishes_is_untouched() {
+        let out = cli_for("/bin/echo")
+            .run_within(&["hello"], Duration::from_secs(10))
+            .expect("echo should succeed");
+        assert_eq!(out.stdout.trim(), "hello");
+    }
+
+    /// A non-zero exit is still a `BadInvocation`, not a timeout — the switch
+    /// from `output()` to spawn-and-poll must not have changed what failure
+    /// means.
+    #[test]
+    fn a_failing_command_is_still_a_bad_invocation() {
+        let err = cli_for("/bin/false")
+            .run_within(&[], Duration::from_secs(10))
+            .expect_err("false should fail");
+        assert!(
+            matches!(err, Error::BadInvocation { code: 1, .. }),
+            "expected exit 1, got {err:?}"
+        );
+    }
+
+    /// Output larger than a pipe buffer (~64 KB) must not deadlock.
+    ///
+    /// This is the failure the reader threads exist to prevent: `filters list
+    /// --all` is bigger than one bufferful, so waiting for the child before
+    /// reading would hang forever on a full pipe. If that regresses, this test
+    /// hits its deadline and fails as a timeout rather than hanging the suite.
+    ///
+    /// The volume is produced by the child, not passed to it — a 300 KB
+    /// argument exceeds `MAX_ARG_STRLEN` and fails to spawn at all, which
+    /// proves nothing about pipes.
+    #[test]
+    fn output_larger_than_a_pipe_buffer_is_captured_whole() {
+        let out = cli_for("/usr/bin/seq")
+            .run_within(&["100000"], Duration::from_secs(20))
+            .expect("seq should succeed, not deadlock");
+        assert_eq!(out.stdout.lines().count(), 100_000);
+        assert!(
+            out.stdout.len() > 400_000,
+            "expected well over one pipe buffer, got {} bytes",
+            out.stdout.len()
+        );
     }
 }
