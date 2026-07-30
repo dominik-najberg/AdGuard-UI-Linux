@@ -275,6 +275,7 @@ cp ~/.local/share/adguard-cli/proxy.yaml ~/proxy.yaml.orig
 | [`adguard-cli.md`](adguard-cli.md) | Reference for the underlying CLI — commands, options, config keys |
 | [`cli-contract.md`](cli-contract.md) | **Measured** CLI behaviour as an automation target; read before writing wrapper code |
 | [`architecture.md`](architecture.md) | Design of the GUI: crates, data flow, UI structure, privilege model |
+| [`handoff.md`](handoff.md) | Current state, the next step, and the traps worth knowing before touching anything |
 | `building.md` | This file |
 
-Keep all four in `docs/`, versioned with the code, so a change to CLI-handling behaviour and its documentation land in the same commit. When bumping the supported `adguard-cli` version, re-verify `cli-contract.md` — every claim in it is a measurement that a new release could invalidate.
+Keep all five in `docs/`, versioned with the code, so a change to CLI-handling behaviour and its documentation land in the same commit. When bumping the supported `adguard-cli` version, re-verify `cli-contract.md` — every claim in it is a measurement that a new release could invalidate.
