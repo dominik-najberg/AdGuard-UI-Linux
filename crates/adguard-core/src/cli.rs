@@ -45,6 +45,22 @@ pub const NETWORK_TIMEOUT: Duration = Duration::from_secs(120);
 /// worker thread and keeps `adguard-core` free of another crate.
 const POLL: Duration = Duration::from_millis(5);
 
+/// How long the output is still collected for once the child has exited.
+///
+/// Reading a pipe ends when *every* write end closes, and the child's own exit
+/// does not guarantee that: a descendant inherits the same descriptors and can
+/// hold them open long after its parent is gone. Measured on this machine —
+/// `sh -c "sleep 10 & echo done"` exits at once, and a reader waiting for EOF
+/// sits there for the full ten seconds.
+///
+/// `adguard-cli start` leaves the proxy daemon behind, so that shape is the
+/// normal case here rather than a curiosity. Without a bound, a timeout could
+/// itself hang — the one thing it exists to prevent. Output that has not
+/// arrived within this grace is given up on: an empty capture becomes an
+/// honest [`Error::Unparseable`] one layer up, where a wedged worker thread
+/// would become nothing at all.
+const COLLECT_GRACE: Duration = Duration::from_secs(2);
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("AdGuard CLI not found — install adguard-cli, or set $ADGUARD_CLI to its path")]
@@ -230,20 +246,29 @@ impl Cli {
         };
 
         let Some(status) = status else {
-            // Kill first, then collect: the reader threads only finish once the
-            // pipes close, which only happens once the child is gone.
+            // Kill the child — but only the child. Never the process group:
+            // `adguard-cli start` deliberately leaves the proxy daemon behind,
+            // and killing the group would take down the very thing the user
+            // asked to start.
             let _ = child.kill();
             let _ = child.wait();
-            let _ = stdout.map(|handle| handle.join());
-            let _ = stderr.map(|handle| handle.join());
+            // Nothing is collected. The readers cannot be waited on here: a
+            // descendant may still hold the pipe (see `COLLECT_GRACE`), and a
+            // timeout that can itself block is not a timeout. Dropping the
+            // receivers detaches them; they end when the pipes do.
+            drop(stdout);
+            drop(stderr);
             return Err(Error::TimedOut {
                 args: args.join(" "),
                 timeout,
             });
         };
 
-        let stdout = strip_ansi(&joined(stdout));
-        let stderr = strip_ansi(&joined(stderr));
+        // One deadline across both pipes, not one each: they are held open by
+        // the same descendants and would otherwise cost twice the grace.
+        let until = Instant::now() + COLLECT_GRACE;
+        let stdout = strip_ansi(&collect(stdout, until));
+        let stderr = strip_ansi(&collect(stderr, until));
 
         if !status.success() {
             return Err(Error::BadInvocation {
@@ -555,22 +580,32 @@ fn strip_ansi(raw: &[u8]) -> String {
 ///
 /// See [`Cli::run_within`]: the child cannot exit while a full pipe is blocking
 /// its writes, so the reading has to overlap the waiting rather than follow it.
-fn drain(mut pipe: impl Read + Send + 'static) -> std::thread::JoinHandle<Vec<u8>> {
+///
+/// A channel rather than a `JoinHandle`, because a handle can only be joined
+/// unconditionally and this wait has to be bounded — see [`COLLECT_GRACE`].
+/// Dropping the receiver detaches the thread, which is what the timeout path
+/// wants.
+fn drain(mut pipe: impl Read + Send + 'static) -> std::sync::mpsc::Receiver<Vec<u8>> {
+    let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let mut buffer = Vec::new();
         // A read error means a truncated capture, not a failed command. The
         // exit status is what decides success, and partial output parses or it
         // does not — both are already handled.
         let _ = pipe.read_to_end(&mut buffer);
-        buffer
-    })
+        // Failure means the caller gave up on us and went home.
+        let _ = tx.send(buffer);
+    });
+    rx
 }
 
-/// Collect what [`drain`] read. A panicked reader yields empty output rather
-/// than taking the caller down: the exit status still stands.
-fn joined(handle: Option<std::thread::JoinHandle<Vec<u8>>>) -> Vec<u8> {
-    handle
-        .and_then(|handle| handle.join().ok())
+/// Collect what [`drain`] read, waiting no later than `until`.
+///
+/// Empty output on expiry rather than a block: an unparseable result is a
+/// visible, recoverable failure, and a worker thread that never returns is not.
+fn collect(pipe: Option<std::sync::mpsc::Receiver<Vec<u8>>>, until: Instant) -> Vec<u8> {
+    let remaining = until.saturating_duration_since(Instant::now());
+    pipe.and_then(|rx| rx.recv_timeout(remaining).ok())
         .unwrap_or_default()
 }
 
@@ -947,6 +982,33 @@ mod tests {
         assert!(
             matches!(err, Error::BadInvocation { code: 1, .. }),
             "expected exit 1, got {err:?}"
+        );
+    }
+
+    /// A descendant holding the pipe open must not wedge the caller.
+    ///
+    /// `sh` exits immediately here; the backgrounded `sleep` inherits its
+    /// stdout and holds the write end for ten seconds. This is not a contrived
+    /// shape — `adguard-cli start` leaves the proxy daemon behind the same way,
+    /// which makes it the one invocation where waiting for EOF after the child
+    /// exits would hang a worker thread indefinitely.
+    ///
+    /// The cost of the bound is the output: `done` is lost. That is the trade,
+    /// and it is the right way round — an empty capture surfaces as an
+    /// `Unparseable` error, while a blocked thread surfaces as nothing at all.
+    #[test]
+    fn a_descendant_holding_the_pipe_cannot_wedge_the_caller() {
+        let started = Instant::now();
+        let result = cli_for("/bin/sh").run_within(
+            &["-c", "sleep 10 & echo done"],
+            Duration::from_secs(30),
+        );
+
+        assert!(result.is_ok(), "the child itself exited cleanly: {result:?}");
+        assert!(
+            started.elapsed() < Duration::from_secs(8),
+            "waited {:?} — that is the grandchild's sleep, not the grace",
+            started.elapsed()
         );
     }
 
