@@ -5,10 +5,11 @@
 //! but it may equally be on `$PATH` or system-wide, so probe rather than assume.
 
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const BINARY: &str = "adguard-cli";
 const DATA_SUBDIR: &str = "adguard-cli";
+const CONFIG_FILE: &str = "proxy.yaml";
 
 fn home() -> Option<PathBuf> {
     env::var_os("HOME").map(PathBuf::from)
@@ -58,13 +59,35 @@ pub fn data_dir() -> Option<PathBuf> {
     Some(home()?.join(".local/share").join(DATA_SUBDIR))
 }
 
+/// AdGuard's data directory under an explicitly given `$XDG_DATA_HOME`.
+///
+/// [`data_dir`] answers for *this* process's environment, which is the right
+/// answer everywhere except one place: [`crate::Cli::with_xdg_data_home`] sets
+/// the variable on the child only, so a `Cli` pointed at a sandbox cannot ask
+/// the environment where its own config lives. It has to be told.
+pub fn data_dir_under(xdg_data_home: &Path) -> PathBuf {
+    xdg_data_home.join(DATA_SUBDIR)
+}
+
 /// The main configuration file.
 ///
 /// Read this for authoritative values; never write it. Roughly half of its
 /// lines are upstream explanatory comments that a YAML serialiser would
 /// destroy — writes go through `adguard-cli config set`.
+///
+/// **Its absence is meaningful, not merely inconvenient.** Measured on
+/// v1.4.13: a data directory that has never been configured has no
+/// `proxy.yaml` at all, and nothing creates one except `configure` — not
+/// `config get`, not `config set`, not `activate`. Until it exists `config
+/// set` refuses every real key, so "this file is missing" is exactly the
+/// first-run condition (contract §5).
 pub fn config_file() -> Option<PathBuf> {
-    Some(data_dir()?.join("proxy.yaml"))
+    Some(data_dir()?.join(CONFIG_FILE))
+}
+
+/// [`config_file`] under an explicitly given `$XDG_DATA_HOME`.
+pub fn config_file_under(xdg_data_home: &Path) -> PathBuf {
+    data_dir_under(xdg_data_home).join(CONFIG_FILE)
 }
 
 /// The user's own HTTP filtering rules — the file behind the user-rules

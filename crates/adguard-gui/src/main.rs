@@ -9,6 +9,7 @@ mod advanced;
 mod dns;
 mod filters;
 mod protection;
+mod setup;
 mod status;
 mod style;
 mod watch;
@@ -104,8 +105,17 @@ fn main() -> glib::ExitCode {
 struct Instance {
     window: adw::ApplicationWindow,
     /// `None` when `adguard-cli` is missing: the window explains why, and there
-    /// are no pages behind it.
+    /// are no pages behind it. Also `None` while the first-run assistant has the
+    /// window, since the pages it would hold cannot be built yet.
     view: Option<MainView>,
+    /// The first-run assistant, for as long as it owns the window.
+    ///
+    /// Held here because the buttons inside it deliberately do **not** hold it
+    /// — that would be a reference cycle through its own widget tree — which
+    /// leaves this the only strong reference. Without it the assistant would be
+    /// freed the moment [`start`] returned and every button in it would be
+    /// inert. Dropped by [`install_main_view`], which is what replaces it.
+    setup: Option<Rc<setup::SetupAssistant>>,
 }
 
 impl Instance {
@@ -152,7 +162,60 @@ fn start(
         .default_height(720)
         .build();
 
-    let view = match Cli::discover() {
+    let cli = Cli::discover();
+
+    // A machine where `adguard-cli configure` has never run has no
+    // `proxy.yaml`, and until it does, `config set` refuses every real key
+    // (contract §5) — so every page behind this would render "unavailable" and
+    // nothing the user touched would stick. The assistant is the only thing
+    // that can move that state, so it takes the window until it has.
+    let needs_setup = cli
+        .as_ref()
+        .ok()
+        .and_then(Cli::config_path)
+        .is_some_and(|path| !path.is_file());
+
+    if needs_setup && background {
+        // There is no window to run the assistant in, and a tray built over a
+        // configuration that does not exist would offer six toggles that
+        // cannot be read and a proxy that cannot start. The same judgement as
+        // the no-tray case below, for the same reason: better to say why than
+        // to sit in the background being useless.
+        window.destroy();
+        return Err(format!(
+            "AdGuard CLI has not been configured yet, so there is nothing for the tray to \
+             show. Start without --{BACKGROUND} to finish setting it up."
+        ));
+    }
+
+    if needs_setup {
+        let cli = cli.expect("needs_setup is only true when the CLI was found");
+        let toasts = adw::ToastOverlay::new();
+        let assistant = setup::SetupAssistant::new(cli.clone(), toasts.clone());
+        toasts.set_child(Some(assistant.widget()));
+        window.set_content(Some(&toasts));
+        window.present();
+
+        // The instance exists from here so a second activation presents this
+        // window rather than building a rival one — the assistant is as
+        // single-instance as the pages are, and two of them would race to run
+        // `configure` against the same directory.
+        ui.replace(Some(Instance {
+            window: window.clone(),
+            view: None,
+            setup: Some(assistant.clone()),
+        }));
+
+        assistant.connect_finished({
+            let app = app.clone();
+            let window = window.clone();
+            let ui = ui.clone();
+            move || install_main_view(&app, &window, &ui, &cli)
+        });
+        return Ok(());
+    }
+
+    let view = match cli {
         Ok(cli) => {
             let view = main_view(&cli);
             window.set_content(Some(&view.root));
@@ -204,8 +267,38 @@ fn start(
     ui.replace(Some(Instance {
         window,
         view: view.ok(),
+        setup: None,
     }));
     Ok(())
+}
+
+/// Put the real UI in the window once the first-run assistant is done with it.
+///
+/// The tail of [`start`] that could not run at launch: with no `proxy.yaml`
+/// there were no pages to build and nothing for a tray to show. Everything here
+/// happens in the order it does at a normal launch — pages, then tray — and the
+/// tray's registration failure stays the ordinary non-fatal outcome, because by
+/// definition there is a window on screen at this point.
+fn install_main_view(
+    app: &adw::Application,
+    window: &adw::ApplicationWindow,
+    ui: &Rc<RefCell<Option<Instance>>>,
+    cli: &Cli,
+) {
+    let view = main_view(cli);
+    window.set_content(Some(&view.root));
+
+    if let Err(reason) = connect_tray(app, window, &view) {
+        eprintln!("adguard-ui: continuing without a tray icon ({reason})");
+    }
+
+    if let Some(instance) = ui.borrow_mut().as_mut() {
+        instance.view = Some(view);
+        // The assistant's last strong reference. Dropping it here rather than
+        // leaving it parked is what keeps a finished wizard from holding its
+        // whole widget tree for the life of the process.
+        instance.setup = None;
+    }
 }
 
 /// Register the tray icon and connect it to the pages.

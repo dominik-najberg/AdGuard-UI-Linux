@@ -220,6 +220,26 @@ That seeding is also why nothing should run two `adguard-cli` commands at once a
 
 A fake config is also an *unlicensed* one, which is the only way to see the Status page's activation flow. If you are going to press **Activate…** there, make sure the log-in link cannot reach a browser that is signed in to AdGuard — it is a real link, and completing it would bind a device slot to a throwaway install. `handoff.md` §4 has the two lines that arrange that.
 
+### Reaching the first-run assistant
+
+The assistant only appears when there is **no** `proxy.yaml`, so copying one across is exactly what hides it. Leave the directory empty instead:
+
+```bash
+rm -rf /tmp/firstrun && mkdir -p /tmp/firstrun/adguard-cli
+```
+
+But an empty directory is unlicensed, and `configure` is licence-gated — so the assistant would stop at its welcome page with AdGuard's complaint, which is worth seeing once and useless after that. **The licence lives in `adguard.conf`, and copying that one file carries it across** (contract §5):
+
+```bash
+cp ~/.local/share/adguard-cli/adguard.conf /tmp/firstrun/adguard-cli/
+```
+
+```bash
+XDG_DATA_HOME=/tmp/firstrun cargo run -p adguard-gui
+```
+
+That is a licensed install with no configuration — the exact state the assistant exists for, and the only way to exercise the seeding path without resetting your own config. Two warnings go with it. The directory now holds your licence key, so delete it when you are done. And a walk of the resulting Status page carries the owner's e-mail like any other licensed install, which is the thing `handoff.md` §4's "just use a sandbox" advice no longer protects you from.
+
 GUI code needs a display. Under Wayland, headless CI requires a compositor:
 
 ```bash

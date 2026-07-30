@@ -165,6 +165,32 @@ Key syntax facts:
 - **`config get` does not mask secrets.** `config get listen_auth.password` prints `listen_auth.password = admin` in full; only `config show` masks, as `password: <set>`. So `config get` is not a safe thing to log.
 - `config reset <key>` restores the shipped default and confirms in the same way (`log_level` → `info`). Not used yet; the obvious home for it is a "restore default" affordance per row.
 
+### Before `proxy.yaml` exists, almost nothing works
+
+Everything above assumes the file is there. On a machine where `configure` has never run it is **not**, and that is not a corner case — it is every fresh install.
+
+Measured against a virgin `$XDG_DATA_HOME`:
+
+| Invocation | Exit | stdout | Effect |
+| --- | --- | --- | --- |
+| any command | 0 | `Created data directory <path>` | the directory, `adguard.conf`, both `agflm_*.db` and `logs/` appear — **but no `proxy.yaml`** |
+| `config set <any real key> <value>` | 0 | `No configuration YAML file` + `You can only configure the 'log_level' and 'update_channel'` + advice to run `configure` | nothing |
+| `config set log_level debug` | 0 | `log_level = debug`, the same advice, then `Config has been updated` | persists — into `adguard.conf`, **not** into a config file that still does not exist |
+| `config get log_level` | 0 | `log_level = debug` | reads back the above |
+| `activate` | 0 | the ordinary log-in link | **no `proxy.yaml`** |
+
+Four things follow.
+
+**The absence of `proxy.yaml` is the first-run signal**, and it is a file test rather than a command. Nothing else needs inventing, and `paths::config_file` already names the path.
+
+**`config set` is useless until the file exists.** This is what makes a first-run assistant built purely out of `config set` calls impossible, and it retired the design sentence in `architecture.md` §5 that described one.
+
+**`configure` is the only thing that creates the file.** `config get`, `config set` and `activate` were each run against a virgin directory and none of them produced one. `import-settings <zip>` is the only alternative and it needs a zip nobody has.
+
+**`Config has been updated` reaches a new low here.** For `log_level` it is printed truthfully — the value really is stored — about a file that is not the one any of this application's reads look at. The rule this document keeps repeating holds in its strongest form yet: the confirmation is never the evidence.
+
+One smaller measurement worth keeping, because it makes a test pass for the wrong reason if you do not know it: **the type check runs before the missing-file check**. `config set listen_ports.http_proxy true` answers *"the value of the setting must be an integer"* even with no config at all, so the CLI evidently knows every key's type from a built-in default. Probe this path with type-appropriate values or you will not be measuring what you think.
+
 ### Measuring writes without touching the real config
 
 **The CLI resolves its data directory as `$XDG_DATA_HOME/adguard-cli`.** Pointing that at a scratch directory holding a copy of `proxy.yaml` gives a complete, throwaway AdGuard configuration:
@@ -177,7 +203,11 @@ This is how everything in this section was measured, and `Cli::with_xdg_data_hom
 
 Two limits:
 
-- A sandbox is an **unlicensed** install, and copying `gm.db` across does not change that, so the licence evidently lives elsewhere. `status`, `license` and `filters list` all fail there with exit 1 (see [§3](#exit-1-is-usually-our-bug-but-not-always)). The `config` family, `--version` and `activate` need no licence and behave exactly as they do for real — `activate` because it is the command that exists to *fix* an unlicensed install, which makes a sandbox the only honest place to exercise it.
+- A sandbox is an **unlicensed** install by default. `status`, `license` and `filters list` all fail there with exit 1 (see [§3](#exit-1-is-usually-our-bug-but-not-always)). The `config` family, `--version` and `activate` need no licence and behave exactly as they do for real — `activate` because it is the command that exists to *fix* an unlicensed install, which makes a sandbox the only honest place to exercise it.
+
+  **The licence lives in `adguard.conf`, and it travels.** Copy that one file into a sandbox and `license` answers `APP_ACTIVE` there. An earlier revision of this bullet said the licence "evidently lives elsewhere", inferred from copying `gm.db` and seeing no change — the wrong file, not the wrong directory. This matters more than a correction: it is what makes the licence-gated commands measurable against a throwaway config at all, and `Cli::configure` could not have been covered without it, since the alternative was resetting the author's own install to watch what happened.
+
+  It has a sharp edge. `handoff.md` §4 says a Status-page walk leaks the licence owner's e-mail and offers "take the walk against a sandbox, which has no licence and therefore no owner" as the way out. A **lent** licence defeats that exactly, and a sandbox is where someone is most likely to feel safe pasting output. Redact at the harness instead.
 - It says nothing about whether our *reads* point at the file AdGuard really uses. That still needs a test against the live install — which is what `config_live.rs` and the one round-trip left in `config_mutate.rs` are for.
 
 ### The `--` guard is mandatory
@@ -489,7 +519,44 @@ Opening read-only is also verified not to create `-wal`/`-shm` side-car files ne
 
 `configure` and `activate` are interactive and cannot be driven headlessly. So, conditionally, is one `config set`.
 
-- **`configure`** — a wizard that writes the same keys we can set individually. The GUI reimplements it as a first-run assistant calling `config set`. Never invoke it.
+- **`configure`** — the wizard. This entry used to read *"the GUI reimplements it as a first-run assistant calling `config set`. Never invoke it."* Both halves were wrong, and for the same reason: until `configure` has run there is no `proxy.yaml`, and without one `config set` refuses every real key ([§5](#before-proxyyaml-exists-almost-nothing-works)). There is nothing to reimplement it *with*.
+
+  So it is the **second** exception to the never-invoke rule, on the same grounds as `activate`: with stdin closed its no-TTY branch is the only branch, and that branch is defined, non-interactive and fast. Measured against a **licensed** directory with no `proxy.yaml` — exit **0**, everything on **stdout**, 0.10 s:
+
+  ```text
+  Warning: No TTY available. Using default values for configuration.
+  Please enter the new value of the HTTP proxy listen port [default: 3129]:
+  Warning: No TTY for user input. Using default value (3129). Use `adguard-cli config set listen_ports.http_proxy` to change.
+  …
+  Select filter list groups to enable (can be changed later):
+  Warning: No TTY for user input. Skipping filter selection. Use `adguard-cli filters` to configure filters.
+  The proxy server is ready to start. You can start it by running `adguard-cli start`
+  ```
+
+  It takes every default and **names the `config set` key for each one itself**, which is where the assistant's question list came from rather than from guesswork:
+
+  | Prompt | Key | Default |
+  | --- | --- | --- |
+  | HTTP proxy listen port | `listen_ports.http_proxy` | `3129` |
+  | SOCKS5 proxy listen port | `listen_ports.socks5_proxy` | `1081` |
+  | proxy listen address | `listen_address` | `127.0.0.1` |
+  | proxy server mode | `proxy_mode` | `manual` |
+  | crash reports | `send_crash_reports` | `no` |
+  | HTTPS filtering | `https_filtering.enabled` | `yes` |
+  | certificate name | `https_filtering.root_certificate_name` | `AdGuard CLI CA` |
+  | filter list groups | the `filters` list | skipped |
+
+  Note the SOCKS key is `socks5_proxy`, not `socks_proxy`.
+
+  It leaves a complete 220-line `proxy.yaml` with all 105 of its upstream comments — the same shape as a real install's — plus `user.txt`, `dns_user.txt`, `https_exclusions.txt`, `browsers.yaml` and the CA certificate. Ordinary `config set` works immediately afterwards and is as surgical as ever.
+
+  **One prompt is skipped in silence.** *"Do you want to install the certificate on the system?. You will need to enter your password to confirm"* is the only one with no no-TTY warning and no key — it is a privileged step, and it simply does not happen. So the seeded state is HTTPS filtering **on** with its CA outside the system trust store. That is a fact for the UI to surface, not to paper over; §8 rules out installing it for the user.
+
+  **It is licence-gated.** Unlicensed it exits **1** with the usual complaint and usage dump on stderr — and seeds the file *anyway*, before reaching the gate, but without the CA. Activate first.
+
+  **The second run is the dangerous one, and it is deliberately unmeasured.** Against a directory that already has a `proxy.yaml` the wizard takes another branch entirely; its own strings are *"The initial configuration has already been completed. The running proxy server will be stopped, and the configuration will be reset. Do you want to continue?"* and *"No TTY available. Proceeding with reconfiguration using default values."* With stdin closed there is no prompt at which to decline, so that branch would proceed and take the user's whole configuration with it. The only licensed install available to confirm it on is the author's own, and the strings are clear enough that confirming costs more than it settles.
+
+  `Cli::configure` therefore checks for the file immediately before spawning and refuses with `Error::AlreadyConfigured` if it is there, and it is the only place in the codebase that names the subcommand. Success is decided by the file existing afterwards, not by anything printed.
 - **`activate`** — browser-based licence flow, absent from `--help-all` but a real command. Measured against an unlicensed sandbox, with stdin closed: exit **0**, both lines on **stdout**, no ANSI.
 
   ```text
@@ -568,7 +635,7 @@ Anything in the `adguard-cli` wrapper crate must:
 2. Treat exit 1 as *our* bug — with the three exceptions in [§3](#exit-1-is-usually-our-bug-but-not-always) — and detect user-facing failure by matching stdout text. A failure whose only text is on stdout is never our command line, whatever the exit status.
 3. Verify state changes by re-reading state, not by trusting exit 0.
 4. Never write `proxy.yaml`, and never write the `.db` files.
-5. Never invoke `configure`, or any other command that expects a TTY to be useful. `activate` is the one exception, and only because closing stdin makes its no-TTY branch the only branch: it prints a log-in link and returns rather than waiting for anything ([§7](#7-commands-that-need-a-tty)).
+5. Never invoke a command that expects a TTY to be useful. There are **two** exceptions, both because closing stdin makes the no-TTY branch the only branch: `activate`, which prints a log-in link and returns; and `configure`, which is the sole way a first run can produce a `proxy.yaml` at all — guarded so it can only run when that file is absent, since its other branch resets the user's configuration ([§7](#7-commands-that-need-a-tty)).
 6. Apply a timeout — network commands (`check-update`, `filters update`, `update`) can hang; a filter update failure was observed in the logs (`HttpClientNetworkError` reaching `filters.adtidy.org`).
 7. Run off the GTK main thread.
 8. Spawn with **stdin closed**, so a command that would prompt cannot hang ([§7](#the-wrapper-closes-stdin-so-no-tty-is-the-only-path)).

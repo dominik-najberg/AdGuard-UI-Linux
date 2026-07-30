@@ -671,6 +671,79 @@ pub const ADVANCED: [SettingGroup; 5] = [
     },
 ];
 
+/// The first-run assistant, in render order.
+///
+/// These are the questions `adguard-cli configure` asks that are worth asking
+/// again in a GUI. It asks eight; this table carries four, and the four it
+/// leaves out are left out for stated reasons rather than by oversight:
+///
+/// | Wizard prompt | Key | Why not here |
+/// | --- | --- | --- |
+/// | proxy server mode | `proxy_mode` | `auto` needs AdGuard's root helper set up first (`architecture.md` §6). Offering a mode that silently does nothing is the `dns_filtering` mistake again. |
+/// | proxy listen address | `listen_address` | Always blocked at first run: the seeded config has `listen_auth` off with empty credentials, and moving beyond loopback in that state is a **measured silent no-op** (contract §5). The Advanced page owns it, after setup, where the credentials can be set first. |
+/// | certificate name | `https_filtering.root_certificate_name` | Cosmetic, and the seeded default is the name the CA on disk already carries. |
+/// | filter list groups | the `filters` list | The Filters page is the whole of this, with a localised catalogue the wizard's numbered list cannot match. |
+///
+/// What remains is: the one protection switch whose answer changes what the
+/// proxy does on day one, the two ports someone with a port conflict has to
+/// change before anything works, and a consent question no other page asks.
+///
+/// Each `key` is written with an ordinary `config set` **after** the directory
+/// has been seeded — before that, every one of them is refused (contract §5).
+pub const SETUP: [SettingGroup; 3] = [
+    SettingGroup {
+        title: "Protection",
+        description: "AdGuard filters plain HTTP without this; most of the web is not \
+                      plain HTTP. Leaving it on is the reason to install AdGuard at all.",
+        settings: &[Setting {
+            key: crate::config::key::HTTPS_FILTERING,
+            title: "HTTPS filtering",
+            description: "Filter encrypted traffic. Needs AdGuard's certificate \
+                          trusted by each browser you want filtered",
+            kind: Kind::Switch,
+        }],
+    },
+    SettingGroup {
+        title: "Ports",
+        description: "The ports AdGuard listens on in manual proxy mode. Change one \
+                      only if something else on this machine already holds it. \
+                      Set a port to -1 to switch that protocol off.",
+        settings: &[
+            Setting {
+                key: crate::config::key::LISTEN_PORT_HTTP,
+                title: "HTTP proxy port",
+                description: "Use -1 to disable HTTP manual proxy",
+                kind: Kind::Number {
+                    min: -1,
+                    max: 65535,
+                    disabled_value: Some(-1),
+                },
+            },
+            Setting {
+                key: crate::config::key::LISTEN_PORT_SOCKS5,
+                title: "SOCKS5 proxy port",
+                description: "Use -1 to disable SOCKS5 manual proxy",
+                kind: Kind::Number {
+                    min: -1,
+                    max: 65535,
+                    disabled_value: Some(-1),
+                },
+            },
+        ],
+    },
+    SettingGroup {
+        title: "Crash reports",
+        description: "The CLI's wizard asks this and no other page of this app does, \
+                      so it is asked here rather than answered on your behalf.",
+        settings: &[Setting {
+            key: crate::config::key::SEND_CRASH_REPORTS,
+            title: "Send crash reports to AdGuard",
+            description: "Helps AdGuard fix crashes. Off unless you turn it on",
+            kind: Kind::Switch,
+        }],
+    },
+];
+
 /// Which of the two filter catalogues an operation targets.
 ///
 /// They are genuinely separate: different databases, and a `dns` prefix on
