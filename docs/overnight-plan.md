@@ -32,27 +32,17 @@ Done already, this session:
 | --- | --- |
 | `5ebe8d7` | Every CLI invocation is bounded in time — closes the `cli.rs` TODO and handoff §3 gap 2 |
 | `a9a03ff` | That bound can no longer hang on a descendant holding the pipe |
-| *item 1* | The `proxy.yaml` config monitor — acceptance test met: 40 s idle with the mtime moving produces zero reconciles, an edit produces exactly one, a bare `touch` produces none |
+| `3e52fc7` | The `proxy.yaml` config monitor — acceptance test met: 40 s idle with the mtime moving produces zero reconciles, an edit produces exactly one, a bare `touch` produces none |
 
 Remaining, in order. Each lands as its own commit with its own proof.
 
-**1. The `proxy.yaml` config monitor** — handoff §2, ~210 lines. The highest-value item left and the safest: the new code path only reads and repaints.
-
-- `config::Watch` in `adguard-core` (GTK-free, unit-testable): holds the path and the text of the last *successfully parsed* read; `changed()` returns `None` when the bytes are identical, when the file is unreadable, or when the parse fails. Compare bytes, not a digest — the file is ~9 KB and there is no hash crate in the tree. Store the new text **only after a successful parse**, so a torn read leaves the snapshot alone and retries.
-- `reconcile(&Config)` on Protection and Advanced: `if rows.is_empty() { reload() } else { apply(config) }`. The normal branch must never be `reload()` — that swaps in a spinner and rebuilds every widget, discarding Advanced's `painted` guard and any part-typed entry.
-- **Do not register through `ProtectionPage::connect_config`.** It is a single slot already holding the tray's observer; a second registration silently unhooks the tray and nothing fails loudly.
-- Park the `gio::FileMonitor` on `MainView` or it is dropped immediately.
-- Emit one `eprintln!` when a reconcile actually fires. That line is the only headless proof the churn filter works.
-
-*Done when:* an `#[ignore]`d sandbox test primes a `Watch`, runs `--version` five times, and asserts `changed()` returned `None` every time; **and** a headless run shows zero reconcile lines while idling for 60 s, then exactly one after an external edit.
-
-**2. The lapsed-licence error mapping** — handoff §3 gap 1, ~60 lines. Not activation, just the mapping: `status`, `license` and `filters list` exit 1 on stderr in an unlicensed install, and `Cli` calls that `BadInvocation` — "adguard-cli rejected `status`". Fully provable against a sandbox, which is unlicensed by construction.
+**1. The lapsed-licence error mapping** — handoff §3 gap 1, ~60 lines. Not activation, just the mapping: `status`, `license` and `filters list` exit 1 on stderr in an unlicensed install, and `Cli` calls that `BadInvocation` — "adguard-cli rejected `status`". Fully provable against a sandbox, which is unlicensed by construction.
 
 *Done when:* a sandbox `status` yields a licence-shaped error rather than `BadInvocation`, shown by pasted test output.
 
-**3. Stealth-mode sub-page** — handoff §3 gap 4, ~250 lines. Pure `model::ADVANCED` table work plus a page that already has three siblings to copy. Verifiable only as far as the page selector allows (see below).
+**2. Stealth-mode sub-page** — handoff §3 gap 4, ~250 lines. Pure `model::ADVANCED` table work plus a page that already has three siblings to copy. Verifiable only as far as the page selector allows (see below).
 
-**4. The `dns_filtering` dependency for `encrypted_client_hello` and `filter_secure_dns_mode`** — gap 5, ~40 lines. Same shape as the caveat Protection already renders.
+**3. The `dns_filtering` dependency for `encrypted_client_hello` and `filter_secure_dns_mode`** — gap 5, ~40 lines. Same shape as the caveat Protection already renders.
 
 Anything past here will not be reached, and that is the correct outcome rather than a shortfall.
 
