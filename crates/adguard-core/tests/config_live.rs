@@ -139,8 +139,52 @@ fn list_valued_keys_read_from_the_file() {
     );
 
     assert!(
-        config.list_at("dns_filtering.filters").is_some(),
+        config.list_at(key::DNS_FILTERS).is_some(),
         "`dns_filtering.filters` should be a list",
+    );
+
+    // Membership, not just readability: whether `dns_user.txt` is in this list
+    // is the entire on/off signal behind the DNS page's user-rules row, and
+    // `lists` is the read that answers it — including for the null the CLI
+    // leaves behind when the list is emptied.
+    assert_eq!(
+        config.lists(key::DNS_FILTERS, "dns_user.txt"),
+        Some(true),
+        "the shipped `dns_filtering.filters` should carry dns_user.txt: {:?}",
+        config.list_at(key::DNS_FILTERS),
+    );
+}
+
+/// The three DNS server settings are scalars, whatever their comments suggest,
+/// and the DNS page writes them with `config set`. A day when upstream turns
+/// one into a sequence should fail here rather than in a silently blank row.
+#[test]
+fn the_dns_server_settings_read_as_scalars() {
+    let Some(config) = load() else { return };
+
+    for scalar in [key::DNS_UPSTREAM, key::DNS_FALLBACKS, key::DNS_BOOTSTRAPS] {
+        assert!(
+            config.str_at(scalar).is_some(),
+            "{scalar} should be a scalar string",
+        );
+        assert!(
+            config.list_at(scalar).is_none(),
+            "{scalar} reads as a sequence — the write path for it is now wrong",
+        );
+    }
+}
+
+/// The key behind the caveat Protection shows and the DNS page cures. Its three
+/// states are ours to bound; the CLI accepts anything integer-shaped.
+#[test]
+fn the_dns_listen_port_reads_as_one_of_its_three_states() {
+    let Some(config) = load() else { return };
+
+    let raw = config.int_at(key::DNS_LISTEN_PORT);
+    assert!(raw.is_some(), "dns_filtering.listen_port should be an integer");
+    assert!(
+        config.dns_listen_port().is_some(),
+        "the machine's listen_port {raw:?} is outside the three documented states",
     );
 }
 

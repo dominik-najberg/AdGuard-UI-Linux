@@ -769,3 +769,200 @@ fn the_machine_config_was_not_touched() {
         "the sandbox suite modified the machine's proxy.yaml"
     );
 }
+
+/// The list-write half of the surgical-write claim.
+///
+/// `advanced_writes_disturb_one_line_each_and_keep_every_comment` asserts the
+/// line count does **not** move, which is the wrong shape for a sequence: a
+/// `list-add` is supposed to add one. What has to hold is that it adds exactly
+/// one and leaves every comment alone, because the whole never-write-YAML rule
+/// rests on these commands being as surgical as `config set`.
+#[test]
+#[ignore = "invokes the real adguard-cli"]
+fn a_list_add_adds_exactly_one_line_and_keeps_every_comment() {
+    let Some(sandbox) = Sandbox::new("list-surgical") else { return };
+    let path = sandbox.config_path();
+    let comments = |text: &str| {
+        text.lines()
+            .filter(|line| line.trim_start().starts_with('#'))
+            .count()
+    };
+
+    let before = std::fs::read_to_string(&path).expect("read sandbox config");
+    sandbox
+        .cli
+        .list_add(key::DNS_FILTERS, "adguard-ui-probe.txt")
+        .expect("list-add should be accepted");
+    let after = std::fs::read_to_string(&path).expect("read sandbox config");
+
+    assert_eq!(
+        after.lines().count(),
+        before.lines().count() + 1,
+        "a list-add should add exactly one line"
+    );
+    assert_eq!(
+        comments(&after),
+        comments(&before),
+        "a list-add lost comment lines"
+    );
+    assert_eq!(
+        sandbox.config().lists(key::DNS_FILTERS, "adguard-ui-probe.txt"),
+        Some(true)
+    );
+}
+
+/// Measured, and the reason the DNS user-rules toggle reads before it writes:
+/// adding a value the list already holds appends it a **second time** and
+/// reports success like any other write. A toggle driven off a stale read would
+/// corrupt the list rather than no-opping, and nothing in the output says so.
+#[test]
+#[ignore = "invokes the real adguard-cli"]
+fn list_add_does_not_deduplicate() {
+    let Some(sandbox) = Sandbox::new("list-dup") else { return };
+
+    sandbox
+        .cli
+        .list_add(key::DNS_FILTERS, "dupe.txt")
+        .expect("first add");
+    sandbox
+        .cli
+        .list_add(key::DNS_FILTERS, "dupe.txt")
+        .expect("second add is accepted too — that is the point");
+
+    let config = sandbox.config();
+    let entries = config.list_at(key::DNS_FILTERS).expect("the list should read");
+    let count = entries.iter().filter(|entry| **entry == "dupe.txt").count();
+    assert_eq!(count, 2, "expected the duplicate the CLI happily writes, got {entries:?}");
+}
+
+/// The other direction is safe to issue speculatively: removing something that
+/// is not there changes nothing and still succeeds.
+#[test]
+#[ignore = "invokes the real adguard-cli"]
+fn list_remove_of_an_absent_value_is_a_silent_success() {
+    let Some(sandbox) = Sandbox::new("list-absent") else { return };
+    let path = sandbox.config_path();
+    let before = std::fs::read_to_string(&path).expect("read sandbox config");
+
+    sandbox
+        .cli
+        .list_remove(key::DNS_FILTERS, "was-never-there.txt")
+        .expect("removing an absent value should still be accepted");
+
+    assert_eq!(
+        before,
+        std::fs::read_to_string(&path).expect("read sandbox config"),
+        "removing an absent value changed the file"
+    );
+}
+
+/// Emptying the list writes a bare `filters:` — a YAML null, not `[]` — so
+/// `list_at` answers `None` for a list the user just successfully emptied.
+/// `Config::lists` is the read that survives it; this test is what stops
+/// someone "simplifying" it back into `list_at`.
+#[test]
+#[ignore = "invokes the real adguard-cli"]
+fn emptying_a_list_leaves_a_null_that_lists_still_reads() {
+    let Some(sandbox) = Sandbox::new("list-empty") else { return };
+
+    let seeded = sandbox.config();
+    let Some(entries) = seeded.list_at(key::DNS_FILTERS) else {
+        eprintln!("skipping: the seed config has no readable dns_filtering.filters");
+        return;
+    };
+    let entries: Vec<String> = entries.iter().map(|entry| (*entry).to_owned()).collect();
+
+    for entry in &entries {
+        sandbox
+            .cli
+            .list_remove(key::DNS_FILTERS, entry)
+            .unwrap_or_else(|err| panic!("list-remove {entry} refused: {err}"));
+    }
+
+    let config = sandbox.config();
+    assert_eq!(
+        config.lists(key::DNS_FILTERS, "dns_user.txt"),
+        Some(false),
+        "an emptied list must read as empty, never as unreadable"
+    );
+    eprintln!(
+        "after emptying, list_at reads {:?} — `lists` is what makes that harmless",
+        config.list_at(key::DNS_FILTERS)
+    );
+}
+
+/// The three DNS server settings look like lists in the file's own comments
+/// ("space-separated list of DNS servers") and are not. `list-add` refuses them
+/// and names the remedy, which is how their class was settled — and this test
+/// is what catches the day upstream turns one of them into a real sequence.
+#[test]
+#[ignore = "invokes the real adguard-cli"]
+fn the_dns_server_settings_are_scalars_not_lists() {
+    let Some(sandbox) = Sandbox::new("dns-scalars") else { return };
+
+    for scalar in [key::DNS_UPSTREAM, key::DNS_FALLBACKS, key::DNS_BOOTSTRAPS] {
+        let err = sandbox
+            .cli
+            .list_add(scalar, "1.1.1.1")
+            .expect_err("list-add on a scalar key must be refused");
+        let message = err.to_string();
+        assert!(
+            message.contains("not a list setting"),
+            "{scalar}: unexpected refusal wording: {message}"
+        );
+    }
+
+    // And the write that does work is the ordinary one, space-separated value
+    // and all.
+    sandbox.set(key::DNS_FALLBACKS, "default 1.1.1.1");
+    assert_eq!(
+        sandbox.config().str_at(key::DNS_FALLBACKS),
+        Some("default 1.1.1.1")
+    );
+}
+
+/// Unlike most string settings these three are validated, so the CLI's own
+/// sentence is the one worth showing rather than a weaker rule of ours.
+#[test]
+#[ignore = "invokes the real adguard-cli"]
+fn an_empty_dns_server_value_is_refused_with_the_valid_values() {
+    let Some(sandbox) = Sandbox::new("dns-empty") else { return };
+
+    let err = sandbox
+        .cli
+        .config_set(key::DNS_BOOTSTRAPS, "")
+        .expect_err("an empty bootstraps value must be refused");
+    let message = err.to_string();
+    assert!(
+        message.contains("Invalid value") && message.contains("default"),
+        "unexpected refusal wording: {message}"
+    );
+    assert_eq!(
+        sandbox.config().str_at(key::DNS_BOOTSTRAPS),
+        Some("default"),
+        "a refused write must leave the value alone"
+    );
+}
+
+/// `config set` type-checks and never range-checks — this key included. The
+/// bound lives in `DnsListenPort`, and a value outside it must read as
+/// unavailable rather than as one of the three states.
+#[test]
+#[ignore = "invokes the real adguard-cli"]
+fn the_cli_does_not_range_check_the_dns_listen_port() {
+    let Some(sandbox) = Sandbox::new("dns-port-range") else { return };
+
+    sandbox.set(key::DNS_LISTEN_PORT, "70000");
+    assert_eq!(sandbox.config().int_at(key::DNS_LISTEN_PORT), Some(70000));
+    assert_eq!(
+        sandbox.config().dns_listen_port(),
+        None,
+        "a port no listener could use must not render as one of the three states"
+    );
+
+    for (written, expected) in [("-1", -1), ("0", 0), ("5353", 5353)] {
+        sandbox.set(key::DNS_LISTEN_PORT, written);
+        assert_eq!(sandbox.config().int_at(key::DNS_LISTEN_PORT), Some(expected));
+        assert!(sandbox.config().dns_listen_port().is_some(), "{written} should read");
+    }
+}

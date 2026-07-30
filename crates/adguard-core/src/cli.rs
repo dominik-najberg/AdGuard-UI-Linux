@@ -600,6 +600,93 @@ impl Cli {
         self.config_set(key, value)
             .map_err(|err| redact_error(err, value))
     }
+
+    /// Add one value to a list-valued setting.
+    ///
+    /// The sequence keys — `filters`, `userscripts`, `apps`,
+    /// `dns_filtering.filters` — are the ones `config get` refuses; they are
+    /// written with `list-add`/`list-remove` rather than `config set`.
+    ///
+    /// # This does not deduplicate
+    ///
+    /// Measured against a sandbox: adding a value the list already holds
+    /// appends it a **second time**, exits 0, and prints `Config has been
+    /// updated` like any other success.
+    ///
+    /// ```text
+    /// $ adguard-cli config list-add -- dns_filtering.filters dns_user.txt
+    /// filters:
+    ///   - 'dns_user.txt'
+    ///   - 'dns_user.txt'
+    ///
+    /// Config has been updated
+    /// ```
+    ///
+    /// So a caller driving a *toggle* off one of these lists must read the list
+    /// and decide membership itself, calling this only when it would change
+    /// something. Issuing it off a stale read corrupts the list instead of
+    /// no-opping, and nothing in the output distinguishes the two.
+    pub fn list_add(&self, key: &str, value: &str) -> Result<Applied, Error> {
+        self.config_list("list-add", key, value)
+    }
+
+    /// Remove one value from a list-valued setting.
+    ///
+    /// Removing a value that is not there is a silent success — exit 0, the
+    /// unchanged list echoed, `Config has been updated` — so this is safe to
+    /// issue speculatively in a way [`Self::list_add`] is not.
+    ///
+    /// # Emptying the list leaves a null, not `[]`
+    ///
+    /// Removing the **last** element writes a bare `filters:`, which reads back
+    /// as `Yaml::Null` rather than an empty sequence, so
+    /// [`crate::config::Config::list_at`] answers `None` — the crate's
+    /// "unreadable" answer — for a list the caller just successfully emptied.
+    /// The next invocation of anything normalises the key to `[]`, which makes
+    /// the state transient and therefore easy to miss.
+    /// [`crate::config::Config::lists`] is the membership test that reads it
+    /// correctly; do not ask `list_at` this question directly.
+    pub fn list_remove(&self, key: &str, value: &str) -> Result<Applied, Error> {
+        self.config_list("list-remove", key, value)
+    }
+
+    /// The shared half of [`Self::list_add`] and [`Self::list_remove`].
+    ///
+    /// Success is defined positively by `Config has been updated`, exactly as
+    /// for [`Self::config_set`], and every other output shape is a refusal. The
+    /// refusal worth recognising is the one for a key that is not a sequence:
+    ///
+    /// ```text
+    /// $ adguard-cli config list-add -- dns_filtering.fallbacks 1.1.1.1
+    /// This field is not a list setting
+    /// Please run `... config set <key> <value>` to set a new value
+    /// ```
+    ///
+    /// which is the mirror of what `config get` says about a list key, and is
+    /// how the three DNS server settings were shown to be scalars.
+    ///
+    /// The `--` guard is as mandatory here as it is for `config set`, and fails
+    /// the same way without it — measured, `list-add dns_filtering.filters
+    /// -weird.txt` exits **1** with `<value> is required` on stderr and writes
+    /// nothing, while the same call with `--` is accepted.
+    ///
+    /// One value per call, though the usage dump shows up to three positionals
+    /// are accepted: a three-value call whose middle value is refused cannot be
+    /// attributed to the value that caused it.
+    fn config_list(&self, verb: &str, key: &str, value: &str) -> Result<Applied, Error> {
+        let out = self.run(&["config", verb, "--", key, value])?;
+
+        if out.stdout.lines().map(str::trim).any(|line| line == CONFIG_UPDATED) {
+            Ok(Applied {
+                restart_required: mentions_restart(&out.stdout),
+            })
+        } else {
+            Err(Error::Refused {
+                message: first_line(&out.stdout)
+                    .unwrap_or_else(|| format!("`config {verb} {key}` said nothing at all")),
+            })
+        }
+    }
 }
 
 /// Replace a secret with a placeholder wherever it appears.

@@ -189,6 +189,48 @@ impl Config {
         Some(items.iter().filter_map(Yaml::as_str).collect())
     }
 
+    /// Does the list at `key` contain `value`?
+    ///
+    /// `None` only when the key holds something that cannot be a list at all —
+    /// a scalar, or a mapping. An **absent** key and a **null** one both answer
+    /// `Some(false)`, and the distinction matters more than it looks:
+    /// `config list-remove` of the last element leaves a bare `filters:`, which
+    /// is `Yaml::Null`, so [`Self::list_at`] returns `None` for a list the user
+    /// just successfully emptied. Rendering that by the usual "None means
+    /// unavailable" rule would grey out the row at the exact moment it worked,
+    /// and the next invocation of anything rewrites the key as `[]` and heals
+    /// it — so the bug would vanish before anyone could reproduce it.
+    ///
+    /// Entries are compared trimmed. `list_at` already drops non-string
+    /// entries, so a hand-written `- 53` is invisible here; that is the same
+    /// tolerance every other read in this file has, and it costs one row rather
+    /// than the page.
+    pub fn lists(&self, key: &str, value: &str) -> Option<bool> {
+        match self.at(key) {
+            // The two shapes an empty list legitimately takes.
+            Yaml::Null | Yaml::BadValue => Some(false),
+            Yaml::Array(_) => Some(
+                self.list_at(key)?
+                    .iter()
+                    .any(|entry| entry.trim() == value),
+            ),
+            // A scalar or a mapping where a sequence belongs: a hand edit we
+            // have no honest reading of.
+            _ => None,
+        }
+    }
+
+    /// `dns_filtering.listen_port` as the three states the file documents.
+    ///
+    /// `None` for anything else — a port outside 1..=65535, or the float that
+    /// `config set dns_filtering.listen_port 3.5` writes, which
+    /// [`Self::int_at`] cannot read at all. Both render as unavailable rather
+    /// than being clamped, for the reason every other numeric row gives:
+    /// showing a clamped value invites the user to write it back by accident.
+    pub fn dns_listen_port(&self) -> Option<DnsListenPort> {
+        DnsListenPort::from_int(self.int_at(key::DNS_LISTEN_PORT)?)
+    }
+
     /// The state of one Protection switch.
     ///
     /// `None` means the key is absent or holds something that is not a
@@ -334,6 +376,18 @@ pub mod key {
 
     pub const DNS_LISTEN_PORT: &str = "dns_filtering.listen_port";
 
+    // --- the DNS page ---
+    // `dns_filtering.filters` is the only real sequence of the four: it answers
+    // `config get` with *"This field is not a separate setting"* and takes
+    // `list-add`/`list-remove`. The other three answer `config get` with a
+    // value and refuse `list-add` with *"This field is not a list setting"*, so
+    // the "space-separated list" their comments describe lives inside one
+    // scalar and they are written with `config set` like any other string.
+    pub const DNS_FILTERS: &str = "dns_filtering.filters";
+    pub const DNS_UPSTREAM: &str = "dns_filtering.upstream";
+    pub const DNS_FALLBACKS: &str = "dns_filtering.fallbacks";
+    pub const DNS_BOOTSTRAPS: &str = "dns_filtering.bootstraps";
+
     // Both documented in `proxy.yaml` as "Requires dns_filtering to be
     // enabled", and neither enforced: measured, `config set
     // https_filtering.encrypted_client_hello true` succeeds with
@@ -417,6 +471,80 @@ pub fn is_loopback(address: &str) -> bool {
         // for `::1` alone and would call it exposed.
         ip.to_canonical().is_loopback()
     })
+}
+
+/// The three states `dns_filtering.listen_port` documents for itself.
+///
+/// ```text
+/// # -1 = disabled (no DNS proxy in manual mode; no extra listener in auto mode)
+/// #  0 = random port in manual mode (original behaviour); no extra listener in auto mode
+/// #  N = listen on port N (e.g. 5353) — required for DNS filtering in manual proxy mode
+/// ```
+///
+/// Kept as a bespoke type rather than a [`crate::model::Kind`] variant: this is
+/// the only tri-state control in the application, and generalising it would
+/// touch the Advanced page's row-building, its `painted` snapshot and its
+/// dependency table for exactly one caller.
+///
+/// # The listener this names is pinned to loopback
+///
+/// Measured (contract §5): with a port set, the proxy listens on
+/// `127.0.0.1:<port>` over **both** UDP and TCP, and moving `listen_address` to
+/// another address takes the HTTP and SOCKS5 proxies with it while the DNS
+/// listener stays on `127.0.0.1`. So no value of this setting can expose
+/// anything, and the row needs neither the confirmation dialog nor the standing
+/// warning that `listen_address` carries.
+///
+/// # A port alone does nothing
+///
+/// The dependency runs both ways. `dns_filtering.enabled: false` with a real
+/// port brings up no listener at all — measured, `status` reads `Manual DNS
+/// proxy is disabled` — just as `enabled: true` with `-1` filters nothing.
+/// [`Config::dns_filtering_is_inert`] models only the second direction, so a UI
+/// offering this setting has to say what the other half is doing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DnsListenPort {
+    /// `-1` — no DNS proxy at all.
+    Disabled,
+    /// `0` — a port picked by the daemon, in manual mode.
+    Automatic,
+    /// `N` — a fixed port. Bounded here, because `config set` type-checks and
+    /// nothing more: it accepts `70000` and `3.5` alike.
+    Fixed(u16),
+}
+
+impl DnsListenPort {
+    pub const MIN: i64 = 1;
+    pub const MAX: i64 = u16::MAX as i64;
+
+    /// Read the file's integer. `None` for anything outside the three states,
+    /// which is what makes an out-of-range value render as unavailable rather
+    /// than as one of them.
+    pub fn from_int(value: i64) -> Option<Self> {
+        match value {
+            -1 => Some(Self::Disabled),
+            0 => Some(Self::Automatic),
+            port if (Self::MIN..=Self::MAX).contains(&port) => Some(Self::Fixed(port as u16)),
+            _ => None,
+        }
+    }
+
+    /// The value to write with `config set`.
+    pub fn to_int(self) -> i64 {
+        match self {
+            Self::Disabled => -1,
+            Self::Automatic => 0,
+            Self::Fixed(port) => i64::from(port),
+        }
+    }
+
+    /// Whether this state asks the daemon for a listener at all.
+    ///
+    /// `Automatic` counts: it listens, on a port nobody chose. Only `Disabled`
+    /// means no listener.
+    pub fn listens(self) -> bool {
+        !matches!(self, Self::Disabled)
+    }
 }
 
 /// What has to happen for `listen_address` to actually become `address`.
@@ -1141,5 +1269,104 @@ stealthmode:
         let _ = std::fs::remove_file(&path);
         let mut watch = Watch::new(&path);
         assert!(watch.changed().is_none());
+    }
+
+    #[test]
+    fn membership_of_a_list_key() {
+        let config = sample();
+        assert_eq!(config.lists(key::DNS_FILTERS, "dns_user.txt"), Some(true));
+        assert_eq!(config.lists(key::DNS_FILTERS, "other.txt"), Some(false));
+        assert_eq!(config.lists("filters", "user.txt"), Some(true));
+    }
+
+    /// The state `config list-remove` leaves behind after the last element:
+    /// a bare `filters:`, which is `Yaml::Null`. `list_at` cannot read it, but
+    /// the membership question has an unambiguous answer — nothing is in it —
+    /// and answering `None` would grey the row out at the instant the user
+    /// emptied it, then heal on the next invocation of anything.
+    #[test]
+    fn an_emptied_list_reads_as_empty_not_as_unreadable() {
+        let emptied = SAMPLE.replace("  filters:\n    - 'dns_user.txt'\n", "  filters:\n");
+        let config = Config::parse(&emptied, Path::new("proxy.yaml")).expect("should parse");
+
+        assert!(
+            config.list_at(key::DNS_FILTERS).is_none(),
+            "list_at cannot read a null, which is exactly why `lists` exists"
+        );
+        assert_eq!(config.lists(key::DNS_FILTERS, "dns_user.txt"), Some(false));
+    }
+
+    #[test]
+    fn an_absent_list_key_contains_nothing() {
+        assert_eq!(sample().lists("no_such_list", "anything"), Some(false));
+    }
+
+    /// A scalar where a sequence belongs is a hand edit with no honest reading,
+    /// and is the one case that stays `None`.
+    #[test]
+    fn a_scalar_where_a_list_belongs_is_unreadable() {
+        let punned = SAMPLE.replace("  filters:\n    - 'dns_user.txt'\n", "  filters: 'oops'\n");
+        let config = Config::parse(&punned, Path::new("proxy.yaml")).expect("should parse");
+        assert_eq!(config.lists(key::DNS_FILTERS, "dns_user.txt"), None);
+    }
+
+    #[test]
+    fn the_three_documented_listen_port_states() {
+        assert_eq!(DnsListenPort::from_int(-1), Some(DnsListenPort::Disabled));
+        assert_eq!(DnsListenPort::from_int(0), Some(DnsListenPort::Automatic));
+        assert_eq!(
+            DnsListenPort::from_int(5353),
+            Some(DnsListenPort::Fixed(5353))
+        );
+        assert_eq!(DnsListenPort::from_int(65535), Some(DnsListenPort::Fixed(65535)));
+    }
+
+    /// `config set` type-checks and never range-checks — measured, it accepts
+    /// `70000` for this very key — so the bound is ours, and a value outside it
+    /// renders as unavailable rather than being clamped.
+    #[test]
+    fn a_port_the_cli_accepted_but_no_listener_could_use_is_unavailable() {
+        assert_eq!(DnsListenPort::from_int(70000), None);
+        assert_eq!(DnsListenPort::from_int(-2), None);
+
+        let punned = SAMPLE.replace("listen_port: -1", "listen_port: 70000");
+        let config = Config::parse(&punned, Path::new("proxy.yaml")).expect("should parse");
+        assert_eq!(config.dns_listen_port(), None);
+    }
+
+    /// The nastiest of the accepted-but-unusable values: `config set
+    /// dns_filtering.listen_port 3.5` writes a float, and `int_at` reads
+    /// nothing at all from it.
+    #[test]
+    fn a_float_port_is_unavailable_rather_than_rounded() {
+        let punned = SAMPLE.replace("listen_port: -1", "listen_port: 3.5");
+        let config = Config::parse(&punned, Path::new("proxy.yaml")).expect("should parse");
+        assert_eq!(config.int_at(key::DNS_LISTEN_PORT), None);
+        assert_eq!(config.dns_listen_port(), None);
+    }
+
+    #[test]
+    fn listen_port_states_round_trip_through_the_written_value() {
+        for state in [
+            DnsListenPort::Disabled,
+            DnsListenPort::Automatic,
+            DnsListenPort::Fixed(5353),
+        ] {
+            assert_eq!(DnsListenPort::from_int(state.to_int()), Some(state));
+        }
+    }
+
+    /// `Automatic` listens — on a port nobody chose. Only `Disabled` does not,
+    /// which is the distinction `dns_filtering_is_inert` turns on.
+    #[test]
+    fn only_the_disabled_state_means_no_listener() {
+        assert!(!DnsListenPort::Disabled.listens());
+        assert!(DnsListenPort::Automatic.listens());
+        assert!(DnsListenPort::Fixed(5353).listens());
+    }
+
+    #[test]
+    fn the_sample_reads_its_dns_listen_port() {
+        assert_eq!(sample().dns_listen_port(), Some(DnsListenPort::Disabled));
     }
 }
