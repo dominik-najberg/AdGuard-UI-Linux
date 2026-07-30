@@ -58,6 +58,22 @@ cargo run -p adguard-gui
 
 That is the whole application: `adguard-ui` is the only binary, and it serves the tray icon too. `adguard-tray` is a library (see `architecture.md` §4), so there is nothing separate to start.
 
+`make build` and `make run` wrap those two commands and nothing else — Cargo is still the build system (`architecture.md` §1). `make run ARGS=--background` passes the flag through, and a bare `make` lists the targets rather than picking one.
+
+**A resident copy owns the launch.** The app is single-instance, so starting a fresh build while an older one is still running does not replace it: the new process hands its command line to the old one and exits. Normally that is the point, but while iterating it means the binary you just compiled never ran. Now that autostart keeps a copy resident from login, this is the common case, not the rare one:
+
+```bash
+pkill -x adguard-ui
+```
+
+A copy predating the `HANDLES_COMMAND_LINE` change refuses the handover outright, and the failure names neither cause nor cure:
+
+```
+GDBus.Error:org.freedesktop.DBus.Error.NotSupported: Application does not handle command line arguments
+```
+
+The *primary* decides whether command lines are accepted, so a process started before that flag existed rejects every launch of a build that has it. Kill it and the next launch becomes the primary. Two builds that both have the flag never see this.
+
 ### Seeing the tray icon
 
 The icon appears in the top bar next to the other indicators. It needs two things:
