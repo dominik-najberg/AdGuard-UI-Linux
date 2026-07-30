@@ -18,6 +18,7 @@ Working state as of 30 July 2026. The overnight run closed the config monitor, t
 | Tray | Done. Start/stop plus the six Protection toggles, in the GUI process. |
 | Config monitor | Done. External edits to `proxy.yaml` reconcile the table-driven pages live, without churning on our own CLI traffic. |
 | Autostart | Done. `--background` starts windowless; `data/autostart/` installs into `~/.config/autostart/`. |
+| Icon | Done. Colour and symbolic SVGs in `data/icons/`, installed by `building.md` §4. Until that install has been done once, a `cargo run` window gets the generic cog — the artwork is reached through the desktop entry, not through the binary. |
 | DNS | Not started. Scope now settled, including a writable `listen_port` — `architecture.md` §5. |
 | Licence activation | Done, bar the success leg. Owner and masked key when licensed; `activate` → open the link → *finish activation* when not. Never polled. |
 | Auto mode | Not started. No privileged component of ours — detection and instruction only, `architecture.md` §6. |

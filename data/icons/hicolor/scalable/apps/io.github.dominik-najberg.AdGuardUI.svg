@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The application icon. Its basename must stay equal to `Icon=` in the two
+  desktop entries, which is the application ID (`main.rs::APP_ID`) — the shell
+  resolves a window's app ID to a desktop file and that file's `Icon=` to this
+  name, so a rename that misses one of the four shows the generic cog again.
+
+  Drawn on GNOME's 128x128 grid, free-form rather than in a rounded square: the
+  silhouette is what distinguishes a dock icon at 22 px, where the artwork
+  inside it is barely three pixels of ring.
+
+  A shield with a prohibition mark, deliberately *not* AdGuard's own green
+  shield-and-check. This is an unofficial front-end and should not be mistaken
+  for the product it drives.
+
+  ## Why this file is written the dull way
+
+  Every element carries its own `fill` and there are no strokes, no `<use>`, no
+  `<g>` to inherit from, and no `fill="none"` anywhere. That is not style — an
+  earlier version of this icon used all four and GNOME Shell drew it as a
+  solid black shield in the dock, while librsvg rendered it correctly
+  everywhere else. A rasteriser that does not resolve inherited presentation
+  attributes falls back to the SVG default fill, which is *black*, so a
+  `<use fill="url(#body)">` and a `<g fill="none" stroke="#fff">` both collapse
+  into filled black — the shield and then a black disc on top of it, which is
+  exactly what appeared. Written this way there is nothing to inherit and
+  nothing to fall back to.
+
+  Gradients are safe and stay: the icons on this machine that do render in the
+  dock use them. It is inheritance that could not be relied on.
+
+  Consequences worth knowing before editing:
+    * The rim is a whole second shield behind the body, not a stroke, so its
+      geometry is duplicated below and inset by hand. Move one and move both.
+    * The sheen repeats the body's path verbatim for the same reason.
+    * The prohibition mark is one `evenodd` path — ring, hole, bar — rather
+      than a stroked circle. The bar's corners sit *on* the hole's edge
+      (r 24.25) so it meets the ring without notching it; that is what the
+      untidy coordinates are.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="body" x1="64" y1="18" x2="64" y2="117" gradientUnits="userSpaceOnUse">
+      <stop offset="0"    stop-color="#63d67f"/>
+      <stop offset="0.55" stop-color="#31b063"/>
+      <stop offset="1"    stop-color="#17864a"/>
+    </linearGradient>
+
+    <!-- Top-lit, so the shape reads as convex rather than as a flat sticker. -->
+    <linearGradient id="sheen" x1="64" y1="18" x2="64" y2="74" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.3"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Rim: the outer shield, showing as a 2 px edge around the body. Keeps the
+       icon defined against light wallpaper and against a light dock panel. -->
+  <path fill="#0b5a34" d="M 30 16 H 98 A 12 12 0 0 1 110 28 V 58 C 110 88 92 108 70 117 Q 64 119.5 58 117 C 36 108 18 88 18 58 V 28 A 12 12 0 0 1 30 16 Z"/>
+
+  <!-- Body, and the sheen over it: the same path twice. -->
+  <path fill="url(#body)"  d="M 30 18 H 98 A 10 10 0 0 1 108 28 V 58 C 108 86.2 90.6 105.2 69.2 114.8 Q 64 117.2 58.8 114.8 C 37.4 105.2 20 86.2 20 58 V 28 A 10 10 0 0 1 30 18 Z"/>
+  <path fill="url(#sheen)" d="M 30 18 H 98 A 10 10 0 0 1 108 28 V 58 C 108 86.2 90.6 105.2 69.2 114.8 Q 64 117.2 58.8 114.8 C 37.4 105.2 20 86.2 20 58 V 28 A 10 10 0 0 1 30 18 Z"/>
+
+  <!-- Ring, hole, bar. -->
+  <path fill="#ffffff" fill-rule="evenodd" d="M 97.75 60 A 33.75 33.75 0 1 0 30.25 60 A 33.75 33.75 0 1 0 97.75 60 Z M 88.25 60 A 24.25 24.25 0 1 0 39.75 60 A 24.25 24.25 0 1 0 88.25 60 Z M 50.55 39.83 L 84.17 73.45 L 77.45 80.17 L 43.83 46.55 Z"/>
+</svg>

@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The monochrome companion to the full-colour icon, on GNOME's 16x16 symbolic
+  grid. One flat colour and one path: GTK renders a `-symbolic` icon as a mask
+  and paints it in the current foreground colour, so the fill below is only
+  there to give the mask its shape.
+
+  Not what the tray shows. The tray icon has to say whether the proxy is
+  running, which one static glyph cannot, so it stays on the stock
+  `security-high-symbolic`/`security-low-symbolic` pair (`adguard-tray`). This
+  file is for the places that ask for a symbolic form of the *application*
+  icon — notifications, and dialogs that want the app at label size.
+
+  Same shield outline as the colour icon at an eighth of the scale, but the
+  prohibition mark is inverted: there is no second colour to draw a white ring
+  in, so the ring becomes a hole punched through the shield with the bar left
+  standing inside it. Everything is one `evenodd` path because that is the only
+  way to punch a hole — a shape drawn *over* the shield would be drawn in the
+  same colour and vanish into it.
+
+  The bar stops short of the hole's edge on purpose. Extended to meet the ring
+  the way it does in the colour icon, the part crossing the hole's rim would
+  land back on filled shield and read as a notch in the rim instead of a bar.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+  <path fill="#2e3436" fill-rule="evenodd" d="M 3.75 2 H 12.25 A 1.5 1.5 0 0 1 13.75 3.5 V 7.25 C 13.75 11 11.5 13.5 8.75 14.625 Q 8 14.94 7.25 14.625 C 4.5 13.5 2.25 11 2.25 7.25 V 3.5 A 1.5 1.5 0 0 1 3.75 2 Z M 11.4 7.5 A 3.4 3.4 0 1 0 4.6 7.5 A 3.4 3.4 0 1 0 11.4 7.5 Z M 6.34 4.85 L 10.65 9.16 L 9.66 10.15 L 5.35 5.84 Z"/>
+</svg>

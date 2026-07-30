@@ -255,8 +255,22 @@ install -Dm644 data/*.desktop ~/.local/share/applications/
 ```
 
 ```bash
-update-desktop-database ~/.local/share/applications
+install -Dm644 -t ~/.local/share/icons/hicolor/scalable/apps data/icons/hicolor/scalable/apps/*.svg
 ```
+
+```bash
+install -Dm644 -t ~/.local/share/icons/hicolor/symbolic/apps data/icons/hicolor/symbolic/apps/*.svg
+```
+
+```bash
+gtk-update-icon-cache -f -t ~/.local/share/icons/hicolor && update-desktop-database ~/.local/share/applications
+```
+
+The `-t` on the two `install` lines is not decoration: `install -D` only creates leading directories when the destination is a *file*, so the plain form above silently fails against `symbolic/apps/`, which no other application on a stock system creates. The `-t` on `gtk-update-icon-cache` is a different flag entirely — `--ignore-theme-index`, needed because `~/.local/share/icons/hicolor` has no `index.theme` and never will; only `/usr/share/icons/hicolor` ships one.
+
+The second file is the monochrome form, for notifications and anywhere the app is drawn at label size. **The tray is not one of those places** — its icon has to say whether the proxy is running, which one static glyph cannot, so it stays on the stock `security-high-symbolic`/`security-low-symbolic` pair and nothing in this section changes it.
+
+**Installing the icon without the desktop entry does nothing.** Nothing points a *window* at an icon file. The shell resolves the window's application ID to a desktop entry and that entry's `Icon=` to a name in the theme, so both halves have to be in place — which is why a `cargo run` build shows the generic cog until §4 has been done once. It does not need re-doing after that: the entry names the icon, not the binary's build.
 
 The autostart entry is a separate file in a separate directory, and the glob above deliberately does not reach it — installed among the launchers it would show up as a second, windowless entry in the app grid:
 
@@ -264,7 +278,7 @@ The autostart entry is a separate file in a separate directory, and the glob abo
 install -Dm644 data/autostart/*.desktop ~/.config/autostart/
 ```
 
-**The desktop file, the GTK application ID, and `StartupWMClass` must all be the same reverse-DNS string.** If they diverge, GNOME shows a second, unbranded icon below the dock separator instead of grouping the window with its launcher.
+**The desktop file, the GTK application ID, `StartupWMClass`, and the icon filename must all be the same reverse-DNS string.** If the first three diverge, GNOME shows a second, unbranded icon below the dock separator instead of grouping the window with its launcher. If the icon is the one that drifts, the grouping still works and the icon is simply the generic cog — the quieter failure of the two, and the one to suspect first when the artwork is right but nothing shows it.
 
 **Nothing here needs root, and nothing should.** This section used to end with a `sudo install` of `data/*.policy` into `/usr/share/polkit-1/actions/`. Do not run it. The application performs no privileged operation and ships no privileged component (`architecture.md` §6): `auto` mode uses AdGuard's own root helper, set up by the user with AdGuard's own `sudo` command. The `.policy` file is dead scaffolding naming a helper binary that will never be written — installing it would leave a root-owned file authorising nothing, and removing it again needs root a second time. `handoff.md` §3 has its deletion as part of the auto-mode work.
 
