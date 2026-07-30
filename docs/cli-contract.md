@@ -279,6 +279,33 @@ Config has been updated           <- ...and it still says this
 
 **Always write lowercase `true`/`false`; read tolerantly.** A strict struct deserialise would fail the whole document on a single `enabled: 1`, taking every unrelated setting down with it — which is why [`config.rs`](../crates/adguard-core/src/config.rs) walks a generic value tree and coerces per key. One junk value then costs one row instead of the page.
 
+### List writes: `list-add` and `list-remove`
+
+A handful of keys hold YAML sequences rather than scalars — `filters`, `userscripts`, `apps`, and `dns_filtering.filters`. `config get` refuses them (§5 above), and they are written with `config list-add` / `config list-remove` instead. Measured against a sandbox seeded from the real file:
+
+| Invocation | Exit | stdout | Effect |
+| --- | --- | --- | --- |
+| `list-add -- dns_filtering.filters extra.txt` | 0 | the whole list, then `Config has been updated` | **one** line added |
+| `list-add` of a value **already in the list** | 0 | the same shape, showing the value twice | **a duplicate is appended** |
+| `list-remove` of a value **not** in the list | 0 | the unchanged list + `Config has been updated` | nothing |
+| `list-remove` of the **last** element | 0 | `filters:` with nothing after it | the key is left **null**, not `[]` |
+| `list-add -- <a scalar key> <value>` | 0 | `This field is not a list setting` + advice to use `config set` | nothing |
+| `list-add <key> -leading-dash` (no `--`) | **1** | *(empty)* — `<value> is required` on **stderr** | nothing |
+
+Five things follow, and three of them are traps.
+
+**The write is as surgical as `config set`.** One line added, and the comment count does not move — measured at 220 → 221 lines with 105 comments either side. So the no-YAML-writes rule (§5 opening) covers list keys too, and a `list_add_disturbs_exactly_one_line` assertion is worth having for the same reason `a_write_disturbs_exactly_one_line` is.
+
+**`list-add` does not deduplicate.** Adding a value the list already holds appends it a second time and reports success, which makes the confirmation line useless as evidence yet again. Anything driving a *toggle* off a list — the DNS user-rules row is exactly this — must read the list, decide membership itself, and issue the call only when it would change something. Re-issuing on a stale read silently corrupts the list rather than no-opping.
+
+**Removing the last element leaves a null, and a null is not an empty list.** The key becomes a bare `filters:`, which `yaml-rust2` reads as `Yaml::Null`, so `Config::list_at` — which matches `Yaml::Array` only — answers `None`. `None` is the crate's "unreadable" answer, so a row rendering it by the usual rule would go *unavailable* the instant the user emptied the list, having just successfully emptied it. The next invocation normalises the key to `[]` (§5, "every invocation rewrites `proxy.yaml`"), so the state is transient — which makes it worse, not better, because it heals before anyone investigating can see it. A membership test therefore has to read null and absent as *"the list does not contain this"*, and reserve `None` for a key that is a scalar or a mapping — something that genuinely cannot be interpreted as a list at all.
+
+**The `--` guard is mandatory here too**, and for the same reason: without it a value beginning with `-` is read as an option and the command exits 1 with `<value> is required` on stderr, writing nothing. `Cli::config_list` applies it unconditionally, exactly as `Cli::config_set` does. Note the usage dump also reveals `list-add` accepts **up to three values** in one call and carries a `--list-file` option. Use one value per call regardless: a three-value call whose middle value is refused cannot be attributed.
+
+**The refusal for a scalar key names the remedy.** `This field is not a list setting` followed by advice to use `config set` — the mirror image of what `config get` says about a list key. Between the two, the key's class is always discoverable at runtime, which is how `dns_filtering.upstream`, `.fallbacks` and `.bootstraps` were settled: all three answer `config get` with a value and refuse `list-add`, so they are **scalars**, and the "space-separated list" their comments describe lives *inside* one string. They are ordinary `config set` writes.
+
+Those three are also **validated**, unlike most string settings — an empty value is refused with ``Invalid value for key `dns_filtering.bootstraps`. Valid values are: 'default' or space-separated list of IP addresses or DNS URLs with resolved IPs (Empty value)``. So the CLI's own sentence is worth surfacing rather than pre-empting with a weaker rule of ours.
+
 ### `listen_address` needs authentication *fully configured* first
 
 `architecture.md` §5 requires forcing `listen_auth` on when the listen address leaves loopback. Measurement turns that from a fix-up into a **precondition**: with auth off, the command above prompts for a username, finds no TTY, and silently no-ops. Enabling `listen_auth.enabled` first makes the identical command succeed:
@@ -321,6 +348,43 @@ Add `config set listen_address <non-loopback>` to the TTY-requiring list in [§7
 - `dns_filtering.enabled: true` does nothing in `manual` proxy mode unless `dns_filtering.listen_port` names a real port — the file says *"N = listen on port N (e.g. 5353) — required for DNS filtering in manual proxy mode"*, and `-1` is the default. The switch reads on and filters nothing.
 
 The GUI has to own these. `Config::dns_filtering_is_inert` drives the caveat on the DNS filtering row.
+
+### The DNS listener binds loopback, and needs both keys
+
+Measured on the real licensed install in `manual` proxy mode, restoring to a byte-identical baseline afterwards. This is the measurement `architecture.md` §5 demanded before the DNS page's listen-port row could ship, and it retires the hedge that went with it.
+
+**The dependency is symmetric.** With `listen_port: 5353` but `enabled: false`, a restart brings up **no listener at all** and `status` reads `Manual DNS proxy is disabled`. So a port without the switch is exactly as inert as the switch without a port — `dns_filtering_is_inert` models only the second direction, and a page offering the port must say what the other half is doing.
+
+**The listener binds `127.0.0.1`, and does not follow `listen_address`.** With both keys set it appears on UDP *and* TCP:
+
+```
+udp UNCONN 127.0.0.1:5353   adguard-cli
+tcp LISTEN 127.0.0.1:5353   adguard-cli
+```
+
+Moving `listen_address` to `127.0.0.2` — still loopback, so no authentication precondition and no exposure — separates the two:
+
+```
+tcp LISTEN 127.0.0.2:3129   <- HTTP proxy followed listen_address
+tcp LISTEN 127.0.0.2:1081   <- SOCKS5 followed listen_address
+udp UNCONN 127.0.0.1:5353   <- the DNS proxy did not
+tcp LISTEN 127.0.0.1:5353   <- the DNS proxy did not
+```
+
+`status` says the same thing in words: `HTTP proxy is listening on 127.0.0.2:3129` alongside `Manual DNS proxy is listening on 127.0.0.1:5353`.
+
+So the DNS listener is **pinned to loopback** and cannot be moved off it by any setting the UI exposes, `listen_address: 0.0.0.0` included. The listen-port row therefore needs **no confirmation dialog and no standing warning** — it is incapable of exposing anything, which is the opposite of the assumption `architecture.md` §5 was written under.
+
+**`status` is the better evidence than the file for this one row.** It carries a third line whichever state the proxy is in:
+
+```
+Manual DNS proxy is disabled
+Manual DNS proxy is listening on 127.0.0.1:5353
+```
+
+`proxy.yaml` records what was asked for; this records what the daemon did. The two disagree until a restart — the file moves immediately, the listener does not — so a row that re-reads only the file will claim a listener that is not yet there.
+
+Range-checking is ours here as everywhere: `config set dns_filtering.listen_port` accepts `70000` and `3.5`, and the float then makes `Config::int_at` read nothing at all, so a value the CLI itself accepted renders as unavailable.
 
 ### A change may not reach the running proxy
 
