@@ -32,14 +32,13 @@ Done already, this session:
 | --- | --- |
 | `5ebe8d7` | Every CLI invocation is bounded in time — closes the `cli.rs` TODO and handoff §3 gap 2 |
 | `a9a03ff` | That bound can no longer hang on a descendant holding the pipe |
-| *next* | The lapsed-licence error mapping — proven against an unlicensed sandbox |
+| *next* | The stealth sub-page — 26 settings, keys proven against the real file |
+| `02857ad` | The lapsed-licence error mapping — proven against an unlicensed sandbox |
 | `3e52fc7` | The `proxy.yaml` config monitor — acceptance test met: 40 s idle with the mtime moving produces zero reconciles, an edit produces exactly one, a bare `touch` produces none |
 
 Remaining, in order. Each lands as its own commit with its own proof.
 
-**1. Stealth-mode sub-page** — handoff §3 gap 4, ~250 lines. Pure `model::ADVANCED` table work plus a page that already has three siblings to copy. Verifiable only as far as the page selector allows (see below).
-
-**2. The `dns_filtering` dependency for `encrypted_client_hello` and `filter_secure_dns_mode`** — gap 5, ~40 lines. Same shape as the caveat Protection already renders.
+**1. The `dns_filtering` dependency for `encrypted_client_hello` and `filter_secure_dns_mode`** — gap 5, ~40 lines. Same shape as the caveat Protection already renders.
 
 Anything past here will not be reached, and that is the correct outcome rather than a shortfall.
 
@@ -74,6 +73,7 @@ Anything past here will not be reached, and that is the correct outcome rather t
   ```
 - **Prefer D-Bus oracles to pixels.** The tray's dbusmenu returns the six Protection toggles with machine-readable state (`GetLayout 0 3 '[]'` — depth `3`, not `-1`, because `gdbus` eats a leading dash). A screenshot is bounded by the viewport and cannot be diffed.
 - **Know what is invisible and say so.** Only the visible `GtkStack` child appears in the accessibility tree, there is no window manager under Xvfb and no `xdotool`, so no page but Status can be brought on screen. Until that changes, "the page renders" is a claim, not a proof — say which it is.
+- Measured, refining the above: the AT-SPI tree *is* reachable (133 nodes, every visible `AdwActionRow` named). Two mechanisms were tried and both failed — `do_action` finds only a label's `clipboard.copy`, and the sidebar exposes no selection interface. The cause is that the five navigation rows have **no accessible name** (handoff §3 gap 4). Fix that and page-by-page verification opens up.
 - Verify config changes by re-reading the file, never from the CLI's confirmation: `Config has been updated` prints for a no-op *and* for a change it silently declined.
 - `git status --porcelain` must be free of unintended paths at the end. Stage named paths. This repo has had a subagent leave a scratch test file in the tree before.
 

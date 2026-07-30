@@ -31,7 +31,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use adguard_core::config::{key, listen_address_plan};
-use adguard_core::{AddressPlan, Applied, Cli, Config, Kind, Setting};
+use adguard_core::{AddressPlan, Applied, Cli, Config, Kind, Setting, SettingGroup};
 use adw::prelude::*;
 use gtk::glib;
 use gtk4 as gtk;
@@ -111,6 +111,13 @@ struct Row {
 
 pub struct AdvancedPage {
     bin: adw::Bin,
+    /// The table this page renders. `ADVANCED` for the Advanced page, `STEALTH`
+    /// for the Stealth one — everything else here is identical, so the second
+    /// page is this table and a sidebar entry rather than a second module.
+    ///
+    /// The `listen_address` special-casing below keys off `key::LISTEN_ADDRESS`
+    /// and so is simply inert for a table that does not contain it.
+    table: &'static [SettingGroup],
     cli: Cli,
     toasts: adw::ToastOverlay,
     rows: RefCell<Vec<Rc<Row>>>,
@@ -131,9 +138,10 @@ pub struct AdvancedPage {
 }
 
 impl AdvancedPage {
-    pub fn new(cli: Cli, toasts: adw::ToastOverlay) -> Rc<Self> {
+    pub fn new(cli: Cli, toasts: adw::ToastOverlay, table: &'static [SettingGroup]) -> Rc<Self> {
         let this = Rc::new(Self {
             bin: adw::Bin::new(),
+            table,
             cli,
             toasts,
             rows: RefCell::new(Vec::new()),
@@ -193,7 +201,7 @@ impl AdvancedPage {
 
         let page = adw::PreferencesPage::new();
 
-        for (index, group) in adguard_core::ADVANCED.iter().enumerate() {
+        for (index, group) in self.table.iter().enumerate() {
             let widget = adw::PreferencesGroup::builder().title(group.title).build();
             // The first group names the file, the way the Protection page does.
             if index == 0 {
@@ -368,7 +376,8 @@ impl AdvancedPage {
         // field will accept, and it is the username and password rows that fix
         // it.
         if let Some(group) = self.listen_group.borrow().as_ref() {
-            let base = adguard_core::ADVANCED
+            let base = self
+                .table
                 .iter()
                 .find(|g| g.settings.iter().any(|s| s.key == key::LISTEN_ADDRESS))
                 .map(|g| g.description)

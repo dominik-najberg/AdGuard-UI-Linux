@@ -18,5 +18,5 @@ pub use filters::Catalogue;
 pub use locale::Locale;
 pub use model::{
     Filter, FilterAction, FilterCatalogue, FilterGroup, FilterSet, FilterState, Kind, ProxyStatus,
-    Setting, SettingGroup, Toggle, ADVANCED,
+    Setting, SettingGroup, Toggle, ADVANCED, STEALTH,
 };

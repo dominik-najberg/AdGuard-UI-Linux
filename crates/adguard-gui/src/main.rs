@@ -15,7 +15,7 @@ mod worker;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use adguard_core::{Cli, FilterSet, Toggle};
+use adguard_core::{Cli, FilterSet, Toggle, ADVANCED, STEALTH};
 use adw::prelude::*;
 use gtk::gio;
 use gtk::glib;
@@ -321,7 +321,7 @@ fn missing_cli_view(message: &str) -> adw::ToolbarView {
 }
 
 /// Sidebar entries, in order. The id doubles as the stack child name.
-const PAGES: [Page; 4] = [
+const PAGES: [Page; 5] = [
     Page {
         id: "status",
         title: "Status",
@@ -336,6 +336,11 @@ const PAGES: [Page; 4] = [
         id: "filters",
         title: "Filters",
         icon: "view-list-symbolic",
+    },
+    Page {
+        id: "stealth",
+        title: "Stealth",
+        icon: "view-conceal-symbolic",
     },
     Page {
         id: "advanced",
@@ -373,13 +378,18 @@ fn main_view(cli: &Cli) -> MainView {
     // The DNS catalogue gets its own page later: its user-rules row cannot be
     // enabled through `dns filters enable` (see docs/cli-contract.md §6).
     let filters = filters::FiltersPage::new(cli.clone(), toasts.clone(), FilterSet::Http);
-    let advanced = advanced::AdvancedPage::new(cli.clone(), toasts.clone());
+    let advanced = advanced::AdvancedPage::new(cli.clone(), toasts.clone(), &ADVANCED);
+    // The same page against a different table: 26 settings behind the one
+    // stealth switch Protection shows (handoff §3 gap 4). The master switch
+    // stays on Protection, so there is still exactly one writer for that key.
+    let stealth = advanced::AdvancedPage::new(cli.clone(), toasts.clone(), &STEALTH);
 
     let stack = gtk::Stack::new();
     stack.add_named(status.widget(), Some(PAGES[0].id));
     stack.add_named(protection.widget(), Some(PAGES[1].id));
     stack.add_named(filters.widget(), Some(PAGES[2].id));
-    stack.add_named(advanced.widget(), Some(PAGES[3].id));
+    stack.add_named(stealth.widget(), Some(PAGES[3].id));
+    stack.add_named(advanced.widget(), Some(PAGES[4].id));
     toasts.set_child(Some(&stack));
 
     let content_header = adw::HeaderBar::new();
@@ -397,9 +407,11 @@ fn main_view(cli: &Cli) -> MainView {
         let protection = protection.clone();
         let filters = filters.clone();
         let advanced = advanced.clone();
+        let stealth = stealth.clone();
         move |_| match stack.visible_child_name().as_deref() {
             Some("protection") => protection.reload(),
             Some("filters") => filters.reload(),
+            Some("stealth") => stealth.reload(),
             Some("advanced") => advanced.reload(),
             _ => status.refresh(),
         }
@@ -445,7 +457,7 @@ fn main_view(cli: &Cli) -> MainView {
 
     // After the pages are built, so priming the snapshot cannot race the first
     // render, and so a repaint always has rows to patch rather than a spinner.
-    let watch = watch::install(&protection, &advanced);
+    let watch = watch::install(&protection, &[advanced, stealth]);
 
     MainView {
         root: split,

@@ -48,7 +48,9 @@ struct State {
     /// however many events arrived, since each look reads the current file.
     dirty: Cell<bool>,
     protection: Rc<ProtectionPage>,
-    advanced: Rc<AdvancedPage>,
+    /// Every table-driven page. Both render from `proxy.yaml`, so both are
+    /// reconciled from one reading of it.
+    tables: Vec<Rc<AdvancedPage>>,
 }
 
 /// Start watching, returning `None` if the file cannot be located or the
@@ -56,7 +58,10 @@ struct State {
 ///
 /// Failure is not fatal and is not reported: the refresh button still works,
 /// which is exactly where the app was before this existed.
-pub fn install(protection: &Rc<ProtectionPage>, advanced: &Rc<AdvancedPage>) -> Option<ConfigWatch> {
+pub fn install(
+    protection: &Rc<ProtectionPage>,
+    tables: &[Rc<AdvancedPage>],
+) -> Option<ConfigWatch> {
     let mut watch = Watch::on_config()?;
     let file = gio::File::for_path(watch.path());
 
@@ -78,7 +83,7 @@ pub fn install(protection: &Rc<ProtectionPage>, advanced: &Rc<AdvancedPage>) -> 
         busy: Cell::new(false),
         dirty: Cell::new(false),
         protection: protection.clone(),
-        advanced: advanced.clone(),
+        tables: tables.to_vec(),
     });
 
     monitor.connect_changed({
@@ -130,7 +135,9 @@ fn look(state: &Rc<State>) {
                 // person who wonders whether the monitor is doing anything.
                 eprintln!("adguard-ui: proxy.yaml changed outside the app, reconciling");
                 state.protection.reconcile(&config);
-                state.advanced.reconcile(&config);
+                for page in &state.tables {
+                    page.reconcile(&config);
+                }
             }
 
             // Something arrived mid-read; the file may have moved again since.

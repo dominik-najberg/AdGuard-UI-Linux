@@ -192,6 +192,207 @@ pub const OUTBOUND_MODES: &[&str] = &["HTTP", "HTTPS", "SOCKS4", "SOCKS5"];
 /// path: both are gated by [`crate::config::listen_address_plan`], because
 /// exposing the proxy beyond loopback has a precondition the CLI enforces by
 /// silently doing nothing.
+/// The Stealth page — the ~26 settings behind the single `stealthmode.enabled`
+/// switch the Protection page shows.
+///
+/// Its own page rather than a group on Protection (handoff §3 gap 4): six
+/// groups of them would bury the five other protections beside which that
+/// switch belongs.
+///
+/// Every key here, including the nested `anti_dpi` ones, was measured readable
+/// with `config get` and writable with `config set` on v1.4.13 — nesting costs
+/// the dotted path nothing. **The master switch is deliberately absent**: it
+/// lives on Protection, and two pages writing one key is the arrangement
+/// merging the tray into the GUI process existed to end.
+pub const STEALTH: [SettingGroup; 5] = [
+    SettingGroup {
+        title: "Cookies",
+        description: "Stealth mode must be on for any of this to apply. Times are in minutes; 0 blocks the cookie outright rather than expiring it.",
+        settings: &[
+            Setting {
+                key: crate::config::key::SM_THIRD_PARTY_COOKIES,
+                title: "Block third-party cookies",
+                description: "Deletes third-party cookies after a set time",
+                kind: Kind::Switch,
+            },
+            Setting {
+                key: crate::config::key::SM_THIRD_PARTY_COOKIES_MIN,
+                title: "Third-party cookie lifetime",
+                description: "Minutes before deletion; 0 blocks them completely",
+                kind: Kind::Number { min: 0, max: 525600, disabled_value: None },
+            },
+            Setting {
+                key: crate::config::key::SM_FIRST_PARTY_COOKIES,
+                title: "Block first-party cookies",
+                description: "Deletes all cookies after a set time",
+                kind: Kind::Switch,
+            },
+            Setting {
+                key: crate::config::key::SM_FIRST_PARTY_COOKIES_MIN,
+                title: "First-party cookie lifetime",
+                description: "Minutes before deletion; 0 blocks them completely",
+                kind: Kind::Number { min: 0, max: 525600, disabled_value: None },
+            },
+        ],
+    },
+    SettingGroup {
+        title: "Tracking",
+        description: "",
+        settings: &[
+            Setting {
+                key: crate::config::key::SM_DISABLE_THIRD_PARTY_CACHE,
+                title: "Disable third-party cache",
+                description: "Prevents tracking by blocking ETag caching for third-party content",
+                kind: Kind::Switch,
+            },
+            Setting {
+                key: crate::config::key::SM_REMOVE_X_CLIENT_DATA,
+                title: "Remove X-Client-Data header",
+                description: "Strips the Chrome header that identifies your browser build to Google services",
+                kind: Kind::Switch,
+            },
+            Setting {
+                key: crate::config::key::SM_THIRD_PARTY_AUTH,
+                title: "Block third-party Authorization",
+                description: "Blocks the Authorization header in third-party requests to prevent tracking",
+                kind: Kind::Switch,
+            },
+            Setting {
+                key: crate::config::key::SM_DO_NOT_TRACK,
+                title: "Send Do Not Track signals",
+                description: "Send \"Do not track\" signals",
+                kind: Kind::Switch,
+            },
+        ],
+    },
+    SettingGroup {
+        title: "Identity",
+        description: "An empty custom value means the header is reduced rather than replaced — for the referrer, changed to the origin.",
+        settings: &[
+            Setting {
+                key: crate::config::key::SM_HIDE_IP,
+                title: "Hide IP address",
+                description: "Adds an X-Forwarded-For header. Deprecated: sites usually no longer honour it",
+                kind: Kind::Switch,
+            },
+            Setting {
+                key: crate::config::key::SM_CUSTOM_IP,
+                title: "Custom IP",
+                description: "The address sent in X-Forwarded-For",
+                kind: Kind::Text { secret: false },
+            },
+            Setting {
+                key: crate::config::key::SM_HIDE_USER_AGENT,
+                title: "Hide User-Agent",
+                description: "Replaces or reduces the User-Agent header",
+                kind: Kind::Switch,
+            },
+            Setting {
+                key: crate::config::key::SM_CUSTOM_USER_AGENT,
+                title: "Custom User-Agent",
+                description: "Empty means the User-Agent is reduced: extra information is removed",
+                kind: Kind::Text { secret: false },
+            },
+            Setting {
+                key: crate::config::key::SM_HIDE_SEARCH_QUERIES,
+                title: "Hide search queries",
+                description: "Hides the referrer URL when navigating from a search engine",
+                kind: Kind::Switch,
+            },
+            Setting {
+                key: crate::config::key::SM_REMOVE_REFERRER,
+                title: "Remove third-party referrer",
+                description: "Hides the referrer URL in third-party requests",
+                kind: Kind::Switch,
+            },
+            Setting {
+                key: crate::config::key::SM_CUSTOM_REFERRER,
+                title: "Custom referrer",
+                description: "Used by both referrer settings. Empty means the referrer becomes the origin",
+                kind: Kind::Text { secret: false },
+            },
+        ],
+    },
+    SettingGroup {
+        title: "Browser APIs",
+        description: "",
+        settings: &[
+            Setting {
+                key: crate::config::key::SM_BLOCK_WEB_RTC,
+                title: "Block WebRTC",
+                description: "Prevents IP leaks via WebRTC; may disrupt certain browser applications",
+                kind: Kind::Switch,
+            },
+            Setting {
+                key: crate::config::key::SM_BLOCK_PUSH_API,
+                title: "Block push notifications",
+                description: "Blocks browser push notifications from websites even when the browser is inactive",
+                kind: Kind::Switch,
+            },
+            Setting {
+                key: crate::config::key::SM_BLOCK_LOCATION_API,
+                title: "Block location access",
+                description: "Prevents the browser from sharing GPS data, protecting location privacy",
+                kind: Kind::Switch,
+            },
+            Setting {
+                key: crate::config::key::SM_BLOCK_FLASH,
+                title: "Block Flash",
+                description: "Blocks the Flash Player plugin to reduce security vulnerabilities and load times",
+                kind: Kind::Switch,
+            },
+            Setting {
+                key: crate::config::key::SM_BLOCK_JAVA,
+                title: "Block Java",
+                description: "Disables Java plugins to prevent security risks; JavaScript remains enabled",
+                kind: Kind::Switch,
+            },
+        ],
+    },
+    SettingGroup {
+        title: "Anti-DPI",
+        description: "Alters outgoing packet data to bypass DPI-based content filters and restrictions. A fragment size of 0 disables that split.",
+        settings: &[
+            Setting {
+                key: crate::config::key::SM_DPI_ENABLED,
+                title: "Protect from DPI",
+                description: "Enables the packet alterations below",
+                kind: Kind::Switch,
+            },
+            Setting {
+                key: crate::config::key::SM_DPI_CLIENT_HELLO_FRAGMENT,
+                title: "ClientHello fragment size",
+                description: "Size of the first fragment when splitting ClientHello; 0 to disable",
+                kind: Kind::Number { min: 0, max: 1500, disabled_value: Some(0) },
+            },
+            Setting {
+                key: crate::config::key::SM_DPI_HTTP_FRAGMENT,
+                title: "HTTP fragment size",
+                description: "Size of the first fragment when splitting a plain HTTP request; 0 to disable",
+                kind: Kind::Number { min: 0, max: 1500, disabled_value: Some(0) },
+            },
+            Setting {
+                key: crate::config::key::SM_DPI_SPLIT_DELAY,
+                title: "Split delay",
+                description: "Milliseconds between the two fragments of a split request",
+                kind: Kind::Number { min: 0, max: 60000, disabled_value: None },
+            },
+            Setting {
+                key: crate::config::key::SM_DPI_SPACE_JUGGLING,
+                title: "HTTP space juggling",
+                description: "Swaps some spaces in plain HTTP requests to trick DPI",
+                kind: Kind::Switch,
+            },
+            Setting {
+                key: crate::config::key::SM_DPI_FIRST_PACKET,
+                title: "Increase first packet size",
+                description: "Pads ClientHello or the first plain HTTP request across several packets",
+                kind: Kind::Switch,
+            },
+        ],
+    },
+];
+
 pub const ADVANCED: [SettingGroup; 4] = [
     SettingGroup {
         title: "Manual proxy ports",
@@ -605,6 +806,45 @@ mod tests {
         keys.sort_unstable();
         keys.dedup();
         assert_eq!(keys.len(), count, "duplicate key in ADVANCED");
+    }
+
+    /// Same rule for the Stealth table, and one more: the master switch must
+    /// NOT be here. It lives on Protection, and a key with a control on two
+    /// pages is two writers for one setting.
+    #[test]
+    fn stealth_keys_are_unique_and_exclude_the_master_switch() {
+        let keys: Vec<&str> = STEALTH
+            .iter()
+            .flat_map(|group| group.settings.iter())
+            .map(|s| s.key)
+            .collect();
+
+        let mut sorted = keys.clone();
+        let count = sorted.len();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), count, "duplicate key in STEALTH");
+
+        assert!(
+            !keys.contains(&crate::config::key::STEALTH_MODE),
+            "the master switch belongs to Protection, not here"
+        );
+        // Every key addresses the stealth section and nothing else.
+        for key in &keys {
+            assert!(key.starts_with("stealthmode."), "{key} is not a stealth setting");
+        }
+    }
+
+    /// The nested section is the part gap 4 called out, so pin that it is
+    /// actually represented rather than quietly dropped.
+    #[test]
+    fn stealth_includes_the_nested_anti_dpi_section() {
+        let nested = STEALTH
+            .iter()
+            .flat_map(|group| group.settings.iter())
+            .filter(|s| s.key.starts_with("stealthmode.anti_dpi."))
+            .count();
+        assert_eq!(nested, 6, "anti_dpi has six settings in proxy.yaml");
     }
 
     /// The page's scope, from `architecture.md` §5.

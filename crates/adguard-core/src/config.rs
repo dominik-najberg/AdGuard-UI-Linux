@@ -351,6 +351,37 @@ pub mod key {
     pub const OUTBOUND_PASSWORD: &str = "outbound_proxy.password";
     pub const OUTBOUND_TRUST_ANY_CERT: &str = "outbound_proxy.trust_any_certificate";
     pub const OUTBOUND_UDP_VIA_SOCKS5: &str = "outbound_proxy.udp_through_socks5_enabled";
+
+    // Stealth mode. Twenty-six settings behind the one switch the Protection
+    // page shows, including a nested `anti_dpi` section — measured readable and
+    // writable through the same `config get`/`config set` path as every key
+    // above, nesting and all.
+    pub const SM_THIRD_PARTY_COOKIES: &str = "stealthmode.block_third_party_cookies";
+    pub const SM_THIRD_PARTY_COOKIES_MIN: &str = "stealthmode.block_third_party_cookies_min";
+    pub const SM_FIRST_PARTY_COOKIES: &str = "stealthmode.block_first_party_cookies";
+    pub const SM_FIRST_PARTY_COOKIES_MIN: &str = "stealthmode.block_first_party_cookies_min";
+    pub const SM_DISABLE_THIRD_PARTY_CACHE: &str = "stealthmode.disable_third_party_cache";
+    pub const SM_REMOVE_X_CLIENT_DATA: &str = "stealthmode.remove_x_client_data_header";
+    pub const SM_DO_NOT_TRACK: &str = "stealthmode.send_do_not_track_signals";
+    pub const SM_HIDE_IP: &str = "stealthmode.hide_ip";
+    pub const SM_CUSTOM_IP: &str = "stealthmode.custom_ip";
+    pub const SM_THIRD_PARTY_AUTH: &str = "stealthmode.block_third_party_authorization";
+    pub const SM_HIDE_SEARCH_QUERIES: &str = "stealthmode.hide_search_queries";
+    pub const SM_REMOVE_REFERRER: &str = "stealthmode.remove_referrer_from_third_party_requests";
+    pub const SM_CUSTOM_REFERRER: &str = "stealthmode.custom_referrer";
+    pub const SM_HIDE_USER_AGENT: &str = "stealthmode.hide_user_agent";
+    pub const SM_CUSTOM_USER_AGENT: &str = "stealthmode.custom_user_agent";
+    pub const SM_BLOCK_WEB_RTC: &str = "stealthmode.block_web_rtc";
+    pub const SM_BLOCK_PUSH_API: &str = "stealthmode.block_browser_push_api";
+    pub const SM_BLOCK_LOCATION_API: &str = "stealthmode.block_browser_location_api";
+    pub const SM_BLOCK_FLASH: &str = "stealthmode.block_browser_flash";
+    pub const SM_BLOCK_JAVA: &str = "stealthmode.block_browser_java";
+    pub const SM_DPI_ENABLED: &str = "stealthmode.anti_dpi.enabled";
+    pub const SM_DPI_CLIENT_HELLO_FRAGMENT: &str = "stealthmode.anti_dpi.client_hello_split_fragment_size";
+    pub const SM_DPI_HTTP_FRAGMENT: &str = "stealthmode.anti_dpi.http_split_fragment_size";
+    pub const SM_DPI_SPLIT_DELAY: &str = "stealthmode.anti_dpi.split_delay_ms";
+    pub const SM_DPI_SPACE_JUGGLING: &str = "stealthmode.anti_dpi.http_space_juggling";
+    pub const SM_DPI_FIRST_PACKET: &str = "stealthmode.anti_dpi.increase_first_packet_size";
 }
 
 /// Is this listen address confined to the local machine?

@@ -9,7 +9,7 @@
 //! suite still passes on a machine (or CI runner) without it.
 
 use adguard_core::config::key;
-use adguard_core::{Config, Kind, Toggle, ADVANCED};
+use adguard_core::{Config, Kind, Toggle, ADVANCED, STEALTH};
 
 fn load() -> Option<Config> {
     let path = adguard_core::paths::config_file()?;
@@ -74,7 +74,7 @@ fn supporting_keys_resolve() {
 fn every_advanced_setting_resolves_with_the_right_type() {
     let Some(config) = load() else { return };
 
-    for group in &ADVANCED {
+    for group in ADVANCED.iter().chain(STEALTH.iter()) {
         for setting in group.settings {
             let resolved = match setting.kind {
                 Kind::Switch => config.bool_at(setting.key).is_some(),
