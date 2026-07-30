@@ -263,8 +263,14 @@ install -Dm644 -t ~/.local/share/icons/hicolor/symbolic/apps data/icons/hicolor/
 ```
 
 ```bash
+for d in data/icons/hicolor/*x*/apps; do install -Dm644 -t ~/.local/share/icons/hicolor/"$(basename "$(dirname "$d")")"/apps "$d"/*.png; done
+```
+
+```bash
 gtk-update-icon-cache -f -t ~/.local/share/icons/hicolor && update-desktop-database ~/.local/share/applications
 ```
+
+The nine PNGs are pre-rendered sizes of the same drawing, 16 through 256. They are not strictly needed — GTK renders the scalable SVG at any size through librsvg — but the icon theme spec prefers an exact-size raster where one exists, and shipping them means the dock and the app grid never pay for a rasterise. If you would rather carry only the SVGs, delete `data/icons/hicolor/*x*/` and drop the loop above; nothing else refers to them.
 
 The `-t` on the two `install` lines is not decoration: `install -D` only creates leading directories when the destination is a *file*, so the plain form above silently fails against `symbolic/apps/`, which no other application on a stock system creates. The `-t` on `gtk-update-icon-cache` is a different flag entirely — `--ignore-theme-index`, needed because `~/.local/share/icons/hicolor` has no `index.theme` and never will; only `/usr/share/icons/hicolor` ships one.
 
