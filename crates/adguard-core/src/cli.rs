@@ -125,6 +125,17 @@ pub enum Error {
     /// is the CLI's own wording, suitable to show the user verbatim.
     #[error("{message}")]
     Refused { message: String },
+
+    /// [`Cli::configure`] was called against a data directory that already has
+    /// a `proxy.yaml`. **We** refused, before spawning anything.
+    ///
+    /// A variant of its own rather than a `bool` return, because this is the
+    /// one error in this module that describes a bug rather than a condition:
+    /// re-running the wizard resets the user's whole configuration, and the
+    /// only thing standing between that and a user is this check. An error the
+    /// caller must handle is harder to ignore than a documented precondition.
+    #[error("{} already exists — `configure` would reset it", path.display())]
+    AlreadyConfigured { path: PathBuf },
 }
 
 /// Captured, ANSI-stripped result of one invocation.
@@ -431,6 +442,125 @@ impl Cli {
         })
     }
 
+    /// Where this `Cli` would find `proxy.yaml`.
+    ///
+    /// Respects [`Self::with_xdg_data_home`], which the free function in
+    /// [`crate::paths`] cannot: that override is applied to the child's
+    /// environment, not to ours.
+    pub fn config_path(&self) -> Option<PathBuf> {
+        match &self.xdg_data_home {
+            Some(home) => Some(paths::config_file_under(home)),
+            None => paths::config_file(),
+        }
+    }
+
+    /// Seed a data directory that has never been configured.
+    ///
+    /// # Why this exists at all
+    ///
+    /// `architecture.md` §5 described the first-run assistant as "discrete
+    /// `config set` calls", and contract §10 told this module never to invoke
+    /// `configure`. Measured on v1.4.13, those two cannot both hold: until
+    /// `proxy.yaml` exists, `config set` refuses every real key.
+    ///
+    /// ```text
+    /// $ XDG_DATA_HOME=/tmp/fresh adguard-cli config set -- listen_ports.http_proxy 3128
+    /// No configuration YAML file
+    /// You can only configure the 'log_level' and 'update_channel'
+    /// Run `adguard-cli configure` to configure AdGuard CLI, or `adguard-cli
+    /// import-settings <path_to_zip>` to import settings from zip
+    /// ```
+    ///
+    /// Exit 0, on stdout, nothing written — the ordinary semantic refusal. And
+    /// nothing else creates the file: `config get`, `config set` and `activate`
+    /// were each run against a virgin directory and none of them produced one.
+    /// So a first run has exactly one way forward, and this is it.
+    ///
+    /// The two keys that *are* accepted first — `log_level` and
+    /// `update_channel` — are a trap worth knowing about rather than a way
+    /// round it. They print `Config has been updated` and persist into
+    /// `adguard.conf`, so the confirmation is truthful about a file that is not
+    /// the one anything reads.
+    ///
+    /// # What it does, measured
+    ///
+    /// With stdin closed (which [`Self::run`] guarantees) every prompt takes its
+    /// default and names the key that changes it afterwards. Against a licensed
+    /// directory with no `proxy.yaml`: exit **0**, all on **stdout**, 0.10 s.
+    ///
+    /// ```text
+    /// Warning: No TTY available. Using default values for configuration.
+    /// Please enter the new value of the HTTP proxy listen port [default: 3129]:
+    /// Warning: No TTY for user input. Using default value (3129). Use
+    /// `adguard-cli config set listen_ports.http_proxy` to change.
+    /// …
+    /// The proxy server is ready to start. You can start it by running `adguard-cli start`
+    /// ```
+    ///
+    /// It leaves a complete 220-line `proxy.yaml` with all 105 of its upstream
+    /// comments — the same shape as a real install's — plus `user.txt`,
+    /// `dns_user.txt`, `https_exclusions.txt`, `browsers.yaml` and the CA
+    /// certificate. Afterwards ordinary `config set` works and stays surgical.
+    ///
+    /// **One prompt is skipped in silence**: *"Do you want to install the
+    /// certificate on the system?. You will need to enter your password"* is the
+    /// only one with no no-TTY warning and no key. So the seeded state is HTTPS
+    /// filtering **on** with its CA outside the system trust store — which is
+    /// the caller's to surface, not something to paper over here (§6 rules out
+    /// installing it for the user).
+    ///
+    /// # It is licence-gated
+    ///
+    /// Unlicensed it exits **1** with the usual complaint and usage dump on
+    /// stderr, so this returns [`Error::Unlicensed`] like every other gated
+    /// command. Note it seeds the file *anyway*, before reaching that gate — but
+    /// without the CA, so the caller should activate first rather than lean on
+    /// that.
+    ///
+    /// # The guard is the point
+    ///
+    /// Run against a directory that already has a `proxy.yaml`, `configure`
+    /// takes a different branch entirely — its own strings are
+    /// *"The initial configuration has already been completed. The running proxy
+    /// server will be stopped, and the configuration will be reset."* and
+    /// *"No TTY available. Proceeding with reconfiguration using default
+    /// values."* With stdin closed there is no prompt to decline at, so that
+    /// branch would proceed and take the user's whole configuration with it.
+    ///
+    /// That branch is deliberately **not** measured: the only licensed install
+    /// available to try it on is the author's own, and the strings are clear
+    /// enough that confirming them costs more than it settles. Instead the file
+    /// is checked here, immediately before the spawn, and this is the only place
+    /// in the codebase that names the `configure` subcommand.
+    ///
+    /// # Success is the file, not the echo
+    ///
+    /// As everywhere else in this module the confirmation line proves nothing,
+    /// and here there is a stronger witness available: the file either exists
+    /// afterwards or it does not. That is what decides.
+    pub fn configure(&self) -> Result<(), Error> {
+        let Some(path) = self.config_path() else {
+            return Err(Error::Unparseable {
+                args: "configure".to_owned(),
+                output: "could not work out where proxy.yaml would live".to_owned(),
+            });
+        };
+        if path.is_file() {
+            return Err(Error::AlreadyConfigured { path });
+        }
+
+        let out = self.run(&["configure"])?;
+
+        if path.is_file() {
+            Ok(())
+        } else {
+            Err(Error::Refused {
+                message: last_line(&out.stdout)
+                    .unwrap_or_else(|| "`adguard-cli configure` said nothing at all".to_owned()),
+            })
+        }
+    }
+
     /// Add, enable or disable one filter.
     ///
     /// Exit status proves nothing here (contract §3): every semantic failure
@@ -733,8 +863,11 @@ fn redact_error(err: Error, secret: &str) -> Error {
         Error::Unlicensed { message } => Error::Unlicensed {
             message: redact(&message, secret),
         },
-        // Carry no echo of the value.
-        other @ (Error::BinaryNotFound | Error::Spawn { .. }) => other,
+        // Carry no echo of the value. `AlreadyConfigured` holds only a path we
+        // derived ourselves, and it is raised before any argument is passed.
+        other @ (Error::BinaryNotFound | Error::Spawn { .. } | Error::AlreadyConfigured { .. }) => {
+            other
+        }
     }
 }
 

@@ -32,12 +32,10 @@ use adguard_core::{AddressPlan, Cli, Config};
 /// shape the GUI will meet, comments and all, and it keeps these tests honest
 /// about the config AdGuard actually ships.
 ///
-/// # Only `config` subcommands work in here
+/// # Only `config` subcommands work in here, unless it is made licensed
 ///
-/// A sandbox is an *unlicensed* install, and copying the licence database
-/// across does not change that — measured, so the licence evidently lives
-/// somewhere other than the data directory. `status`, `license` and `filters
-/// list` therefore fail here with **exit 1 and output on stderr**:
+/// A sandbox is an *unlicensed* install by default. `status`, `license` and
+/// `filters list` fail here with **exit 1 and output on stderr**:
 ///
 /// ```text
 /// You need to activate an AdGuard license to use this command
@@ -47,8 +45,16 @@ use adguard_core::{AddressPlan, Cli, Config};
 /// licence and behave exactly as they do against the real data directory.
 /// `activate` is the interesting one: it is the command that exists to *fix* an
 /// unlicensed install, so an unlicensed sandbox is the only honest place to
-/// exercise it. Anything that needs a *working* licence belongs in
-/// `config_mutate.rs` or `filters_*.rs`, against the real install.
+/// exercise it.
+///
+/// **The licence lives in `adguard.conf`**, and it travels — measured, a
+/// sandbox holding a copy of that one file reads back `APP_ACTIVE`. An earlier
+/// revision of this comment said the licence "evidently lives somewhere other
+/// than the data directory", inferred from copying `gm.db` and seeing no
+/// change; that was the wrong file, not the wrong directory. [`Sandbox::licensed`]
+/// is what that buys — the licence-gated commands become measurable against a
+/// throwaway config, which is the only way [`Cli::configure`] could be covered
+/// at all without resetting the author's own install.
 struct Sandbox {
     root: PathBuf,
     cli: Cli,
@@ -83,6 +89,62 @@ impl Sandbox {
             cli: cli.with_xdg_data_home(&root),
             root,
         })
+    }
+
+    /// A sandbox with **no `proxy.yaml`** — a data directory as it is before
+    /// `configure` has ever run.
+    ///
+    /// The state the first-run assistant exists for, and the one that is
+    /// impossible to reach by deleting things from a normal sandbox without
+    /// also deciding what else to delete. Nothing is copied in at all: the CLI
+    /// creates the directory itself on first use.
+    fn virgin(name: &str) -> Option<Self> {
+        let cli = match Cli::discover() {
+            Ok(cli) => cli,
+            Err(err) => {
+                eprintln!("skipping: {err}");
+                return None;
+            }
+        };
+
+        let root = std::env::temp_dir()
+            .join(format!("adguard-ui-sandbox-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create sandbox");
+
+        Some(Self {
+            cli: cli.with_xdg_data_home(&root),
+            root,
+        })
+    }
+
+    /// Carry the machine's licence into this sandbox.
+    ///
+    /// Measured: the licence lives in `adguard.conf`, and a copy of that file is
+    /// enough for `license` to answer `APP_ACTIVE` here. `None` when the machine
+    /// has no licence to lend, so the licence-gated tests skip rather than fail
+    /// on an unlicensed install.
+    ///
+    /// It copies a file holding the owner's e-mail and licence key into a temp
+    /// directory that [`Drop`] removes. Nothing in these tests prints it —
+    /// `License`'s `Debug` masks both fields — but it is worth knowing it is
+    /// briefly on disk.
+    fn licensed(self) -> Option<Self> {
+        let source = adguard_core::paths::data_dir()?.join("adguard.conf");
+        if !source.is_file() {
+            eprintln!("skipping: no licence on this machine to lend the sandbox");
+            return None;
+        }
+        let data = self.root.join("adguard-cli");
+        std::fs::create_dir_all(&data).expect("create sandbox data dir");
+        std::fs::copy(&source, data.join("adguard.conf")).expect("lend the licence");
+
+        // Prove it took, rather than assuming the copy was sufficient.
+        if self.cli.license().is_err() {
+            eprintln!("skipping: the sandbox did not come up licensed");
+            return None;
+        }
+        Some(self)
     }
 
     fn config_path(&self) -> PathBuf {
@@ -739,6 +801,148 @@ fn the_rewrite_restores_missing_keys_but_not_invalid_values() {
         config.int_at(key::WORKER_THREADS),
         Some(128),
         "an out-of-range value should have been left alone, not corrected"
+    );
+}
+
+/// The measurement the first-run assistant is built on.
+///
+/// `architecture.md` §5 described that assistant as "discrete `config set`
+/// calls". Against a directory that has never been configured, there is no such
+/// thing: every real key is refused, because there is no file to write into.
+/// Only `log_level` and `update_channel` are accepted, and they go somewhere
+/// else entirely.
+#[test]
+#[ignore = "invokes the real adguard-cli"]
+fn a_virgin_directory_refuses_every_real_key() {
+    let Some(sandbox) = Sandbox::virgin("virgin") else { return };
+
+    // Any invocation creates the data directory and its databases — but not the
+    // config. That absence is the first-run signal the GUI keys off.
+    let _ = sandbox.cli.config_set(key::LOG_LEVEL, "info");
+    assert!(
+        !sandbox.config_path().is_file(),
+        "nothing but `configure` should create proxy.yaml"
+    );
+
+    // Type-appropriate values throughout, because the CLI type-checks *before*
+    // it notices the missing file: `config set listen_ports.http_proxy true`
+    // answers "the value of the setting must be an integer" even here, so it
+    // evidently knows every key's type from a built-in default rather than from
+    // the config. Testing with the wrong type would pass for the wrong reason.
+    for (real_key, value) in [
+        (key::HTTPS_FILTERING, "true"),
+        (key::LISTEN_PORT_HTTP, "3128"),
+        (key::PROXY_MODE, "manual"),
+    ] {
+        let refusal = sandbox
+            .cli
+            .config_set(real_key, value)
+            .expect_err("a real key must be refused before the config exists");
+        assert!(
+            refusal.to_string().contains("No configuration YAML file"),
+            "{real_key} was refused, but not for the reason we depend on: {refusal}"
+        );
+    }
+
+    // The trap that makes this worth a test rather than a comment: the two keys
+    // that *are* accepted report `Config has been updated` and persist into
+    // `adguard.conf`, so the confirmation is perfectly truthful about a file
+    // that is not the one anything reads.
+    sandbox
+        .cli
+        .config_set(key::LOG_LEVEL, "debug")
+        .expect("log_level is accepted with no config file");
+    assert!(
+        !sandbox.config_path().is_file(),
+        "`Config has been updated` for log_level must not be read as a config file appearing"
+    );
+}
+
+/// The guard that stands between `configure` and a user's whole configuration.
+///
+/// Run against a directory that already holds a `proxy.yaml`, the wizard takes
+/// its reconfigure branch — *"the configuration will be reset"* — and with stdin
+/// closed there is no prompt at which to decline. [`Cli::configure`] therefore
+/// refuses before spawning anything, and this asserts it refuses for that reason
+/// rather than incidentally.
+///
+/// Deliberately **not** `#[ignore]`d beyond the usual: it spawns no process at
+/// all, so the only thing it needs is the binary to be locatable.
+#[test]
+#[ignore = "invokes the real adguard-cli"]
+fn configure_refuses_a_directory_that_already_has_a_config() {
+    let Some(sandbox) = Sandbox::new("already-configured") else { return };
+    let before = std::fs::read_to_string(sandbox.config_path()).expect("read sandbox config");
+
+    let refusal = sandbox
+        .cli
+        .configure()
+        .expect_err("configure must refuse an existing configuration");
+
+    assert!(
+        matches!(refusal, adguard_core::Error::AlreadyConfigured { .. }),
+        "expected the guard, got {refusal:?}"
+    );
+    assert_eq!(
+        before,
+        std::fs::read_to_string(sandbox.config_path()).expect("read sandbox config"),
+        "the guard let something touch the file"
+    );
+}
+
+/// `configure` seeds a complete configuration, and every question the assistant
+/// asks can be answered from it.
+///
+/// Licence-gated, so it needs [`Sandbox::licensed`] — which is the whole reason
+/// that helper exists. Measured shape: exit 0, a 220-line file with all 105 of
+/// its upstream comments, and ordinary `config set` working immediately after.
+#[test]
+#[ignore = "invokes the real adguard-cli"]
+fn configure_seeds_a_config_the_assistant_can_work_from() {
+    let Some(sandbox) = Sandbox::virgin("seed").and_then(Sandbox::licensed) else {
+        return;
+    };
+
+    sandbox.cli.configure().expect("configure should seed a fresh directory");
+    assert!(sandbox.config_path().is_file(), "configure must create proxy.yaml");
+
+    let text = std::fs::read_to_string(sandbox.config_path()).expect("read seeded config");
+    let comments = text.lines().filter(|line| line.trim_start().starts_with('#')).count();
+    assert!(
+        comments > 90,
+        "the seeded file should carry AdGuard's own documentation, found {comments} comments"
+    );
+
+    // Every question the first-run assistant asks must be answerable from the
+    // file it pre-fills from. A key that reads `None` here would render as a
+    // control with no honest default behind it.
+    let config = sandbox.config();
+    for group in &adguard_core::SETUP {
+        for setting in group.settings {
+            let present = match setting.kind {
+                adguard_core::Kind::Switch => config.bool_at(setting.key).is_some(),
+                adguard_core::Kind::Number { .. } => config.int_at(setting.key).is_some(),
+                adguard_core::Kind::Text { .. } => config.str_at(setting.key).is_some(),
+                adguard_core::Kind::Choice { options } => {
+                    config.choice_at(setting.key, options).is_some()
+                }
+            };
+            assert!(present, "{} is missing from a freshly seeded config", setting.key);
+        }
+    }
+
+    // And the second movement works: once seeded, the ordinary write path the
+    // rest of the app uses is open.
+    sandbox.set(key::LISTEN_PORT_HTTP, "3128");
+    assert_eq!(sandbox.config().int_at(key::LISTEN_PORT_HTTP), Some(3128));
+
+    // The guard holds against the directory it just seeded.
+    assert!(
+        matches!(
+            sandbox.cli.configure(),
+            Err(adguard_core::Error::AlreadyConfigured { .. })
+        ),
+        "configure must refuse the configuration it has just created"
     );
 }
 

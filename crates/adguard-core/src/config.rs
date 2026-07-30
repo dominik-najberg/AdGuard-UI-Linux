@@ -379,6 +379,14 @@ pub mod key {
 
     pub const DNS_LISTEN_PORT: &str = "dns_filtering.listen_port";
 
+    /// Consent to send crash reports to AdGuard.
+    ///
+    /// The one key the `configure` wizard asks about that no page of this app
+    /// exposes, which is why the first-run assistant carries it: leaving it out
+    /// would mean the GUI silently keeps the CLI's default answer to a question
+    /// the CLI thought worth asking. Seeded `false`.
+    pub const SEND_CRASH_REPORTS: &str = "send_crash_reports";
+
     // --- the DNS page ---
     // `dns_filtering.filters` is the only real sequence of the four: it answers
     // `config get` with *"This field is not a separate setting"* and takes
