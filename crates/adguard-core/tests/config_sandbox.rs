@@ -107,6 +107,41 @@ impl Drop for Sandbox {
     }
 }
 
+/// A sandbox is unlicensed by construction, which makes it the only place the
+/// lapsed-licence path can be exercised on this machine — the real install is
+/// `APP_ACTIVE`, so the bug this guards was unreachable here and shipped
+/// anyway.
+///
+/// Measured: `status`, `license` and `filters list` each exit 1 with stdout
+/// empty and one sentence on stderr. Before the mapping existed that became
+/// `BadInvocation` — "adguard-cli rejected `status`" — blaming us for the
+/// user's expired subscription.
+#[test]
+#[ignore = "invokes the real adguard-cli"]
+fn licence_gated_commands_name_the_licence() {
+    let Some(sandbox) = Sandbox::new("unlicensed") else {
+        return;
+    };
+
+    let err = sandbox.cli.status().expect_err("a sandbox is unlicensed");
+    eprintln!("status in an unlicensed install -> {err:?}");
+    assert!(
+        matches!(err, adguard_core::Error::Unlicensed { .. }),
+        "expected Unlicensed, got {err:?}"
+    );
+    assert!(
+        !err.to_string().contains("rejected"),
+        "must not read as our own malformed command line: {err}"
+    );
+
+    // The config family is what still works there, which is the premise the
+    // rest of this suite rests on.
+    sandbox
+        .cli
+        .config_set(key::LOG_LEVEL, "info")
+        .expect("the config family is not licence-gated");
+}
+
 /// The sandbox is only useful if the CLI really does follow `$XDG_DATA_HOME`.
 /// Prove it before trusting anything else here: write a value the machine's
 /// config does not have, and check the machine's config did not get it.

@@ -32,17 +32,14 @@ Done already, this session:
 | --- | --- |
 | `5ebe8d7` | Every CLI invocation is bounded in time — closes the `cli.rs` TODO and handoff §3 gap 2 |
 | `a9a03ff` | That bound can no longer hang on a descendant holding the pipe |
+| *next* | The lapsed-licence error mapping — proven against an unlicensed sandbox |
 | `3e52fc7` | The `proxy.yaml` config monitor — acceptance test met: 40 s idle with the mtime moving produces zero reconciles, an edit produces exactly one, a bare `touch` produces none |
 
 Remaining, in order. Each lands as its own commit with its own proof.
 
-**1. The lapsed-licence error mapping** — handoff §3 gap 1, ~60 lines. Not activation, just the mapping: `status`, `license` and `filters list` exit 1 on stderr in an unlicensed install, and `Cli` calls that `BadInvocation` — "adguard-cli rejected `status`". Fully provable against a sandbox, which is unlicensed by construction.
+**1. Stealth-mode sub-page** — handoff §3 gap 4, ~250 lines. Pure `model::ADVANCED` table work plus a page that already has three siblings to copy. Verifiable only as far as the page selector allows (see below).
 
-*Done when:* a sandbox `status` yields a licence-shaped error rather than `BadInvocation`, shown by pasted test output.
-
-**2. Stealth-mode sub-page** — handoff §3 gap 4, ~250 lines. Pure `model::ADVANCED` table work plus a page that already has three siblings to copy. Verifiable only as far as the page selector allows (see below).
-
-**3. The `dns_filtering` dependency for `encrypted_client_hello` and `filter_secure_dns_mode`** — gap 5, ~40 lines. Same shape as the caveat Protection already renders.
+**2. The `dns_filtering` dependency for `encrypted_client_hello` and `filter_secure_dns_mode`** — gap 5, ~40 lines. Same shape as the caveat Protection already renders.
 
 Anything past here will not be reached, and that is the correct outcome rather than a shortfall.
 

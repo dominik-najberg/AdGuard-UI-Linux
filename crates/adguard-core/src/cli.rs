@@ -86,6 +86,22 @@ pub enum Error {
     #[error("could not interpret output of `adguard-cli {args}`: {output}")]
     Unparseable { args: String, output: String },
 
+    /// The install has no active licence, so the command was refused before it
+    /// could run.
+    ///
+    /// Contract §3 originally read exit 1 as "we built a malformed command
+    /// line" — our bug — because that was the only way it had been seen. It is
+    /// not: `status`, `license` and `filters list` all exit 1 in an unlicensed
+    /// install, so a user whose licence lapsed would have been told
+    /// *"adguard-cli rejected `status`"*, which blames the wrong party and
+    /// suggests nothing they can act on.
+    ///
+    /// Carries the CLI's own sentence, for the same reason [`Self::Refused`]
+    /// does: it is better wording than ours and it stays right if AdGuard
+    /// changes it.
+    #[error("{message}")]
+    Unlicensed { message: String },
+
     /// The command outlived its deadline and was killed. Distinct from
     /// [`Self::BadInvocation`] because nothing was rejected and nothing is
     /// known: the command may equally have done its work and hung on the way
@@ -271,6 +287,12 @@ impl Cli {
         let stderr = strip_ansi(&collect(stderr, until));
 
         if !status.success() {
+            // Exit 1 is not exclusively our own malformed command line, which
+            // is what contract §3 first assumed. Sort the two apart before
+            // blaming ourselves.
+            if let Some(message) = licence_complaint(&stderr) {
+                return Err(Error::Unlicensed { message });
+            }
             return Err(Error::BadInvocation {
                 args: args.join(" "),
                 code: status.code().unwrap_or(-1),
@@ -522,6 +544,11 @@ fn redact_error(err: Error, secret: &str) -> Error {
             args: redact(&args, secret),
             timeout,
         },
+        // Quotes no argument of ours today, but it carries a string the CLI
+        // wrote and this match is the place that assumption gets checked.
+        Error::Unlicensed { message } => Error::Unlicensed {
+            message: redact(&message, secret),
+        },
         // Carry no echo of the value.
         other @ (Error::BinaryNotFound | Error::Spawn { .. }) => other,
     }
@@ -574,6 +601,63 @@ fn first_line(stdout: &str) -> Option<String> {
 /// Strip ANSI escapes from raw process output and lossily decode as UTF-8.
 fn strip_ansi(raw: &[u8]) -> String {
     String::from_utf8_lossy(&strip_ansi_escapes::strip(raw)).into_owned()
+}
+
+/// Recognise the CLI complaining that the install is not licensed.
+///
+/// Measured on v1.4.13 against a sandbox `$XDG_DATA_HOME`, which is unlicensed
+/// by construction — `status`, `license` and `filters list` each exit 1 with
+/// stdout empty and exactly this on stderr:
+///
+/// ```text
+/// You need to activate an AdGuard license to use this command
+/// ```
+///
+/// Matched on two loose tokens rather than that sentence. An exact comparison
+/// would break on any rewording — including the British spelling this codebase
+/// uses in its own prose — and the failure mode of missing it is the bug being
+/// fixed here, back again. The tokens are specific enough that a genuinely
+/// malformed command line will not trip them: the CLI's usage errors name the
+/// option or the value, not activation.
+///
+/// # Only two of its twenty lines are worth showing
+///
+/// That sentence is not all the CLI prints. It follows it with a full usage
+/// dump — every subcommand, one per line — and then the one line the user can
+/// act on:
+///
+/// ```text
+/// You need to activate an AdGuard license to use this command
+///   <18 lines of usage>
+/// You can activate your AdGuard license by running `…/adguard-cli activate`
+/// ```
+///
+/// This error ends up in a row subtitle, so the dump is dropped and the
+/// complaint is joined to the advice. Keeping the whole thing would technically
+/// be "the CLI's own wording" and would render as an unreadable blob.
+fn licence_complaint(stderr: &str) -> Option<String> {
+    let haystack = stderr.to_ascii_lowercase();
+    if !(haystack.contains("licen") && haystack.contains("activat")) {
+        return None;
+    }
+
+    let mut lines = stderr.lines().map(str::trim).filter(|line| !line.is_empty());
+    let complaint = lines.next()?;
+
+    // The advice names the command to run. Recognised by its own two tokens
+    // rather than its exact phrasing, for the same reason as above.
+    let advice = stderr.lines().map(str::trim).find(|line| {
+        let line = line.to_ascii_lowercase();
+        line.starts_with("you can") && line.contains("activat")
+    });
+
+    Some(match advice {
+        // Joined with a dash rather than a full stop: the CLI's sentence
+        // carries no terminal punctuation and inventing some would be
+        // editing its words rather than arranging them.
+        Some(advice) if advice != complaint => format!("{complaint} — {advice}"),
+        _ => complaint.to_owned(),
+    })
 }
 
 /// Read one of the child's pipes to exhaustion on a thread of its own.
@@ -983,6 +1067,104 @@ mod tests {
             matches!(err, Error::BadInvocation { code: 1, .. }),
             "expected exit 1, got {err:?}"
         );
+    }
+
+    /// The exact stderr an unlicensed v1.4.13 produces, captured from a sandbox
+    /// `$XDG_DATA_HOME`. Kept verbatim so a CLI upgrade that reworded it shows
+    /// up here as a failing test rather than as a user being blamed for our bug.
+    const UNLICENSED: &str = "You need to activate an AdGuard license to use this command";
+
+    #[test]
+    fn a_lapsed_licence_is_not_reported_as_our_bug() {
+        let err = cli_for("/bin/sh")
+            .run_within(
+                &["-c", &format!("echo '{UNLICENSED}' >&2; exit 1")],
+                Duration::from_secs(10),
+            )
+            .expect_err("exit 1 is still a failure");
+
+        assert!(
+            matches!(err, Error::Unlicensed { .. }),
+            "expected a licence error, got {err:?}"
+        );
+        // The user sees the CLI's own sentence, not "adguard-cli rejected `status`".
+        assert_eq!(err.to_string(), UNLICENSED);
+    }
+
+    /// The other half of the same decision: a real malformed command line must
+    /// still be `BadInvocation`, or this fix would hide our own bugs instead.
+    #[test]
+    fn an_ordinary_exit_one_is_still_our_bug() {
+        let err = cli_for("/bin/sh")
+            .run_within(
+                &["-c", "echo 'unknown setting: nonsense.key' >&2; exit 1"],
+                Duration::from_secs(10),
+            )
+            .expect_err("exit 1 is a failure");
+
+        assert!(
+            matches!(err, Error::BadInvocation { code: 1, .. }),
+            "expected BadInvocation, got {err:?}"
+        );
+    }
+
+    /// What the real v1.4.13 actually writes to stderr, abridged in the middle.
+    ///
+    /// The first probe of this only looked at line one, which is how the usage
+    /// dump nearly ended up rendered inside an `AdwActionRow` subtitle.
+    const UNLICENSED_FULL: &str = "You need to activate an AdGuard license to use this command\n\
+        /home/you/.local/bin/adguard-cli\n\
+        \x20 CLI for controlling AdGuard\n\
+        \x20 Options:\n\
+        \x20   -v,--version                Display program version information and exit\n\
+        \x20 Commands:\n\
+        \x20   activate                    Activate an AdGuard license\n\
+        \x20   stop                        Stop the AdGuard proxy server\n\
+        \n\
+        You can activate your AdGuard license by running `/home/you/.local/bin/adguard-cli activate`";
+
+    /// Keep the complaint and the one actionable line; drop the usage dump.
+    #[test]
+    fn the_usage_dump_is_not_part_of_the_message() {
+        let message = licence_complaint(UNLICENSED_FULL).expect("should be a licence problem");
+
+        assert!(message.starts_with(UNLICENSED), "{message}");
+        assert!(message.contains(" — "), "the two sentences must be separated: {message}");
+        assert!(message.contains("adguard-cli activate"), "{message}");
+        assert!(
+            !message.contains("Display program version"),
+            "the usage dump leaked into a row subtitle: {message}"
+        );
+        assert_eq!(message.lines().count(), 1, "must fit one subtitle: {message}");
+    }
+
+    /// The match is on two loose tokens, so check it is neither too narrow to
+    /// survive a rewording nor loose enough to swallow an unrelated failure.
+    #[test]
+    fn the_licence_match_tolerates_rewording_without_swallowing_everything() {
+        for reworded in [
+            UNLICENSED,
+            "You need to activate an AdGuard licence to use this command",
+            "ERROR: license not activated",
+            "Please activate your AdGuard License first.",
+        ] {
+            assert!(
+                licence_complaint(reworded).is_some(),
+                "should read as a licence problem: {reworded:?}"
+            );
+        }
+
+        for unrelated in [
+            "unknown setting: nonsense.key",
+            "error: unexpected argument '--nope' found",
+            "Value is required for the 'listen_address' setting",
+            "",
+        ] {
+            assert!(
+                licence_complaint(unrelated).is_none(),
+                "should NOT read as a licence problem: {unrelated:?}"
+            );
+        }
     }
 
     /// A descendant holding the pipe open must not wedge the caller.

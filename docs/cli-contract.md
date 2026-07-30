@@ -71,7 +71,25 @@ The original reading of the table above was that exit 1 always means CLI11 rejec
 | `config set <key> --anything` | A positional value beginning with `-` is read as an option: `<value> is required` | ours — fixed by the `--` guard in [§5](#the----guard-is-mandatory) |
 | `status`, `license`, `filters list` in an unlicensed install | `You need to activate an AdGuard license to use this command` | **neither** — a real user state |
 
-The second is the one that matters. It is not reachable on this machine (`license` reports `APP_ACTIVE`), which is why it went unnoticed, but a lapsed licence would make `Cli::status` return "adguard-cli rejected `status`" — describing the user's expired licence as an internal error. Mapping that message to a distinct, actionable error belongs with the activation flow (`architecture.md` §5).
+The second is the one that matters. It is not reachable on this machine (`license` reports `APP_ACTIVE`), which is why it went unnoticed, but a lapsed licence made `Cli::status` return "adguard-cli rejected `status`" — describing the user's expired licence as an internal error. `Error::Unlicensed` now carries it instead, matched on the two tokens *licen…* and *activat…* rather than the exact sentence, so a rewording degrades to the old behaviour rather than to a missed case.
+
+**The complaint is not the whole of stderr.** Measured after the mapping was first written against only the opening line: the CLI follows that sentence with its entire usage dump — every subcommand, one per line — and then the one line worth acting on.
+
+```text
+You need to activate an AdGuard license to use this command
+/home/you/.local/bin/adguard-cli
+  CLI for controlling AdGuard
+  Options:
+    -v,--version                Display program version information and exit
+  Commands:
+    activate                    Activate an AdGuard license
+    …
+You can activate your AdGuard license by running `/home/you/.local/bin/adguard-cli activate`
+```
+
+Roughly twenty lines, destined for an `AdwActionRow` subtitle. `Cli` keeps the first line and the advice and drops the dump.
+
+Activation itself — opening the URL and polling until `APP_ACTIVE` — is still unbuilt (`architecture.md` §5).
 
 Discovered by running the CLI against a sandboxed data directory ([§5](#measuring-writes-without-touching-the-real-config)), where nothing is licensed.
 
