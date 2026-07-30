@@ -200,7 +200,7 @@ Userscripts are out because there is only one. `userscripts list` returns a sing
 
 Ship the tray + core controls first; it is the part that replaces day-to-day terminal use.
 
-Status: Status, Protection, Filters (HTTP), Advanced and Stealth are done; licence activation lives on the Status page; the tray carries start/stop plus the six Protection toggles as quick toggles (§4); and `--background` plus the autostart entry put that tray on screen at login without a window. Still open for v1: the first-run assistant, the DNS page, auto-mode detection, and the reconcile toast (§3).
+Status: Status, Protection, Filters (HTTP), DNS, Advanced and Stealth are done; licence activation lives on the Status page; the tray carries start/stop plus the six Protection toggles as quick toggles (§4); and `--background` plus the autostart entry put that tray on screen at login without a window. Still open for v1: the first-run assistant, auto-mode detection, and the reconcile toast (§3).
 
 ---
 

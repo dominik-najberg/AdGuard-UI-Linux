@@ -18,7 +18,7 @@ Working state as of 30 July 2026. The overnight run closed the config monitor, t
 | Tray | Done. Start/stop plus the six Protection toggles, in the GUI process. |
 | Config monitor | Done. External edits to `proxy.yaml` reconcile the table-driven pages live, without churning on our own CLI traffic. |
 | Autostart | Done. `--background` starts windowless; `data/autostart/` installs into `~/.config/autostart/`. |
-| Icon | Done. Colour and symbolic SVGs in `data/icons/`, installed by `building.md` §4. Until that install has been done once, a `cargo run` window gets the generic cog — the artwork is reached through the desktop entry, not through the binary. |
+| Icon | Done. Colour and symbolic SVGs plus nine pre-rendered PNG sizes in `data/icons/`, all installed by `building.md` §4. Until that install has been done once, a `cargo run` window gets the generic cog — the artwork is reached through the desktop entry, not through the binary. |
 | DNS | Done. The `agflm_dns.db` catalogue, the user-rules toggle, the three server settings, and the tri-state `listen_port`. Its settings sit above the catalogue as a `filters::Host` prelude so both halves share one scroll. |
 | Licence activation | Done, bar the success leg. Owner and masked key when licensed; `activate` → open the link → *finish activation* when not. Never polled. |
 | Auto mode | Not started. No privileged component of ours — detection and instruction only, `architecture.md` §6. |
@@ -48,7 +48,7 @@ The five open questions in [`overnight-plan.md`](overnight-plan.md) §5 were set
 | Userscripts page in v1? | **Out of v1.** One script exists and AdGuard says only that one is supported | `architecture.md` §7 |
 | Licence activation in v1? | **In**, but user-driven: open the URL, then a *finish activation* button that re-runs `activate`. Never polled | `architecture.md` §5, contract §7 |
 | Auto mode via a helper of ours? | **No.** AdGuard ships its own setup path (`sudo … adguard_root_helper -s`). We detect the three properties it checks and show its command. No polkit action, no privileged binary, no `pkexec` | `architecture.md` §6, contract §8 |
-| May the DNS page write `listen_port`? | **Yes** — disabled / automatic / fixed, the three states the config documents. Measure the bind address before shipping the row | `architecture.md` §5 |
+| May the DNS page write `listen_port`? | **Yes** — disabled / automatic / fixed, the three states the config documents. The bind address the decision made conditional has since been measured: loopback, and not movable | `architecture.md` §5, contract §5 |
 | Silent reconcile, or a toast? | **Toast, but only when a row the user can see actually moved.** `reconcile` returns a count; zero stays silent | `architecture.md` §3 |
 
 Two of these overturned a recommendation in `overnight-plan.md` §5, both because reading the `adguard-cli` binary's strings contradicted what had been inferred from file modes and from a design written before measurement. Contract §8 in particular said no upstream escalation path existed. One did.
@@ -75,7 +75,7 @@ Two of these overturned a recommendation in `overnight-plan.md` §5, both becaus
 cargo test -p adguard-core --test config_sandbox -- --ignored --nocapture
 ```
 
-A sandbox is unlicensed, so only the `config` family and `--version` work there. `config_mutate.rs` still drives the real config and is deliberately kept to one boolean round-trip behind a restoring `Drop` guard.
+A sandbox is unlicensed, so only the `config` family, `--version` and `activate` work there — `activate` because it is the command that exists to fix an unlicensed install, which makes a sandbox the only honest place to exercise it. `config_mutate.rs` still drives the real config and is deliberately kept to one boolean round-trip behind a restoring `Drop` guard.
 
 The same trick works on the app, which is the only practical way to see how a page renders against a config you would not create on purpose:
 
@@ -91,7 +91,7 @@ XDG_DATA_HOME=/tmp/fake cargo run -p adguard-gui
 
 **Subagents.** If you run a review workflow, check `git status` afterwards — one previously wrote a scratch test file into the tree. And do not apply fixes while a verify phase is still running; verifiers ended up reading already-corrected code and citing the new tests as proof the findings were wrong.
 
-**Driving the UI headlessly.** Any page can now be opened and read without a display, which is what makes "the page renders" provable rather than assertable. Start the app under `xvfb-run` on a private bus, launch `at-spi-bus-launcher`, then find the node with role **`list`** — not `list box`, which is what the sidebar is *not* — and call `get_selection_iface().select_child(n)`. Walking names afterwards gives every row and subtitle of the page that is now visible. Only the visible `GtkStack` child appears, so select first and read second.
+**Driving the UI headlessly.** Any page can now be opened and read without a display, which is what makes "the page renders" provable rather than assertable. Start the app under `xvfb-run` on a private bus, launch `at-spi-bus-launcher`, then find the node with role **`list`** — not `list box`, which is what the sidebar is *not* — and call `get_selection_iface().select_child(n)`. Walking names afterwards gives every row and subtitle of the page that is now visible. Only the visible `GtkStack` child appears, so select first and read second. The sidebar is `PAGES` in `main.rs` order — Status 0, Protection 1, Filters 2, DNS 3, Stealth 4, Advanced 5 — and the index is positional, so inserting a page without matching the `stack.add_named` order sends the selection to the wrong one with no error.
 
 **That dump now contains the licence owner's e-mail address**, in full and by design — it is the Status page, and the Owner row shows it whenever the machine is licensed. Everything else in this codebase is careful about that address; this recipe is the one route that hands it straight to a terminal, and from there to a commit message or a bug report. Redact it before pasting a Status-page walk anywhere, or take the walk against a sandbox `$XDG_DATA_HOME`, which has no licence and therefore no owner.
 
