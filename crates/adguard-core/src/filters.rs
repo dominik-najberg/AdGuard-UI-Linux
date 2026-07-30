@@ -44,6 +44,7 @@ const FILTER_SELECT: &str = "
            f.title,
            COALESCE(NULLIF(lp.description, ''), NULLIF(lb.description, ''), f.description, '') AS description,
            f.homepage,
+           COALESCE(f.download_url, '') AS download_url,
            f.is_enabled,
            f.is_installed,
            f.is_trusted
@@ -116,9 +117,18 @@ impl Catalogue {
     /// Excludes the user-rules pseudo-filter (see [`Filter::USER_RULES_ID`]),
     /// which is not a list and would otherwise appear as a filter belonging to
     /// a nonexistent group.
+    /// `display_number` does not order a group on its own — 44 filters share
+    /// `(group 7, display_number 2)` in `agflm_standard.db`, and every custom
+    /// filter has `display_number = 0` — so `filter_id` breaks the tie. Ascending
+    /// is deliberate: it is the order SQLite already returned for the catalogue
+    /// (`filter_id` is the rowid), so the shipped page does not move, and for the
+    /// negatively-numbered custom filters it puts the most recently installed
+    /// list at the top of its group.
     pub fn filters(&self, locale: &Locale) -> Result<Vec<Filter>, Error> {
-        let sql =
-            format!("{FILTER_SELECT} WHERE f.filter_id != ?3 ORDER BY f.group_id, f.display_number");
+        let sql = format!(
+            "{FILTER_SELECT} WHERE f.filter_id != ?3 \
+             ORDER BY f.group_id, f.display_number, f.filter_id"
+        );
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt.query_map(
             rusqlite::params![locale.primary(), locale.fallback(), Filter::USER_RULES_ID],
@@ -141,6 +151,30 @@ impl Catalogue {
             Some(row) => Ok(Some(map_filter(row)?)),
             None => Ok(None),
         }
+    }
+
+    /// The lists the user installed by URL.
+    ///
+    /// A subset of [`filters`], read on its own because it is how an install is
+    /// **verified**. `filters install` cannot be trusted to have worked from
+    /// what it printed, and unlike every other mutation in this crate there is
+    /// no id to re-read afterwards: the new row's id is assigned by AdGuard and
+    /// only discoverable by looking. So the caller reads this before and after,
+    /// and a row that was not there before is the evidence.
+    ///
+    /// Matching on the URL instead would be the obvious alternative and is
+    /// wrong: a local path is stored back normalised to `file://…`, so the
+    /// string the caller passed is not always the string that lands.
+    ///
+    /// [`filters`]: Self::filters
+    pub fn custom_filters(&self, locale: &Locale) -> Result<Vec<Filter>, Error> {
+        let sql = format!("{FILTER_SELECT} WHERE f.group_id = ?3 ORDER BY f.filter_id");
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            rusqlite::params![locale.primary(), locale.fallback(), FilterGroup::CUSTOM_ID],
+            map_filter,
+        )?;
+        rows.collect::<Result<_, _>>().map_err(Into::into)
     }
 
     /// How many filters in this set are switched on.
@@ -227,9 +261,10 @@ fn map_filter(row: &rusqlite::Row<'_>) -> rusqlite::Result<Filter> {
         title: row.get(3)?,
         description: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
         homepage: row.get(5)?,
-        enabled: row.get::<_, i64>(6)? != 0,
-        installed: row.get::<_, i64>(7)? != 0,
-        trusted: row.get::<_, i64>(8)? != 0,
+        download_url: row.get(6)?,
+        enabled: row.get::<_, i64>(7)? != 0,
+        installed: row.get::<_, i64>(8)? != 0,
+        trusted: row.get::<_, i64>(9)? != 0,
     })
 }
 

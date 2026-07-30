@@ -607,6 +607,91 @@ impl Cli {
         }
     }
 
+    /// Subscribe to a list AdGuard's catalogue does not carry.
+    ///
+    /// Takes a URL, or a path to a local file — the CLI accepts both through
+    /// the same positional and normalises a path to `file://…` on the way in.
+    ///
+    /// # Success is the usual shape; the failures are not
+    ///
+    /// Measured on v1.4.13 against both sets (`dns filters install` behaves
+    /// identically). The confirmation is the `Filter [<something>] <verb>` form
+    /// [`confirms`] already knows:
+    ///
+    /// ```text
+    /// $ adguard-cli filters install -- https://example.org/list.txt
+    /// Filter [Title: Example List] from URL: https://example.org/list.txt installed
+    /// ```
+    ///
+    /// Everything else is a refusal at exit 0 on stdout, and there are only two
+    /// shapes of it. A second install of a URL already present:
+    ///
+    /// ```text
+    /// Filter with the specified URL already exists:
+    /// [x] |       -10001 | Example List [non-trusted]    2026-07-31 00:51:48
+    /// ```
+    ///
+    /// — note the trailing `filters list` table, which contract §6 says not to
+    /// parse; [`first_line`] keeps the sentence and drops it. And, for
+    /// everything else that can go wrong:
+    ///
+    /// ```text
+    /// Failed to install the filter from URL: <whatever you passed>
+    /// ```
+    ///
+    /// **That one sentence covers a 404, a refused connection, an unresolvable
+    /// host, a missing file and a string that was never a URL.** They are
+    /// indistinguishable in the output, so neither this function nor its caller
+    /// may claim to know which happened.
+    ///
+    /// # Why the generous deadline
+    ///
+    /// This is the first caller of [`NETWORK_TIMEOUT`] that is genuinely a
+    /// network command throughout. Measured, the CLI has a deadline of its own:
+    /// a socket that accepts the connection and then never answers produces the
+    /// failure sentence after **60 s**, at exit 0. That sits inside the 120 s
+    /// here, so the wrapper's timeout is a backstop that should not normally
+    /// fire — but a minute is long enough that the caller owes the user a
+    /// progress state, and long enough that it will block every other
+    /// config-path invocation for the duration (contract §3).
+    ///
+    /// # This is not proof anything was installed
+    ///
+    /// As everywhere else in this module the confirmation is not the effect, and
+    /// here it is weaker than usual. The only thing checked about the content is
+    /// whether it *begins* with HTML — `<html…` and `<!DOCTYPE html>` are
+    /// refused, which catches a link that answers 200 with an error page.
+    /// Nothing else is: JSON, prose and an empty file all install as filter
+    /// lists holding no rules, and report success. It also echoes
+    /// `Filter [Title: file:///…]` for a list with no `! Title:` header while
+    /// storing that title as the empty string.
+    ///
+    /// So `Ok` means only that the CLI said it acted. The caller confirms
+    /// against the database, where the new row is the evidence — see
+    /// [`Catalogue::custom_filters`], which exists for this.
+    ///
+    /// [`Catalogue::custom_filters`]: crate::filters::Catalogue::custom_filters
+    pub fn filters_install(&self, set: FilterSet, url: &str) -> Result<(), Error> {
+        // The `--` guard is as mandatory here as for `config set`: measured,
+        // `filters install -leading-dash` exits 1 with `<filter-url> is
+        // required` on stderr and installs nothing.
+        let mut args = set.cli_prefix().to_vec();
+        args.push("install");
+        args.push("--");
+        args.push(url);
+
+        let out = self.run_within(&args, NETWORK_TIMEOUT)?;
+        if confirms(&out.stdout, "installed") {
+            Ok(())
+        } else {
+            Err(Error::Refused {
+                message: first_line(&out.stdout).unwrap_or_else(|| {
+                    format!("`adguard-cli {}` said nothing at all", args.join(" "))
+                }),
+            })
+        }
+    }
+
     /// Write one setting into `proxy.yaml`.
     ///
     /// The only sanctioned way to change the file: `config set` was measured to
@@ -1283,6 +1368,68 @@ mod tests {
     fn confirmation_survives_ansi_stripping() {
         let bold = "Filter [Title: \x1b[1mAdGuard Base filter\x1b[0m] enabled\n";
         assert!(confirms(&stripped(bold), FilterAction::Enable.confirmation()));
+    }
+
+    // ---- `filters install`, all captured from v1.4.13 ----
+
+    const INSTALLED: &str =
+        "Filter [Title: Online Malicious URL Blocklist] from URL: \
+         https://filters.adtidy.org/extension/chromium/filters/208.txt installed\n";
+
+    /// A list with no `! Title:` header. The CLI names the URL as the title
+    /// here and then stores the title as `''` — see `Filter::display_name`.
+    const INSTALLED_UNTITLED: &str =
+        "Filter [Title: file:///tmp/untitled.txt] from URL: file:///tmp/untitled.txt installed\n";
+
+    /// Re-installing a URL already present. The `filters list` table that
+    /// follows is the one contract §6 says not to parse.
+    const ALREADY_INSTALLED: &str = "Filter with the specified URL already exists:\n\
+         \x20   |           ID | Title                                   Last update        \n\
+         [x] |       -10001 | Claude Probe List [non-trusted]         2026-07-31 00:51:48\n";
+
+    /// The single sentence every fetch failure collapses into — a 404, a
+    /// refused connection, an unresolvable host, a missing file, or a string
+    /// that was never a URL.
+    const INSTALL_FAILED: &str =
+        "Failed to install the filter from URL: https://no-such-host-probe.invalid/list.txt\n";
+
+    #[test]
+    fn recognises_the_install_confirmation() {
+        assert!(confirms(INSTALLED, "installed"));
+        assert!(confirms(INSTALLED_UNTITLED, "installed"));
+    }
+
+    /// Both refusals exit 0, so reading either as success would leave the page
+    /// claiming a list it never installed.
+    #[test]
+    fn install_refusals_are_not_confirmations() {
+        for output in [ALREADY_INSTALLED, INSTALL_FAILED, "", "\n \n"] {
+            assert!(!confirms(output, "installed"), "{output:?} read as installed");
+        }
+    }
+
+    /// `Failed to install the filter from URL: …` ends with whatever was
+    /// passed, so a URL whose last path segment is the confirmation verb puts
+    /// the word "installed" at the end of a *failure* line. The `Filter [`
+    /// prefix is what keeps them apart.
+    #[test]
+    fn a_url_ending_in_the_verb_does_not_fake_a_confirmation() {
+        let failed = "Failed to install the filter from URL: https://example.org/installed\n";
+        assert!(!confirms(failed, "installed"));
+    }
+
+    /// The duplicate begins `Filter with`, one character class away from the
+    /// `Filter [` that means success.
+    #[test]
+    fn install_refusal_message_drops_the_filters_list_table() {
+        assert_eq!(
+            first_line(ALREADY_INSTALLED).as_deref(),
+            Some("Filter with the specified URL already exists:")
+        );
+        assert_eq!(
+            first_line(INSTALL_FAILED).as_deref(),
+            Some("Failed to install the filter from URL: https://no-such-host-probe.invalid/list.txt")
+        );
     }
 
     // ---- `config set`, all captured from v1.4.13 ----

@@ -1,20 +1,23 @@
 # Handoff
 
-Working state as of 31 July 2026. The overnight run closed the config monitor, the CLI timeout, the lapsed-licence mapping, the Stealth page and the `dns_filtering` dependency caveat; the session after it built **licence activation**, the one after that the **DNS page**, and the one after that the **first-run assistant** — which is the first page in this app that exists for a machine where AdGuard has never been configured at all. Read [`cli-contract.md`](cli-contract.md) and [`architecture.md`](architecture.md) first — the contract doc records measured CLI behaviour and the code depends on it. §5 of the contract is the part that matters for anything touching config; §4 of architecture.md is the part that matters for anything touching the tray or the way the process starts.
+Working state as of 31 July 2026. The overnight run closed the config monitor, the CLI timeout, the lapsed-licence mapping, the Stealth page and the `dns_filtering` dependency caveat; the session after it built **licence activation**, the one after that the **DNS page**, the one after that the **first-run assistant** — the first page here that exists for a machine where AdGuard has never been configured at all — and the one after that **custom filter install by URL**. Read [`cli-contract.md`](cli-contract.md) and [`architecture.md`](architecture.md) first — the contract doc records measured CLI behaviour and the code depends on it. §5 of the contract is the part that matters for anything touching config; §4 of architecture.md is the part that matters for anything touching the tray or the way the process starts.
 
-**If you are picking up where the assistant left off**, the thing to know is that contract §5 gained a subsection with teeth: *before `proxy.yaml` exists, almost nothing works*. `config set` refuses every real key, `activate` does not create the file, and `configure` is the only thing that does — which made the design sentence this app had been carrying for the assistant impossible as written, and made `configure` the second exception to the never-invoke rule rather than a command nobody touches.
+**If you are picking up where the custom filters left off**, the thing to know is that contract §6 gained a subsection, and the fact in it that changes decisions is this: **AdGuard checks only whether what it downloaded *begins* with HTML.** That catches a link answering 200 with an error page, and nothing else. JSON, prose, the wrong plain-text file and an empty response all install as filter lists holding no rules, report success, and leave a switch reading *on* over something that filters nothing. The Filters page says so in the group description because no other part of this UI ever could.
+
+That subsection also carries the correction worth reading before trusting anything else in it: an earlier revision of it said content was *never* validated, generalised from a single probe file that happened to open with a line of prose before its HTML. The reasoning was fine and the fixture was not — the same lesson §3 already records about measuring one line and one stream, arriving a third time as one sample. A test caught it, which is the argument for `filters_sandbox.rs` pinning both sides of the boundary.
 
 ---
 
 ## 1. Where things stand
 
-**142 tests pass by default** and 35 more are `#[ignore]`d.
+**150 tests pass by default** and 42 more are `#[ignore]`d.
 
 | Page | State |
 | --- | --- |
 | Status | Done. Runtime state, start/stop/restart, 2 s poll (10 s when only the tray shows), and the licence. |
 | Protection | Done. Six switches, `proxy.yaml` → `config set`. |
-| Filters (HTTP) | Done. SQLite-backed catalogue with localised names. |
+| Filters (HTTP) | Done. SQLite-backed catalogue with localised names, plus custom lists installed by URL. |
+| Custom filters | Done. A URL entry row above the catalogue on both filter pages; `filters install` behind `NETWORK_TIMEOUT`, verified by the row that appears rather than by what was printed. |
 | Advanced | Done. Ports, listen address, auth, outbound proxy, worker threads, log level, secure DNS filtering. |
 | Stealth | Done. The 26 settings behind Protection's stealth switch, including the nested `anti_dpi` section. |
 | Tray | Done. Start/stop plus the six Protection toggles, in the GUI process. |
@@ -24,6 +27,7 @@ Working state as of 31 July 2026. The overnight run closed the config monitor, t
 | DNS | Done. The `agflm_dns.db` catalogue, the user-rules toggle, the three server settings, and the tri-state `listen_port`. Its settings sit above the catalogue as a `filters::Host` prelude so both halves share one scroll. |
 | Licence activation | Done, bar the success leg. Owner and masked key when licensed; `activate` → open the link → *finish activation* when not. Never polled. |
 | First-run assistant | Done. Shown when there is no `proxy.yaml`: licence check → one guarded `configure` to seed → four questions pre-filled from the seeded file → writes the deltas and reports what landed → hands the window to the pages. Driven end to end headlessly. |
+| Custom filter removal | Not started, and it makes install a one-way door. `filters remove` **deletes** a custom row outright, unlike a catalogue filter — so it wants a confirmation, `architecture.md` §5. |
 | Auto mode | Not started. No privileged component of ours — detection and instruction only, `architecture.md` §6. |
 | Reconcile toast | Not started. `architecture.md` §3. |
 
@@ -59,7 +63,7 @@ Two of these overturned a recommendation in `overnight-plan.md` §5, both becaus
 
 ## 3. Known gaps, in the order I would fix them
 
-1. **Custom filter install by URL** (`filters install`). Network-touching, so it wants `NETWORK_TIMEOUT` and a visible progress state, both of which now exist in `cli.rs` — `Cli::activate` is the first caller of that timeout and shows the shape.
+1. **Removing a custom filter.** Install landed without it, which makes the feature a one-way door: a list added by URL can be switched off but not taken out of the page. `filters remove <id>` does it, and unlike a catalogue filter — where `remove` only clears `is_installed` — it **deletes the row outright** (contract §6). That asymmetry is the whole design question: it wants a confirmation, and it is the only genuinely destructive thing either filter page would do, which is why it was not bolted onto the install change.
 2. **Auto mode** — `architecture.md` §6. No longer a polkit item: AdGuard ships its own setup path, so the work is a `stat` of `~/.local/opt/adguard-cli/adguard_root_helper` for the three properties `adguard-cli` itself checks (`owned_by_root`, `has_suid`, `is_executable`), a row showing AdGuard's `sudo … -s` command when they are unmet, a re-check on window focus, and an ordinary `config set proxy_mode auto` when they are met. Both branches are provable headlessly by pointing the check at a fake path. **`data/io.github.dominik-najberg.AdGuardUI.policy` is now dead scaffolding** — delete it with this work, and do not install it; it names a helper that will never exist. Note the first-run assistant deliberately does *not* offer `proxy_mode`, and `model::SETUP`'s comment says why; when auto mode lands, that is the decision to revisit.
 3. **Reconcile toast** — `architecture.md` §3. The smallest of these: `reconcile` returns how many displayed rows differed, and a non-zero count raises an `AdwToast`. The point is not the toast, it is that the count is what makes the app's own writes stop announcing themselves as somebody else's. Fix the stderr line in the same change — it currently claims "outside the app" about something it has no way to know.
 4. **The certificate is seeded but not trusted.** `configure` turns HTTPS filtering on and silently skips its own *"Do you want to install the certificate on the system?"* prompt, because that one needs a password and there is no TTY (contract §7). So every install this app sets up ends with HTTPS filtering on and the CA outside the system trust store — filtering that will fail on the first HTTPS site until the user installs it. The assistant's HTTPS row says the certificate is needed, which is honest but weaker than it should be: nothing yet *detects* whether the CA is trusted, and §6 rules out installing it for the user, so the shape is the auto-mode one — detect, then show AdGuard's own instructions. Worth doing alongside gap 2, since they are the same kind of work.
@@ -95,9 +99,22 @@ XDG_DATA_HOME=/tmp/fake cargo run -p adguard-gui
 
 **Driving the UI headlessly.** Any page can now be opened and read without a display, which is what makes "the page renders" provable rather than assertable. Start the app under `xvfb-run` on a private bus, launch `at-spi-bus-launcher`, then find the node with role **`list`** — not `list box`, which is what the sidebar is *not* — and call `get_selection_iface().select_child(n)`. Walking names afterwards gives every row and subtitle of the page that is now visible. Only the visible `GtkStack` child appears, so select first and read second. The sidebar is `PAGES` in `main.rs` order — Status 0, Protection 1, Filters 2, DNS 3, Stealth 4, Advanced 5 — and the index is positional, so inserting a page without matching the `stack.add_named` order sends the selection to the wrong one with no error.
 
+**`AdwEntryRow`'s apply button is not in the tree either**, so the third widget in a row is unreachable this way. The row itself appears — as a `list item` holding two `label`s and one `text` — and its editable interface works: `get_editable_text_iface().set_text_contents(url)` types into it and reads back correctly. What is absent is anything to press. There is no `button` under the row at any depth, `grab_focus` fails with the same bare `atspi_error` it fails with everywhere else under GTK4, and a synthetic click needs extents that come back pointing at the sidebar. So an entry row's *write* leg joins `AdwComboRow`'s: rendering is provable, the commit is not. The custom-filter install is covered at the CLI layer by `filters_sandbox.rs` instead, and its rendering by a frame.
+
+**Take the frame, and look at it.** The pattern is now three deep — `AdwSpinRow` missing entirely, `AdwComboRow` with no way to select, `AdwEntryRow` with no way to apply — and the fallback `building.md` §3 offers is the one that keeps working. A 1000×1400 Xvfb screen fits the whole Filters page in one grab.
+
 **That dump now contains the licence owner's e-mail address**, in full and by design — it is the Status page, and the Owner row shows it whenever the machine is licensed. Everything else in this codebase is careful about that address; this recipe is the one route that hands it straight to a terminal, and from there to a commit message or a bug report. Redact it before pasting a Status-page walk anywhere.
 
-**The "use a sandbox" escape hatch no longer holds on its own.** It used to end "…or take the walk against a sandbox `$XDG_DATA_HOME`, which has no licence and therefore no owner". Since the licence has been found to live in `adguard.conf` and to travel with a copy of that one file (contract §5), a sandbox is exactly where a licence-gated flow gets driven — the assistant's `configure` cannot be exercised any other way — and such a sandbox has an owner row like any other install. A sandbox is also where output feels safest to paste. **Redact at the harness**, with something as blunt as an e-mail regex over every line before it is printed; do not rely on the directory being unlicensed.
+**The "use a sandbox" escape hatch no longer holds on its own.** It used to end "…or take the walk against a sandbox `$XDG_DATA_HOME`, which has no licence and therefore no owner". Since the licence has been found to live in `adguard.conf` and to travel with a copy of that one file (contract §5), a sandbox is exactly where a licence-gated flow gets driven — the assistant's `configure` cannot be exercised any other way — and such a sandbox has an owner row like any other install. A sandbox is also where output feels safest to paste. **Redact at the harness**, over every line before it is printed; do not rely on the directory being unlicensed.
+
+**An e-mail regex on its own is not the harness this section wants**, and that sentence used to say it was. `license` prints three lines, and the key is on the second — so a harness filtering only addresses hands the more sensitive of the two fields straight to the terminal. Measured the hard way: a probe run while sizing up `filters install` printed `License key: <sixteen characters>` in full, from a sandbox, through a redactor written from this paragraph. Filter both:
+
+```bash
+sed -E -e 's/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/<redacted@e-mail>/g' \
+       -e 's/(License key:).*/\1 <redacted>/'
+```
+
+The same applies to an AT-SPI walk, where the key can reach a dump through the Status page; matching `\b[A-Z0-9]{16}\b` catches it there, where the label is not on the same line.
 
 **A command's echo is not its effect, even when the echo looks like the file.** `config list-remove` of a list's last element prints `filters:` with nothing after it. The file gets `filters: []`. Those read the same to a human and differently to a YAML parser — null versus an empty sequence — and the difference was written up in contract §5, and into two doc comments and a test name, before anyone looked at the bytes. The rule this project already had for `config set` covers it exactly: **the confirmation is never the evidence, re-read the file.** It just had not occurred to anyone that a command whose output *is* YAML-shaped needed the same suspicion.
 

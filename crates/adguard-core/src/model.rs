@@ -832,6 +832,11 @@ pub struct Filter {
     /// Localised description; empty when the catalogue has none.
     pub description: String,
     pub homepage: Option<String>,
+    /// Where the list is fetched from. Empty for the user-rules pseudo-filter,
+    /// which has no source; for a custom filter it is the URL the user gave
+    /// [`crate::Cli::filters_install`], normalised (a local path arrives back
+    /// as `file://…`), and the only thing identifying an untitled one.
+    pub download_url: String,
     pub enabled: bool,
     pub installed: bool,
     pub trusted: bool,
@@ -850,6 +855,39 @@ impl Filter {
 
     pub fn is_user_rules(&self) -> bool {
         self.id == Self::USER_RULES_ID
+    }
+
+    /// A list the user installed by URL, rather than one from AdGuard's
+    /// catalogue.
+    ///
+    /// Decided by the group, not by the sign of the id. Custom filters are
+    /// numbered from `-10001` downwards, so a range test would work today and
+    /// would silently take in the user-rules sentinel (`i32::MIN`) if the
+    /// numbering ever moved. [`FilterGroup::CUSTOM_ID`] is a real group that
+    /// both databases carry.
+    pub fn is_custom(&self) -> bool {
+        self.group_id == FilterGroup::CUSTOM_ID
+    }
+
+    /// What to put on the row.
+    ///
+    /// [`Self::name`] is normally enough — it has already fallen back from the
+    /// localised name to the English title. A **custom** filter can defeat both:
+    /// installing a list with no `! Title:` header leaves `title` set to the
+    /// empty string, and custom filters have no `filter_localisation` rows at
+    /// all, so the whole `COALESCE` chain resolves to `''` and the row would
+    /// render nameless (contract §6).
+    ///
+    /// The CLI papers over this in its own confirmation — it echoes
+    /// `Filter [Title: file:///…]` for a title it then stores as empty — so the
+    /// URL is both the honest fallback and the one the user will recognise.
+    pub fn display_name(&self) -> &str {
+        for candidate in [self.name.as_str(), self.title.as_str(), self.download_url.as_str()] {
+            if !candidate.trim().is_empty() {
+                return candidate;
+            }
+        }
+        "Untitled filter"
     }
 
     /// The action needed to move this filter to `on`.
@@ -1030,6 +1068,7 @@ mod tests {
             title: "Test".to_owned(),
             description: String::new(),
             homepage: None,
+            download_url: "https://example.org/list.txt".to_owned(),
             enabled,
             installed,
             trusted: false,
@@ -1067,6 +1106,53 @@ mod tests {
     fn user_rules_are_never_added() {
         let user_rules = filter(Filter::USER_RULES_ID, true, false);
         assert_eq!(user_rules.action_for(true), FilterAction::Enable);
+    }
+
+    /// A custom list installed with no `! Title:` header has an empty title and
+    /// no localisation rows, so everything the catalogue would normally fall
+    /// back to is also empty. Without the URL the row renders nameless.
+    #[test]
+    fn an_untitled_custom_filter_falls_back_to_its_url() {
+        let mut f = filter(-10001, true, true);
+        f.group_id = FilterGroup::CUSTOM_ID;
+        f.name = String::new();
+        f.title = String::new();
+        f.download_url = "https://example.org/list.txt".to_owned();
+        assert_eq!(f.display_name(), "https://example.org/list.txt");
+    }
+
+    /// The last resort. A row with nothing at all is still a row the user can
+    /// switch off, so it needs *some* name.
+    #[test]
+    fn a_filter_with_nothing_to_show_is_still_named() {
+        let mut f = filter(-10001, true, true);
+        f.name = String::new();
+        f.title = String::new();
+        f.download_url = "   ".to_owned();
+        assert_eq!(f.display_name(), "Untitled filter");
+    }
+
+    /// The localised name wins whenever there is one — the fallback must not
+    /// take over a catalogue filter that has a perfectly good name.
+    #[test]
+    fn a_named_filter_keeps_its_name() {
+        let f = filter(2, true, true);
+        assert_eq!(f.display_name(), "Test");
+    }
+
+    /// Custom filters are numbered from -10001 downwards *today*, which makes a
+    /// sign test look sufficient — it would also swallow the user-rules
+    /// pseudo-filter, whose id is `i32::MIN` and which is not a custom list.
+    #[test]
+    fn custom_filters_are_told_apart_by_group_not_by_id() {
+        let mut custom = filter(-10001, true, true);
+        custom.group_id = FilterGroup::CUSTOM_ID;
+        assert!(custom.is_custom());
+
+        let user_rules = filter(Filter::USER_RULES_ID, true, false);
+        assert!(!user_rules.is_custom(), "user rules read as a custom filter");
+
+        assert!(!filter(2, true, true).is_custom());
     }
 
     #[test]

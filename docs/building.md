@@ -176,7 +176,7 @@ Do not strip the escapes when recording — the stripper is part of what is unde
 
 ### The `#[ignore]`d suites
 
-Three suites are excluded from a plain `cargo test` because they invoke the real `adguard-cli`. They are the only tests that exercise the write path end to end — act → re-read → reconcile against the real binary — so run them after any change to `cli.rs`, and after an `adguard-cli` upgrade.
+Four suites are excluded from a plain `cargo test` because they invoke the real `adguard-cli`. They are the only tests that exercise the write path end to end — act → re-read → reconcile against the real binary — so run them after any change to `cli.rs`, and after an `adguard-cli` upgrade.
 
 **Safe: writes only to a throwaway config.** The CLI resolves its data directory as `$XDG_DATA_HOME/adguard-cli`, so this one hands the real binary a copy of `proxy.yaml` in a temp directory and never touches your settings:
 
@@ -184,7 +184,15 @@ Three suites are excluded from a plain `cargo test` because they invoke the real
 cargo test -p adguard-core --test config_sandbox -- --ignored --nocapture
 ```
 
-That is where the dangerous behaviour is covered — exposing the proxy on `0.0.0.0`, blanking the proxy password, the `--` guard, the absent range checking. It also asserts, last, that the machine's `proxy.yaml` is byte-identical afterwards. A sandbox is unlicensed, so `status`/`license`/`filters` cannot run there; only the `config` family can (see `cli-contract.md` §5).
+That is where the dangerous behaviour is covered — exposing the proxy on `0.0.0.0`, blanking the proxy password, the `--` guard, the absent range checking. It also asserts, last, that the machine's `proxy.yaml` is byte-identical afterwards. A sandbox is unlicensed, so `status`/`license`/`filters` cannot run there; only the `config` family can (see `cli-contract.md` §5) — unless the licence is lent to it, which is what `Sandbox::licensed` does.
+
+**Safe: writes only to a throwaway catalogue.** Custom filter install, against a sandbox holding a lent licence:
+
+```bash
+cargo test -p adguard-core --test filters_sandbox -- --ignored --nocapture
+```
+
+Every case installs a file the test wrote, through the `file://` leg `filters install` accepts on the same positional as a URL, so the suite reaches no network and cannot be broken by somebody else's list going down. It pins the boundary of AdGuard's one content check — HTML at the start is refused, JSON and prose and an empty file are not — and asserts that the machine's own custom filters are unchanged afterwards, which is one mistaken `Catalogue::open_set` away from being false: that call resolves `$XDG_DATA_HOME` from the *test* process, not the child's.
 
 **Mutates this machine's real AdGuard configuration.** Both restore whatever they found, including on panic, but neither belongs in an unattended run:
 

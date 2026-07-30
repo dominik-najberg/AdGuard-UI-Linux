@@ -7,7 +7,7 @@
 //! so the switch is only allowed to settle on a state the database confirms.
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
 
@@ -158,7 +158,24 @@ impl FiltersPage {
             }
         }
 
-        for (group, filters) in loaded.catalogue.grouped() {
+        let grouped = loaded.catalogue.grouped();
+
+        // Rendered here rather than in the loop below, because it is the one
+        // group that must appear while it is *empty* — it carries the row that
+        // installs the first custom list, and `grouped` drops empty groups. Its
+        // position is unchanged: AdGuard gives "Custom filters"
+        // `display_number = 0`, so it sorts above "Ad blocking" either way.
+        let customs: Vec<&Filter> = grouped
+            .iter()
+            .find(|(group, _)| group.is_custom())
+            .map(|(_, filters)| filters.clone())
+            .unwrap_or_default();
+        page.add(&self.custom_group(&customs));
+
+        for (group, filters) in grouped {
+            if group.is_custom() {
+                continue; // already rendered, with its install row
+            }
             // Group names come from AdGuard's own categories, which carry no
             // markup; row text does, so only the rows opt out of Pango.
             let rendered = adw::PreferencesGroup::builder().title(&group.name).build();
@@ -169,6 +186,125 @@ impl FiltersPage {
         }
 
         page
+    }
+
+    /// Lists the user installed by URL, plus the row that installs another.
+    ///
+    /// The description warns that a bad link is added rather than rejected
+    /// because that is measured (contract §6): AdGuard checks only whether the
+    /// response *begins* with HTML. A link to JSON, to prose, or to the wrong
+    /// plain-text file installs a filter holding no rules and reports success —
+    /// leaving a switch reading on over something that filters nothing, which
+    /// nothing else in this UI would ever reveal.
+    fn custom_group(self: &Rc<Self>, customs: &[&Filter]) -> adw::PreferencesGroup {
+        let group = adw::PreferencesGroup::builder()
+            .title("Custom filters")
+            .description(
+                "Lists that are not in AdGuard's catalogue. Add only ones you trust: \
+                 a link that does not return a filter list is still added, holding no rules.",
+            )
+            .build();
+
+        let entry = adw::EntryRow::builder()
+            .title("Add a filter list by URL")
+            .show_apply_button(true)
+            .build();
+
+        // Shown for the length of the install, which is not a formality: the
+        // CLI's own deadline is 60 s, so this row can sit there for a minute
+        // (contract §6).
+        let spinner = adw::Spinner::new();
+        spinner.set_visible(false);
+        entry.add_suffix(&spinner);
+
+        let this = Rc::downgrade(self);
+        let busy = spinner.clone();
+        entry.connect_apply(move |entry| {
+            let Some(this) = this.upgrade() else {
+                return;
+            };
+            let url = entry.text().trim().to_owned();
+            if url.is_empty() {
+                return;
+            }
+            this.install(url, entry.clone(), busy.clone());
+        });
+
+        group.add(&entry);
+        for filter in customs {
+            group.add(&self.row(filter));
+        }
+
+        group
+    }
+
+    /// Fetch and subscribe to one list, then confirm it against the database.
+    ///
+    /// The verification is not the usual re-read of a known row: the new
+    /// filter's id is assigned by AdGuard and cannot be known in advance, so the
+    /// custom rows are read *before* and *after* and a row that was not there
+    /// before is the evidence. Matching on the URL would be the obvious
+    /// alternative and is wrong — a local path is stored back as `file://…`.
+    fn install(self: &Rc<Self>, url: String, entry: adw::EntryRow, spinner: adw::Spinner) {
+        entry.set_sensitive(false);
+        spinner.set_visible(true);
+
+        let cli = self.cli.clone();
+        let set = self.set;
+        let locale = self.locale.clone();
+        let this = self.clone();
+        worker::run(
+            move || {
+                let read = || {
+                    Catalogue::open_set(set)
+                        .and_then(|catalogue| catalogue.custom_filters(&locale))
+                        .ok()
+                };
+                // `None` rather than an empty set when the read fails: an
+                // unreadable "before" would make every list already installed
+                // look new, and report a success that did not happen.
+                let before: Option<HashSet<i64>> =
+                    read().map(|filters| filters.into_iter().map(|f| f.id).collect());
+
+                let refused = cli.filters_install(set, &url).err().map(|err| err.to_string());
+
+                let added = match (before, read()) {
+                    (Some(before), Some(after)) => {
+                        after.into_iter().find(|f| !before.contains(&f.id))
+                    }
+                    _ => None,
+                };
+                (refused, added)
+            },
+            move |(refused, added)| this.settle_install(refused, added, &entry, &spinner),
+        );
+    }
+
+    fn settle_install(
+        self: &Rc<Self>,
+        refused: Option<String>,
+        added: Option<Filter>,
+        entry: &adw::EntryRow,
+        spinner: &adw::Spinner,
+    ) {
+        spinner.set_visible(false);
+        entry.set_sensitive(true);
+
+        if let Some(added) = added {
+            self.toasts
+                .add_toast(toast(&format!("Added {}", added.display_name())));
+            // The whole page is rebuilt rather than one row patched, unlike a
+            // toggle: an install adds a row, and there is nothing to patch.
+            // It also clears the entry, which is what should happen on success.
+            self.reload();
+            return;
+        }
+
+        // Left as it was typed, so a mistyped URL can be corrected rather than
+        // retyped.
+        self.toasts.add_toast(toast(&refused.unwrap_or_else(|| {
+            "AdGuard reported the list was installed, but it is not in the catalogue".to_owned()
+        })));
     }
 
     /// The user's own rules — a toggle, not a subscribable list, so it gets
@@ -208,7 +344,11 @@ impl FiltersPage {
         // the property is set afterwards. Turning markup off first covers the
         // subtitle too.
         switch.set_use_markup(false);
-        switch.set_title(&filter.name);
+        // `display_name`, not `name`: a custom list installed without a
+        // `! Title:` header has an empty title and no localisation rows, so the
+        // catalogue's whole fallback chain resolves to "" and the row would
+        // render nameless (contract §6).
+        switch.set_title(filter.display_name());
 
         if !filter.description.is_empty() {
             switch.set_subtitle(&filter.description);
@@ -253,7 +393,7 @@ impl FiltersPage {
             // cannot race the first one's verification.
             row.switch.set_sensitive(false);
             let filter = row.filter.borrow();
-            (filter.action_for(on), filter.name.clone())
+            (filter.action_for(on), filter.display_name().to_owned())
         };
 
         let cli = self.cli.clone();

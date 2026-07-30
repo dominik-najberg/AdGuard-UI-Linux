@@ -84,6 +84,22 @@ Reported as `BadInvocation` that read as *"adguard-cli rejected `license` (exit 
 
 This is also the one failure a developer meets routinely, because `XDG_DATA_HOME=/tmp/fake` (`building.md` §3) creates exactly that never-used directory.
 
+### Once the directory is initialised, a second invocation *blocks*
+
+"It never happens again" is true of the *failure* and was mistaken for the whole story. Measured while a 60-second `filters install` was in flight against an already-initialised sandbox:
+
+| Run alongside an in-flight `filters install` | Wall time |
+| --- | --- |
+| `status` | 0.02 s — unaffected |
+| `config get log_level` | **58 s** — released the moment the install returned |
+| `filters disable <id>` | **52 s** — same |
+
+So the lock covers the config and filter-manager paths and not the status path. Nothing fails and nothing is corrupted; the second command simply waits. That is the better of the two behaviours, but it is not free for a GUI: every one of those waits is a worker thread held for up to a minute ([`worker::run`](../crates/adguard-gui/src/worker.rs) spawns one per call), and any page that reads `proxy.yaml` through the CLI freezes behind a slow install rather than reporting anything.
+
+Two consequences. The 2 s `status` poll is safe to leave running across a long command, which is what makes a progress state on the Filters page workable at all. And a command that can take a minute must be the *only* config-path call in flight — the UI should disable the affordances that would issue another rather than queue them behind it.
+
+One limit of the measurement: the sandbox proxy was **stopped**, so this says nothing about whether `status` still avoids the lock when it has a live daemon to talk to.
+
 **The complaint is not the whole of stderr.** Measured after the mapping was first written against only the opening line: the CLI follows that sentence with its entire usage dump — every subcommand, one per line — and then the one line worth acting on.
 
 ```text
@@ -512,6 +528,60 @@ Consequences for a switch-per-filter UI:
 Opening read-only is also verified not to create `-wal`/`-shm` side-car files next to the daemon's databases.
 
 `sqlite3` CLI is not installed on this machine, but that is irrelevant to us — `rusqlite` bundles its own SQLite. It only matters for manual inspection (use `python3 -c` with the stdlib `sqlite3` module).
+
+### Installing a custom filter
+
+`filters install` subscribes to a list AdGuard's catalogue does not carry. Measured on v1.4.13 against a sandbox with a lent licence, for both sets — `dns filters install` behaves identically, minus `--trusted`, which the DNS subcommand does not offer.
+
+```
+Usage: adguard-cli filters install [OPTIONS] <filter-url>
+  <filter-url> TEXT REQUIRED  Enter the filter URL or path to a local file to install
+  --trusted                   Indicate that the filter is trusted
+  --title TEXT                Set title for custom filter
+```
+
+| Invocation | Exit | Stream | Output | Effect |
+| --- | --- | --- | --- | --- |
+| a list with a `! Title:` header | 0 | stdout | `Filter [Title: Claude Probe List] from URL: <url> installed` | a new row, `is_enabled=1`, `is_installed=1` |
+| a real `https://` list | 0 | stdout | the same, in 0.66 s | as above |
+| a list with **no** `! Title:` header | 0 | stdout | `Filter [Title: <the url>] …` | a new row whose `title` column is **`''`** |
+| `--title X` | 0 | stdout | echoes `X` | `title = 'X'`, overriding the header |
+| `--trusted` | 0 | stdout | unchanged | `is_trusted = 1` |
+| the **same URL** again | 0 | stdout | `Filter with the specified URL already exists:` + a `filters list` table | nothing |
+| content starting `<html` or `<!DOCTYPE` | 0 | stdout | `Failed to install the filter from URL: <arg>` | nothing — the one content check there is |
+| JSON, prose, an empty file, comments only | 0 | stdout | `… installed` | **installed**, holding no rules |
+| a path that does not exist | 0 | stdout | `Failed to install the filter from URL: <arg>` | nothing |
+| HTTP 404 | 0 | stdout | the same sentence | nothing |
+| connection refused | 0 | stdout | the same sentence | nothing |
+| an unresolvable host | 0 | stdout | the same sentence | nothing |
+| `just some words` | 0 | stdout | the same sentence | nothing |
+| a server that accepts and never replies | 0 | stdout | the same sentence, **after 60 s** | nothing |
+| a value beginning with `-`, no `--` | **1** | **stderr** | `<filter-url> is required` | nothing |
+| unlicensed | **1** | **stderr** | the usual complaint and usage dump | nothing |
+
+Nine things follow, and four of them are traps.
+
+**Success keeps the house shape, so the existing matcher already covers it.** The confirmation is `Filter [<something>] installed`, which is exactly the `Filter [` … `<verb>` form [§6 above](#writing-filter-state) defines — `cli::confirms(&stdout, "installed")` needs no special case. Neither refusal can be mistaken for it: the duplicate begins `Filter with the specified URL`, not `Filter [`, and the failure sentence begins `Failed`. A URL that happens to end in the word *installed* is safe for the same reason.
+
+**Every failure is the same sentence.** A 404, a refused connection, a DNS failure, a missing file and a string that was never a URL are indistinguishable in the output — `Failed to install the filter from URL: <what you passed>`, at exit 0, on stdout, echoing the raw argument rather than the normalised one. So the UI cannot explain *why* an install failed, and must not pretend to. Say that the list could not be fetched and show the CLI's sentence.
+
+**It has a 60-second deadline of its own.** Measured against a socket that accepts the connection and then never answers: the command returns the ordinary failure sentence at exit 0 after 60 s. That is *inside* [`NETWORK_TIMEOUT`](#10-wrapper-layer-checklist)'s 120 s, so the wrapper's deadline is a backstop that should never fire, and the normal worst case is a clean refusal a minute later — which is still far too long to leave a button looking idle.
+
+**The only thing checked about the content is whether it starts with HTML.** Measured across nine bodies: `<html…` and `<!DOCTYPE html>` are refused, leading whitespace and all, while *the same HTML placed after one line of ordinary text is accepted*. Everything that is not an HTML document installs — JSON, prose, a file of blank lines, a file of nothing at all — as a filter list holding no rules, reporting success.
+
+So this is a sniff for "did I get an error page instead of a list", not validation of filter syntax, and it is worth knowing in both directions. It catches the single likeliest accident, a link that 200s with a friendly HTML error. It catches nothing else: a link to a JSON API or the wrong plain-text file leaves the user subscribed to a filter that filters nothing, with no error anywhere and a switch reading *on*.
+
+An earlier revision of this section said content was *never* validated, generalised from one probe file that happened to open with a line of prose before its HTML. The sample was the thing that was wrong, not the reasoning — which is the same lesson [§3](#exit-1-is-usually-our-bug-but-not-always) already records twice about single-line and single-stream measurements, arriving this time as a single *fixture*. `filters_sandbox::html_is_the_one_thing_rejected` pins the boundary from both sides so the next revision has to argue with a test.
+
+**Deduplication is by URL string, not by content.** The same list installed once as `file://…` and once as `http://…` yields two enabled rows. Conversely the *second* install of one URL is **refused**, which is the opposite of `config list-add`'s silent duplicate ([§5](#list-writes-list-add-and-list-remove)) — so this one command may be issued speculatively.
+
+**The echo says a title the database does not have.** A list with no `! Title:` header is confirmed as `Filter [Title: file:///…/untitled.txt]` while the `title` column is set to the empty string. The localised name in [§6](#do-not-parse-filters-list) then falls back through `COALESCE` to that same empty string — custom filters have no `filter_localisation` rows at all — so the row renders with **no name whatsoever** unless the UI supplies its own fallback. This is the section's own rule landing in a new place: the confirmation is not the effect, even when the confirmation is the friendlier of the two.
+
+**Custom filters get negative IDs from `-10001` downwards, and they are never reused.** Distinct from the user-rules sentinel `i32::MIN`, and negative here needs no `--` guard either — `filters disable -10001` parses as a positional, exactly as `-2147483648` does. Every custom row has `display_number = 0`, so their order within the group is whatever SQLite returns; a stable list needs a secondary sort of the UI's own. The group itself (`group_id = i32::MIN`, *"Custom filters"*) is real, present in `filter_group` in both databases, and carries `display_number = 0` — so it sorts **above** *Ad blocking*, and an installed custom list appears at the top of the page.
+
+**`filters remove` on a custom filter deletes the row outright.** For a catalogue filter, `remove` only clears `is_installed` and the row stays (§6 above). For a custom one the row is gone from `filter` entirely — `Filter [ID: -10004, Title: …] removed` — which makes it the one genuinely destructive filter operation and not a mirror of `install`. There is no undo but re-fetching the URL.
+
+**`proxy.yaml` is not touched.** Its `filters` list still reads `['flm://', 'user.txt']` after four installs; custom lists live only in the database, behind that `flm://` entry. So no `config list-add` is involved and nothing here needs the write path of [§5](#5-configuration-writes).
 
 ---
 
