@@ -17,7 +17,7 @@
 use std::sync::{Mutex, MutexGuard};
 
 use adguard_core::config::key;
-use adguard_core::{Cli, Config, Toggle};
+use adguard_core::{AddressPlan, Cli, Config, Toggle};
 
 /// The switch under test. Restored to its original value before returning.
 const SUBJECT: Toggle = Toggle::StealthMode;
@@ -253,14 +253,14 @@ fn refusals_are_reported_as_failure() {
     assert_eq!(before, after, "a refusal still modified proxy.yaml");
 }
 
-/// Leaving loopback needs `listen_auth.enabled` set **first**: the CLI
+/// Leaving loopback needs `listen_auth` fully configured **first**: the CLI
 /// otherwise tries to collect a username interactively, finds no TTY, and
 /// silently keeps the old address while still printing "Config has been
 /// updated". This is the trap [`config::listen_address_plan`] exists to avoid.
 ///
 /// Deliberately *not* executed against the machine — it would briefly expose
-/// the proxy. It asserts only that the plan is ordered correctly for the
-/// config actually present.
+/// the proxy. It asserts only that the plan suits the config actually present.
+/// The behaviour itself is exercised in `config_sandbox.rs`, against a copy.
 #[test]
 #[ignore = "invokes the real adguard-cli"]
 fn the_listen_address_plan_matches_the_machine() {
@@ -271,18 +271,36 @@ fn the_listen_address_plan_matches_the_machine() {
         eprintln!("skipping: proxy.yaml not readable");
         return;
     };
-    let auth = config.listen_auth_enabled().unwrap_or(false);
+    let auth = config.listen_auth();
 
     let plan = adguard_core::config::listen_address_plan("0.0.0.0", auth);
-    if auth {
-        assert_eq!(plan.len(), 1, "auth already on: only the address needs writing");
-    } else {
-        assert_eq!(
-            plan.first().map(|(k, _)| *k),
-            Some(key::LISTEN_AUTH_ENABLED),
-            "authentication must be enabled before the address leaves loopback"
-        );
-        assert_eq!(plan.len(), 2);
+    eprintln!("plan for 0.0.0.0 with {auth:?}: {plan:?}");
+
+    match &plan {
+        AddressPlan::NeedsCredentials { .. } => {
+            assert!(
+                !auth.username_set || !auth.password_set,
+                "refused with both credentials present"
+            );
+            assert!(plan.calls().is_empty(), "a refusal must issue nothing");
+        }
+        AddressPlan::Calls(calls) => {
+            assert!(auth.username_set && auth.password_set);
+            assert_eq!(
+                calls.last().map(|(k, _)| *k),
+                Some(key::LISTEN_ADDRESS),
+                "the address must be written last"
+            );
+            if auth.enabled {
+                assert_eq!(calls.len(), 1, "auth already on: only the address needs writing");
+            } else {
+                assert_eq!(
+                    calls.first().map(|(k, _)| *k),
+                    Some(key::LISTEN_AUTH_ENABLED),
+                    "authentication must be enabled before the address leaves loopback"
+                );
+                assert_eq!(calls.len(), 2);
+            }
+        }
     }
-    eprintln!("plan for 0.0.0.0 with listen_auth={auth}: {plan:?}");
 }

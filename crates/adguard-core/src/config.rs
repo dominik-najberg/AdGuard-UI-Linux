@@ -158,6 +158,26 @@ impl Config {
         }
     }
 
+    /// Read an enumerated setting, returning the matching entry of `options`.
+    ///
+    /// Case-insensitive, because the CLI is: `config set log_level INFO` and
+    /// `config set outbound_proxy.mode socks5` are both accepted and the value
+    /// is written back **verbatim**, so the file can legitimately hold `'INFO'`
+    /// where the comment says `info`, or `'socks5'` where the default is
+    /// `'HTTP'`. Matching exactly would render those rows as unavailable.
+    ///
+    /// Returns the canonical spelling from `options` rather than the file's, so
+    /// a caller can compare it by pointer or feed it straight to a combo row.
+    /// A value outside the list is `None` — the CLI refuses to write one, so it
+    /// means a hand edit, and "unavailable" is the honest rendering.
+    pub fn choice_at(&self, key: &str, options: &[&'static str]) -> Option<&'static str> {
+        let value = self.str_at(key)?.trim();
+        options
+            .iter()
+            .find(|option| option.eq_ignore_ascii_case(value))
+            .copied()
+    }
+
     /// Read a list-valued setting, e.g. `filters` or `dns_filtering.filters`.
     ///
     /// These are the keys `config get` refuses with *"This field is not a
@@ -220,6 +240,83 @@ impl Config {
     pub fn listen_auth_enabled(&self) -> Option<bool> {
         self.bool_at(key::LISTEN_AUTH_ENABLED)
     }
+
+    /// Everything [`listen_address_plan`] needs to know about `listen_auth`.
+    ///
+    /// Each field defaults to the value that makes the plan *more* cautious
+    /// when the key cannot be read: authentication off, credentials absent. The
+    /// two mistakes are not symmetric — over-estimating what is configured
+    /// produces a `config set` that silently does nothing while reporting
+    /// success, which is the exact failure this whole path exists to avoid.
+    pub fn listen_auth(&self) -> AuthState {
+        AuthState {
+            enabled: self.listen_auth_enabled().unwrap_or(false),
+            username_set: self.credential_set(key::LISTEN_AUTH_USERNAME),
+            password_set: self.credential_set(key::LISTEN_AUTH_PASSWORD),
+        }
+    }
+
+    /// Is this credential non-empty as far as the *CLI* is concerned?
+    ///
+    /// Measured: the check is a literal emptiness test, not a trim. A username
+    /// of `' '` — one space — is enough to satisfy it and the address write
+    /// goes through. So this deliberately does not trim: its only job is to
+    /// predict the CLI's behaviour, and trimming would block a write that would
+    /// in fact have succeeded.
+    fn credential_set(&self, key: &str) -> bool {
+        self.str_at(key).is_some_and(|value| !value.is_empty())
+    }
+}
+
+/// The state of `listen_auth`, as the CLI will see it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AuthState {
+    pub enabled: bool,
+    /// `listen_auth.username` is present and not the empty string.
+    pub username_set: bool,
+    pub password_set: bool,
+}
+
+impl AuthState {
+    /// Can the proxy be exposed beyond loopback without the CLI stopping to ask
+    /// for credentials it cannot read?
+    pub fn is_complete(self) -> bool {
+        self.enabled && self.username_set && self.password_set
+    }
+
+    /// Why exposing the proxy beyond loopback is currently impossible, or
+    /// `None` when it is not.
+    ///
+    /// Only the credentials are consulted, not [`Self::enabled`]:
+    /// [`listen_address_plan`] switches authentication on by itself, but it
+    /// cannot invent a username or a password. Lets the UI explain the
+    /// constraint before the user runs into it.
+    pub fn exposure_blocker(self) -> Option<String> {
+        (!self.username_set || !self.password_set)
+            .then(|| missing_credentials_message(!self.username_set, !self.password_set))
+    }
+}
+
+/// Name the credentials that have to be set, and why it matters.
+///
+/// Worth spelling out rather than passing the CLI's own wording through,
+/// because the CLI's advice is *wrong* in one of the three cases: it always
+/// prompts for a username and always names `config set listen_auth.username`,
+/// even when the username is fine and it is the password that is empty.
+/// Following that advice would not fix it.
+fn missing_credentials_message(username: bool, password: bool) -> String {
+    let missing = match (username, password) {
+        (true, true) => "a username and a password",
+        (true, false) => "a username",
+        (false, true) => "a password",
+        // Not constructed by either caller, both of which check first. Kept
+        // total rather than panicking.
+        (false, false) => "credentials",
+    };
+    format!(
+        "Set {missing} for the proxy before letting it listen beyond this \
+         machine — without them AdGuard silently keeps the old address"
+    )
 }
 
 /// The dotted paths this crate reads and writes.
@@ -236,8 +333,24 @@ pub mod key {
     pub const CRLITE: &str = "crlite.enabled";
 
     pub const DNS_LISTEN_PORT: &str = "dns_filtering.listen_port";
+
+    // --- the Advanced page ---
     pub const LISTEN_ADDRESS: &str = "listen_address";
     pub const LISTEN_AUTH_ENABLED: &str = "listen_auth.enabled";
+    pub const LISTEN_AUTH_USERNAME: &str = "listen_auth.username";
+    pub const LISTEN_AUTH_PASSWORD: &str = "listen_auth.password";
+    pub const LISTEN_PORT_HTTP: &str = "listen_ports.http_proxy";
+    pub const LISTEN_PORT_SOCKS5: &str = "listen_ports.socks5_proxy";
+    pub const WORKER_THREADS: &str = "worker_threads";
+    pub const LOG_LEVEL: &str = "log_level";
+    pub const OUTBOUND_ENABLED: &str = "outbound_proxy.enabled";
+    pub const OUTBOUND_MODE: &str = "outbound_proxy.mode";
+    pub const OUTBOUND_HOST: &str = "outbound_proxy.host";
+    pub const OUTBOUND_PORT: &str = "outbound_proxy.port";
+    pub const OUTBOUND_USERNAME: &str = "outbound_proxy.username";
+    pub const OUTBOUND_PASSWORD: &str = "outbound_proxy.password";
+    pub const OUTBOUND_TRUST_ANY_CERT: &str = "outbound_proxy.trust_any_certificate";
+    pub const OUTBOUND_UDP_VIA_SOCKS5: &str = "outbound_proxy.udp_through_socks5_enabled";
 }
 
 /// Is this listen address confined to the local machine?
@@ -268,13 +381,49 @@ pub fn is_loopback(address: &str) -> bool {
     })
 }
 
+/// What has to happen for `listen_address` to actually become `address`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AddressPlan {
+    /// The ordered `config set` calls to issue. The order is load-bearing;
+    /// stop at the first one that fails.
+    Calls(Vec<(&'static str, String)>),
+
+    /// The move cannot be made yet, and **no call should be issued**: the CLI
+    /// would try to collect the missing credentials interactively, find no TTY,
+    /// keep the old address, and still print `Config has been updated`.
+    ///
+    /// At least one of the two flags is true.
+    NeedsCredentials { username: bool, password: bool },
+}
+
+impl AddressPlan {
+    /// The calls to issue, or `&[]` when the plan is blocked.
+    pub fn calls(&self) -> &[(&'static str, String)] {
+        match self {
+            Self::Calls(calls) => calls,
+            Self::NeedsCredentials { .. } => &[],
+        }
+    }
+
+    /// Why the move is blocked, phrased for the user. See
+    /// [`missing_credentials_message`] for why this is not the CLI's own wording.
+    pub fn blocked_reason(&self) -> Option<String> {
+        match self {
+            Self::Calls(_) => None,
+            Self::NeedsCredentials { username, password } => {
+                Some(missing_credentials_message(*username, *password))
+            }
+        }
+    }
+}
+
 /// The ordered `config set` calls that move `listen_address` safely.
 ///
-/// `architecture.md` §5 requires authentication to be forced on when the
-/// listen address leaves loopback, since the config comment says so
-/// (*"if not localhost, authentication is required"*). Measurement turned that
-/// from a fix-up into a **precondition**, because the CLI tries to collect
-/// credentials interactively and cannot be driven headlessly:
+/// `architecture.md` §5 requires authentication to be forced on when the listen
+/// address leaves loopback, since the config comment says so (*"if not
+/// localhost, authentication is required"*). Measurement turned that from a
+/// fix-up into a **precondition**, because the CLI tries to collect credentials
+/// interactively and cannot be driven headlessly:
 ///
 /// ```text
 /// $ adguard-cli config set listen_address 0.0.0.0     # listen_auth off
@@ -284,20 +433,58 @@ pub fn is_loopback(address: &str) -> bool {
 /// Config has been updated
 /// ```
 ///
-/// Note the sting: the address it echoes back is the **old** one and the file
-/// is untouched, yet it still claims the config was updated. Enabling
-/// `listen_auth.enabled` first makes the same command succeed without a
-/// prompt. So the order below is load-bearing, not cosmetic — reversed, the
-/// second call silently does nothing while reporting success.
+/// Note the sting: the address it echoes back is the **old** one and the file is
+/// untouched, yet it still claims the config was updated.
 ///
-/// Returns the calls needed, in order; empty when nothing has to change.
-pub fn listen_address_plan(address: &str, auth_enabled: bool) -> Vec<(&'static str, String)> {
-    let mut plan = Vec::new();
-    if !is_loopback(address) && !auth_enabled {
-        plan.push((key::LISTEN_AUTH_ENABLED, "true".to_owned()));
+/// # Enabling authentication is necessary but not sufficient
+///
+/// Measured on v1.4.13, against a sandboxed copy of `proxy.yaml`. The prompt
+/// appears unless authentication is on **and both credentials are non-empty**:
+///
+/// | `enabled` | `username` | `password` | `config set listen_address 0.0.0.0` |
+/// | --- | --- | --- | --- |
+/// | `false` | `admin` | `admin` | prompts, no-op |
+/// | `true` | `''` | `admin` | prompts, no-op |
+/// | `true` | `admin` | `''` | **prompts, no-op** |
+/// | `true` | `admin` | `admin` | succeeds |
+///
+/// The third row is why this returns a plan rather than a list of calls: an
+/// earlier version enabled authentication and then wrote the address, which on
+/// a machine with a blank password would have reported success and changed
+/// nothing. There is no way to fix that by reordering, and inventing a password
+/// on the user's behalf would be a security decision made behind their back —
+/// one they could never log in past. So the move is refused and named.
+///
+/// Note also that the CLI prompts for a *username* whichever credential is
+/// missing, and its suggested remedy names only `listen_auth.username`; see
+/// [`AddressPlan::blocked_reason`].
+///
+/// # Retreating to loopback is always allowed
+///
+/// Measured from every broken starting state — exposed with authentication off,
+/// with an empty username, with an empty password: writing a loopback address
+/// always succeeds and never prompts. The trigger is the **new** value, not the
+/// old one. That asymmetry matters, because it means a user who is exposed with
+/// unusable credentials can always be brought back to safety; the UI must never
+/// gate the retreat behind the same checks as the exposure.
+pub fn listen_address_plan(address: &str, auth: AuthState) -> AddressPlan {
+    if is_loopback(address) {
+        return AddressPlan::Calls(vec![(key::LISTEN_ADDRESS, address.to_owned())]);
     }
-    plan.push((key::LISTEN_ADDRESS, address.to_owned()));
-    plan
+
+    if !auth.username_set || !auth.password_set {
+        return AddressPlan::NeedsCredentials {
+            username: !auth.username_set,
+            password: !auth.password_set,
+        };
+    }
+
+    let mut calls = Vec::new();
+    if !auth.enabled {
+        calls.push((key::LISTEN_AUTH_ENABLED, "true".to_owned()));
+    }
+    calls.push((key::LISTEN_ADDRESS, address.to_owned()));
+    AddressPlan::Calls(calls)
 }
 
 #[cfg(test)]
@@ -551,36 +738,200 @@ stealthmode:
         assert_eq!(config.listen_auth_enabled(), Some(false));
     }
 
+    /// The CLI writes an enum value back verbatim, so `'INFO'` and `'socks5'`
+    /// are both things the real file can hold. Matching case-sensitively would
+    /// blank those rows.
+    #[test]
+    fn enum_values_are_matched_case_insensitively() {
+        const LEVELS: [&str; 3] = ["info", "debug", "trace"];
+        let read = |yaml: &str| {
+            Config::parse(yaml, Path::new("t.yaml"))
+                .unwrap()
+                .choice_at(key::LOG_LEVEL, &LEVELS)
+        };
+
+        assert_eq!(read("log_level: 'info'"), Some("info"));
+        assert_eq!(read("log_level: 'INFO'"), Some("info"), "the CLI accepts INFO");
+        assert_eq!(read("log_level: Debug"), Some("debug"));
+        assert_eq!(read("log_level: ' trace '"), Some("trace"));
+        // Outside the list, or not a string at all: unavailable, not a guess.
+        assert_eq!(read("log_level: 'bogus'"), None);
+        assert_eq!(read("log_level: 3"), None);
+        assert_eq!(read("other: 1"), None);
+    }
+
+    /// The sample has credentials but authentication switched off — the state
+    /// the reference machine is actually in.
+    #[test]
+    fn reads_the_auth_state() {
+        assert_eq!(
+            sample().listen_auth(),
+            AuthState {
+                enabled: false,
+                username_set: true,
+                password_set: true,
+            }
+        );
+    }
+
+    /// An unreadable `listen_auth` must not be optimistically reported as
+    /// usable: over-estimating it is what produces a silently-failing write.
+    #[test]
+    fn an_unreadable_auth_state_is_assumed_absent() {
+        let config = Config::parse("listen_address: '127.0.0.1'", Path::new("t.yaml")).unwrap();
+        assert_eq!(
+            config.listen_auth(),
+            AuthState {
+                enabled: false,
+                username_set: false,
+                password_set: false,
+            }
+        );
+        assert!(!config.listen_auth().is_complete());
+    }
+
+    /// Measured: the CLI's emptiness check is literal, not a trim — a username
+    /// of one space is enough to satisfy it. Mirroring that exactly is the
+    /// point of this function; trimming would block a write that would in fact
+    /// have gone through.
+    #[test]
+    fn a_whitespace_credential_counts_as_set_because_the_cli_says_so() {
+        let config = Config::parse(
+            "listen_auth:\n  enabled: true\n  username: ' '\n  password: ' '\n",
+            Path::new("t.yaml"),
+        )
+        .unwrap();
+        assert!(config.listen_auth().is_complete());
+    }
+
     /// The order is the whole point: without auth already on, the CLI prompts
     /// for a username, finds no TTY, and silently leaves the address alone
     /// while printing "Config has been updated".
     #[test]
     fn leaving_loopback_enables_auth_first() {
-        let plan = listen_address_plan("0.0.0.0", false);
+        let auth = AuthState {
+            enabled: false,
+            username_set: true,
+            password_set: true,
+        };
         assert_eq!(
-            plan,
-            vec![
+            listen_address_plan("0.0.0.0", auth),
+            AddressPlan::Calls(vec![
                 (key::LISTEN_AUTH_ENABLED, "true".to_owned()),
                 (key::LISTEN_ADDRESS, "0.0.0.0".to_owned()),
-            ]
+            ])
         );
     }
 
     #[test]
     fn auth_already_on_needs_no_extra_call() {
+        let auth = AuthState {
+            enabled: true,
+            username_set: true,
+            password_set: true,
+        };
         assert_eq!(
-            listen_address_plan("0.0.0.0", true),
-            vec![(key::LISTEN_ADDRESS, "0.0.0.0".to_owned())]
+            listen_address_plan("0.0.0.0", auth),
+            AddressPlan::Calls(vec![(key::LISTEN_ADDRESS, "0.0.0.0".to_owned())])
         );
     }
 
-    /// Returning to loopback must not switch authentication on as a
-    /// side effect — the requirement is about exposure, not a ratchet.
+    /// Enabling authentication is not sufficient. Measured: with `enabled:
+    /// true` and either credential empty, the address write still prompts and
+    /// still silently no-ops. So the plan must refuse rather than issue calls
+    /// that would report success and change nothing.
+    #[test]
+    fn leaving_loopback_is_refused_without_credentials() {
+        let cases = [
+            (false, false, true, true),
+            (true, false, false, true),
+            (false, true, true, false),
+        ];
+
+        for (username_set, password_set, want_username, want_password) in cases {
+            let auth = AuthState {
+                enabled: true,
+                username_set,
+                password_set,
+            };
+            assert_eq!(
+                listen_address_plan("0.0.0.0", auth),
+                AddressPlan::NeedsCredentials {
+                    username: want_username,
+                    password: want_password,
+                },
+                "username_set={username_set} password_set={password_set}",
+            );
+        }
+    }
+
+    /// A blocked plan must hand back no calls at all. Issuing the first one
+    /// alone would switch authentication on for an address that then never
+    /// moves — a change the user did not ask for, in service of nothing.
+    #[test]
+    fn a_blocked_plan_issues_nothing() {
+        let auth = AuthState {
+            enabled: false,
+            username_set: false,
+            password_set: false,
+        };
+        let plan = listen_address_plan("0.0.0.0", auth);
+        assert!(plan.calls().is_empty());
+        assert!(plan.blocked_reason().is_some());
+    }
+
+    /// The CLI always prompts for a *username* and always suggests setting
+    /// `listen_auth.username`, even when the password is the empty one. Our
+    /// message has to name the credential that is actually missing, or it sends
+    /// the user to fix the wrong field.
+    #[test]
+    fn the_block_names_the_credential_that_is_missing() {
+        let reason = |username: bool, password: bool| {
+            AddressPlan::NeedsCredentials { username, password }
+                .blocked_reason()
+                .expect("a blocked plan has a reason")
+        };
+
+        assert!(reason(false, true).contains("a password"));
+        assert!(!reason(false, true).contains("username"));
+        assert!(reason(true, false).contains("a username"));
+        assert!(!reason(true, false).contains("password"));
+        assert!(reason(true, true).contains("a username and a password"));
+    }
+
+    /// Returning to loopback must not switch authentication on as a side
+    /// effect — the requirement is about exposure, not a ratchet.
     #[test]
     fn returning_to_loopback_leaves_auth_alone() {
+        let auth = AuthState {
+            enabled: false,
+            username_set: true,
+            password_set: true,
+        };
         assert_eq!(
-            listen_address_plan("127.0.0.1", false),
-            vec![(key::LISTEN_ADDRESS, "127.0.0.1".to_owned())]
+            listen_address_plan("127.0.0.1", auth),
+            AddressPlan::Calls(vec![(key::LISTEN_ADDRESS, "127.0.0.1".to_owned())])
         );
+    }
+
+    /// The safety-critical direction, measured from every broken state: a
+    /// retreat to loopback always succeeds, so it must never be gated behind
+    /// the credential check that guards exposure. Getting this wrong would
+    /// strand a user on an open address precisely because their credentials
+    /// were unusable.
+    #[test]
+    fn the_retreat_to_loopback_is_never_blocked() {
+        let broken = AuthState {
+            enabled: false,
+            username_set: false,
+            password_set: false,
+        };
+        for address in ["127.0.0.1", "127.0.0.2", "::1"] {
+            assert_eq!(
+                listen_address_plan(address, broken),
+                AddressPlan::Calls(vec![(key::LISTEN_ADDRESS, address.to_owned())]),
+                "{address} should always be reachable",
+            );
+        }
     }
 }

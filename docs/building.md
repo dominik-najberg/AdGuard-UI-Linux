@@ -102,7 +102,17 @@ Do not strip the escapes when recording — the stripper is part of what is unde
 
 ### The `#[ignore]`d suites
 
-Two suites are excluded from a plain `cargo test` because they invoke the real `adguard-cli` and mutate this machine's actual AdGuard configuration. Both restore whatever they found, but neither belongs in an unattended run:
+Three suites are excluded from a plain `cargo test` because they invoke the real `adguard-cli`. They are the only tests that exercise the write path end to end — act → re-read → reconcile against the real binary — so run them after any change to `cli.rs`, and after an `adguard-cli` upgrade.
+
+**Safe: writes only to a throwaway config.** The CLI resolves its data directory as `$XDG_DATA_HOME/adguard-cli`, so this one hands the real binary a copy of `proxy.yaml` in a temp directory and never touches your settings:
+
+```bash
+cargo test -p adguard-core --test config_sandbox -- --ignored --nocapture
+```
+
+That is where the dangerous behaviour is covered — exposing the proxy on `0.0.0.0`, blanking the proxy password, the `--` guard, the absent range checking. It also asserts, last, that the machine's `proxy.yaml` is byte-identical afterwards. A sandbox is unlicensed, so `status`/`license`/`filters` cannot run there; only the `config` family can (see `cli-contract.md` §5).
+
+**Mutates this machine's real AdGuard configuration.** Both restore whatever they found, including on panic, but neither belongs in an unattended run:
 
 ```bash
 cargo test -p adguard-core --test filters_mutate -- --ignored --nocapture
@@ -112,9 +122,25 @@ cargo test -p adguard-core --test filters_mutate -- --ignored --nocapture
 cargo test -p adguard-core --test config_mutate -- --ignored --nocapture
 ```
 
-They are the only tests that exercise the write path end to end — act → re-read → reconcile against the real binary — so run them after any change to `cli.rs`, and after an `adguard-cli` upgrade. `config_mutate` also asserts the claim the whole no-YAML-writes rule rests on: that `config set` rewrites exactly one line and preserves every comment.
+`config_mutate` is deliberately kept to one boolean round-trip plus the claim the whole no-YAML-writes rule rests on — that `config set` rewrites exactly one line and preserves every comment. Anything riskier belongs in `config_sandbox`.
 
 The `*_live` suites are safe and run by default; they read the real `proxy.yaml` and filter databases, and **skip** rather than fail when AdGuard CLI is not installed.
+
+### Driving the GUI against a fake config
+
+The same `$XDG_DATA_HOME` trick works on the app, which is the only practical way to see how a page renders against a config you would never create on purpose — a port holding a float, a key missing outright, a value outside its enum:
+
+```bash
+mkdir -p /tmp/fake/adguard-cli && cp ~/.local/share/adguard-cli/proxy.yaml /tmp/fake/adguard-cli/
+```
+
+Edit `/tmp/fake/adguard-cli/proxy.yaml`, then:
+
+```bash
+XDG_DATA_HOME=/tmp/fake cargo run -p adguard-gui
+```
+
+Writes made in the app land in the fake config. Note the Filters page will fail to open its catalogue there unless the `agflm_*.db` files are copied across too — the CLI seeds a fresh data directory with its own bundled defaults on first use.
 
 GUI code needs a display. Under Wayland, headless CI requires a compositor:
 
@@ -127,6 +153,14 @@ For a quick look at the GUI without one, `Xvfb` is enough to render and screensh
 ```bash
 xvfb-run -n 99 -s "-screen 0 1000x820x24" env GDK_BACKEND=x11 ./target/debug/adguard-ui
 ```
+
+To capture a frame, `ffmpeg`'s `x11grab` works against the virtual display — unlike against `:0`, where under Wayland it captures nothing because Xwayland windows are not drawn into the X root window:
+
+```bash
+ffmpeg -f x11grab -video_size 1000x820 -i :99 -frames:v 1 -y /tmp/shot.png
+```
+
+Make the virtual screen taller than the window if you want a whole `AdwPreferencesPage` in one frame; there is no way to scroll without `xdotool`, which is not installed here.
 
 ---
 

@@ -55,13 +55,25 @@ Measured directly (not through a pipe — piping makes `$?` report the *last* co
 | `config get` (missing argument) | 1 | **stderr** |
 | `filters list --bogus-flag` | 1 | **stderr** |
 
-**The rule:** exit code 1 means the *argument parser* (CLI11) rejected the command line, and the message goes to **stderr**. Every *semantic* failure — unknown config key, wrong key type, missing section — prints to **stdout** and exits **0**.
+**The rule:** exit code 1 means the command never ran, and the message goes to **stderr**. Every *semantic* failure — unknown config key, wrong key type, missing section — prints to **stdout** and exits **0**.
 
 Consequences for the wrapper layer:
 
-- A non-zero exit is a programming error in our code (we built a malformed command line), not a user-facing condition. Log it loudly; it should never reach the user as a normal outcome.
 - Real failures must be detected by **matching output text**. This is inherently brittle: pin the patterns in one place, and treat an unrecognised output shape as failure rather than success.
 - Never conclude "the operation worked" from exit 0 alone. For state changes, re-read the resulting state and verify.
+
+### Exit 1 is *usually* our bug, but not always
+
+The original reading of the table above was that exit 1 always means CLI11 rejected our command line — a programming error in this codebase, never a user-facing condition. Two later measurements show that is too strong, and `Error::BadInvocation` should not be treated as unreachable:
+
+| Also exits 1, on stderr | Cause | Whose fault |
+| --- | --- | --- |
+| `config set <key> --anything` | A positional value beginning with `-` is read as an option: `<value> is required` | ours — fixed by the `--` guard in [§5](#the----guard-is-mandatory) |
+| `status`, `license`, `filters list` in an unlicensed install | `You need to activate an AdGuard license to use this command` | **neither** — a real user state |
+
+The second is the one that matters. It is not reachable on this machine (`license` reports `APP_ACTIVE`), which is why it went unnoticed, but a lapsed licence would make `Cli::status` return "adguard-cli rejected `status`" — describing the user's expired licence as an internal error. Mapping that message to a distinct, actionable error belongs with the activation flow (`architecture.md` §5).
+
+Discovered by running the CLI against a sandboxed data directory ([§5](#measuring-writes-without-touching-the-real-config)), where nothing is licensed.
 
 ---
 
@@ -105,6 +117,77 @@ Key syntax facts:
 - Dotted paths work for scalars: `config get stealthmode.enabled`, `config get listen_ports.http_proxy`.
 - `config show <section>` accepts **top-level** sections only. Nested ones fail: `config show anti_dpi` → `not found`, even though `stealthmode.anti_dpi` exists in the file. Expand the parent instead.
 - List-valued keys (`filters`, `userscripts`, `apps`) are not scalars — `config get filters` refuses. Use `list-add`/`list-remove`, or edit an auxiliary file via `--list-file`.
+- **`config get` does not mask secrets.** `config get listen_auth.password` prints `listen_auth.password = admin` in full; only `config show` masks, as `password: <set>`. So `config get` is not a safe thing to log.
+- `config reset <key>` restores the shipped default and confirms in the same way (`log_level` → `info`). Not used yet; the obvious home for it is a "restore default" affordance per row.
+
+### Measuring writes without touching the real config
+
+**The CLI resolves its data directory as `$XDG_DATA_HOME/adguard-cli`.** Pointing that at a scratch directory holding a copy of `proxy.yaml` gives a complete, throwaway AdGuard configuration:
+
+```bash
+XDG_DATA_HOME=/tmp/sandbox adguard-cli config set listen_address 0.0.0.0
+```
+
+This is how everything in this section was measured, and `Cli::with_xdg_data_home` exposes it to `tests/config_sandbox.rs`. It matters because the interesting write behaviours are the ones nobody should provoke on a real machine: exposing the proxy on `0.0.0.0`, blanking the proxy password, setting a listen port to a value that takes the listener down.
+
+Two limits:
+
+- A sandbox is an **unlicensed** install, and copying `gm.db` across does not change that, so the licence evidently lives elsewhere. `status`, `license` and `filters list` all fail there with exit 1 (see [§3](#exit-1-is-usually-our-bug-but-not-always)). The `config` family and `--version` need no licence and behave exactly as they do for real.
+- It says nothing about whether our *reads* point at the file AdGuard really uses. That still needs a test against the live install — which is what `config_live.rs` and the one round-trip left in `config_mutate.rs` are for.
+
+### The `--` guard is mandatory
+
+Both arguments of `config set` are positionals, and CLI11 still tries to read a leading `-` as an option:
+
+```
+$ adguard-cli config set listen_auth.password --flag-shaped
+<value> is required                      # exit 1, nothing written
+$ adguard-cli config set listen_auth.password -abc
+<value> is required                      # exit 1, nothing written
+$ adguard-cli config set -- listen_auth.password --flag-shaped
+listen_auth.password = --flag-shaped     # exit 0, written
+```
+
+`-1` survives without the guard, because a negative *number* parses as a positional — which is what made the manual proxy ports (`-1` to disable) look safe and hid this. A password or hostname starting with `-` does not.
+
+The guard changes nothing for ordinary values — verified for `-1`, plain strings and every enum — so `Cli::config_set` applies it unconditionally rather than by a rule someone has to remember. It also improves the failure mode for a bad *key*: `'--bogus' not found` at exit 0, an ordinary semantic refusal, instead of a parse error.
+
+### `config set` type-checks, and nothing else
+
+For an integer setting it verifies only that the value **is** an integer:
+
+| `config set listen_ports.http_proxy …` | Result |
+| --- | --- |
+| `0`, `65536`, `99999`, `-2` | **accepted**, written verbatim |
+| `3.5` | **accepted** — the file gets a *float* where an integer belongs |
+| `abc`, empty | refused: `Invalid value type: The value of the setting must be an integer` |
+
+`worker_threads 0` and `worker_threads -1` are accepted too. So **range-checking is the GUI's job**, like the cross-setting dependencies below; `model::Setting`'s `min`/`max` are ours, not the CLI's, and `Setting::permits_number` is the gate. `3.5` is the nastiest of them, because `Config::int_at` then reads nothing at all and the row goes "unavailable" — a value the CLI itself accepted rendering as unreadable.
+
+Enumerated settings *are* checked, and name their options in the refusal:
+
+```
+$ adguard-cli config set log_level bogus
+Invalid value for key `log_level`. Valid values are: info, debug, trace
+$ adguard-cli config set outbound_proxy.mode bogus
+Invalid value for key `outbound_proxy.mode`. Valid values are: http, https, socks4, socks5
+```
+
+But **the accepted value is written back verbatim, in whatever case it was given.** `config set log_level INFO` leaves `log_level: 'INFO'`, and `outbound_proxy.mode socks5` leaves `mode: 'socks5'` where the default is `'HTTP'`. Reads must therefore be case-insensitive — `Config::choice_at` — or a value the CLI produced would render as unavailable.
+
+`listen_address` is validated, and more narrowly than the file's own comment suggests: it must be **a bare IP address with no port**. `127.0.0.1`, `0.0.0.0`, `::1`, `::` and `192.168.1.10` are accepted; `localhost`, `0.0.0.0:3128`, `1.2.3.4.5` and the empty string are refused with `Value for key 'listen_address' must be a valid IP address without port`. Note `localhost` is *rejected on write* even though it appears in the comment ("if not localhost, authentication is required") — so `config::is_loopback` accepting it is right for reading a hand-edited file, but the UI must never offer it.
+
+### Every invocation rewrites `proxy.yaml`
+
+Measured for `--version`, `config get`, `config show`, `status` and `license`: all of them write the file back and touch its mtime, **even when not a single byte changes**. `--version` is the striking one — it has no reason to open the config at all.
+
+The rewrite is itself surgical: comments are preserved, and a **missing key is restored with its default**, in the right place. An *invalid* value is left alone.
+
+Three consequences:
+
+- **A `gio::FileMonitor` on `proxy.yaml` will churn.** The GUI polls `status` every ~2 s, so the monitor would fire continuously, triggered by nothing but our own polling. It must compare content, not trust the event — see `architecture.md` §3.
+- The two "unavailable" states are not equivalent: a **missing** key heals itself the next time anything runs the CLI, while a **wrongly typed** one persists until someone edits the file.
+- `config_mutate::a_write_disturbs_exactly_one_line` assumes one changed line. Against a config that is *missing* a key, a write would change two — the target line and the restored one. It would fail loudly and legibly, which is the right outcome, but it is not a bug in the write path.
 
 ### Reading `config set`'s answer
 
@@ -151,7 +234,7 @@ Config has been updated           <- ...and it still says this
 
 **Always write lowercase `true`/`false`; read tolerantly.** A strict struct deserialise would fail the whole document on a single `enabled: 1`, taking every unrelated setting down with it — which is why [`config.rs`](../crates/adguard-core/src/config.rs) walks a generic value tree and coerces per key. One junk value then costs one row instead of the page.
 
-### `listen_address` needs authentication enabled *first*
+### `listen_address` needs authentication *fully configured* first
 
 `architecture.md` §5 requires forcing `listen_auth` on when the listen address leaves loopback. Measurement turns that from a fix-up into a **precondition**: with auth off, the command above prompts for a username, finds no TTY, and silently no-ops. Enabling `listen_auth.enabled` first makes the identical command succeed:
 
@@ -162,7 +245,28 @@ listen_address = 0.0.0.0
 Config has been updated                            <- and this time the file really changed
 ```
 
-The order is load-bearing. `config::listen_address_plan` returns the calls in it; reversed, the second silently does nothing while reporting success. Add `config set listen_address <non-loopback>` to the TTY-requiring list in [§7](#7-commands-that-need-a-tty).
+The order is load-bearing. `config::listen_address_plan` returns the calls in it; reversed, the second silently does nothing while reporting success.
+
+**Enabling authentication is necessary but not sufficient.** The prompt appears unless authentication is on *and* both credentials are non-empty:
+
+| `listen_auth.enabled` | `username` | `password` | `config set listen_address 0.0.0.0` |
+| --- | --- | --- | --- |
+| `false` | `admin` | `admin` | prompts → no-op |
+| `true` | `''` | `admin` | prompts → no-op |
+| `true` | `admin` | `''` | **prompts → no-op** |
+| `true` | `admin` | `admin` | succeeds |
+
+The third row is the trap, and it is why `listen_address_plan` returns a *plan* rather than a list of calls: on a machine with a blank password, "enable auth, then write the address" reports success twice and changes nothing. No ordering fixes it, and inventing a password on the user's behalf would be a security decision made behind their back — one they could never log in past. So the plan refuses, and names the credential that is missing.
+
+Naming it ourselves is necessary because **the CLI's own advice is wrong in that case**: it prompts for a *username* whichever credential is empty, and always suggests `config set listen_auth.username`. Following that would not fix an empty password.
+
+The emptiness test is literal, not a trim — a username of `' '` satisfies it and the write goes through. `Config::credential_set` mirrors that exactly, since its only job is to predict the CLI.
+
+**Retreating to loopback is always allowed.** Measured from every broken starting state — exposed with auth off, with an empty username, with an empty password — writing a loopback address succeeds and never prompts. The trigger is the **new** value, not the old one: already sitting on `0.0.0.0` with auth off, a move to `192.168.1.10` still prompts, while a move to `127.0.0.2` does not.
+
+That asymmetry is load-bearing for the UI. A user who is exposed with unusable credentials can always be brought back to safety, so the retreat must never be gated behind the checks that guard exposure.
+
+Add `config set listen_address <non-loopback>` to the TTY-requiring list in [§7](#7-commands-that-need-a-tty).
 
 ### Nothing enforces dependencies between settings
 
@@ -274,7 +378,13 @@ Opening read-only is also verified not to create `-wal`/`-shm` side-car files ne
 
 - **`configure`** — a wizard that writes the same keys we can set individually. The GUI reimplements it as a first-run assistant calling `config set`. Never invoke it.
 - **`activate`** — browser-based licence flow. Without a TTY it prints: *"No TTY for user input. Please visit <url> to log in, then run `activate` again."* The GUI should open that URL with `gtk::UriLauncher` and then poll `license` until status becomes `APP_ACTIVE`. `activate` is absent from `--help-all` but is a real command.
-- **`config set listen_address <non-loopback>`**, but only while `listen_auth.enabled` is `false` — it prompts for a username. This one is the nastiest of the three because it does not *look* interactive and it reports success anyway; see [§5](#listen_address-needs-authentication-enabled-first). Enable `listen_auth.enabled` first and it needs no TTY at all.
+- **`config set listen_address <non-loopback>`**, but only while `listen_auth` is not fully configured — it prompts for a username. This one is the nastiest of the three because it does not *look* interactive and it reports success anyway; see [§5](#listen_address-needs-authentication-fully-configured-first). Configure `listen_auth` completely and it needs no TTY at all.
+
+### The wrapper closes stdin, so "no TTY" is the only path
+
+Everything measured about that prompt was measured without a TTY, where the CLI gives up immediately and warns. But a child process inherits its parent's stdin, and **a GUI started from a terminal has a real one** — so the same call that no-ops in every test would sit there indefinitely waiting for a username to be typed into a terminal the user has stopped looking at, holding a worker thread and leaving the control that triggered it spinning.
+
+`Cli::run` therefore spawns with `Stdio::null()`. It makes the no-TTY behaviour deterministic however the app was launched, and nothing here has anything to say on stdin anyway. It is not a substitute for the precondition check — a silent no-op is still a silent no-op — but it removes the hang.
 
 ---
 
@@ -314,9 +424,13 @@ Caveats before building stats on this:
 Anything in the `adguard-cli` wrapper crate must:
 
 1. Strip ANSI from every captured stream.
-2. Treat exit 1 as *our* bug; detect user-facing failure by matching stdout text.
+2. Treat exit 1 as *our* bug — with the two exceptions in [§3](#exit-1-is-usually-our-bug-but-not-always) — and detect user-facing failure by matching stdout text.
 3. Verify state changes by re-reading state, not by trusting exit 0.
 4. Never write `proxy.yaml`, and never write the `.db` files.
 5. Never invoke `configure`, `activate` (bare), or any command expecting a TTY.
 6. Apply a timeout — network commands (`check-update`, `filters update`, `update`) can hang; a filter update failure was observed in the logs (`HttpClientNetworkError` reaching `filters.adtidy.org`).
 7. Run off the GTK main thread.
+8. Spawn with **stdin closed**, so a command that would prompt cannot hang ([§7](#the-wrapper-closes-stdin-so-no-tty-is-the-only-path)).
+9. Pass `--` before any user-supplied key or value ([§5](#the----guard-is-mandatory)).
+10. Range-check numbers itself — `config set` only type-checks ([§5](#config-set-type-checks-and-nothing-else)).
+11. Keep secrets out of error text. `config set` echoes the value it was given, and our own `BadInvocation` quotes the whole command line, so a refused password write would otherwise leak into any toast that shows it. `Cli::set_secret` scrubs every variant that carries our arguments.

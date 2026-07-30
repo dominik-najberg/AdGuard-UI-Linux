@@ -9,7 +9,7 @@
 //! suite still passes on a machine (or CI runner) without it.
 
 use adguard_core::config::key;
-use adguard_core::{Config, Toggle};
+use adguard_core::{Config, Kind, Toggle, ADVANCED};
 
 fn load() -> Option<Config> {
     let path = adguard_core::paths::config_file()?;
@@ -63,6 +63,66 @@ fn supporting_keys_resolve() {
         "{} did not resolve to a boolean",
         key::LISTEN_AUTH_ENABLED,
     );
+}
+
+/// Every Advanced setting must resolve in the real file **as the type its
+/// control needs**. A key that reads `None` renders as an insensitive
+/// "unavailable" row, which is honest but useless — and since the whole page is
+/// driven off this table, a single upstream rename would empty a group without
+/// anything else noticing.
+#[test]
+fn every_advanced_setting_resolves_with_the_right_type() {
+    let Some(config) = load() else { return };
+
+    for group in &ADVANCED {
+        for setting in group.settings {
+            let resolved = match setting.kind {
+                Kind::Switch => config.bool_at(setting.key).is_some(),
+                Kind::Number { .. } => config.int_at(setting.key).is_some(),
+                // A credential or a host legitimately holds the empty string;
+                // `str_at` still returns `Some` for it, which is the point.
+                Kind::Text { .. } => config.str_at(setting.key).is_some(),
+                Kind::Choice { options } => config.choice_at(setting.key, options).is_some(),
+            };
+            assert!(
+                resolved,
+                "{} ({}) did not resolve as {:?} in {}",
+                setting.title,
+                setting.key,
+                setting.kind,
+                config.path().display(),
+            );
+        }
+    }
+}
+
+/// The numbers in the real file should be ones the page can actually write.
+///
+/// Not a claim about our code so much as a check that the shipped defaults sit
+/// inside the ranges chosen for them — if they do not, a fresh install would
+/// open the Advanced page with read-only rows and no explanation beyond "edit
+/// the file yourself".
+#[test]
+fn the_shipped_numbers_are_inside_the_ranges_this_page_offers() {
+    let Some(config) = load() else { return };
+
+    for group in &ADVANCED {
+        for setting in group.settings {
+            if !matches!(setting.kind, Kind::Number { .. }) {
+                continue;
+            }
+            let Some(value) = config.int_at(setting.key) else {
+                continue; // covered by the test above
+            };
+            assert!(
+                setting.permits_number(value),
+                "{} is {value} in the real config, outside the range {:?} this page \
+                 will write — the row would open read-only",
+                setting.key,
+                setting.kind,
+            );
+        }
+    }
 }
 
 /// The list-valued keys `config get` refuses ("This field is not a separate

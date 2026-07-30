@@ -63,6 +63,9 @@ pub struct Output {
 #[derive(Debug, Clone)]
 pub struct Cli {
     binary: PathBuf,
+    /// `$XDG_DATA_HOME` to run the CLI with, when it should not be the
+    /// inherited one. See [`Self::with_xdg_data_home`].
+    xdg_data_home: Option<PathBuf>,
 }
 
 impl Cli {
@@ -70,7 +73,10 @@ impl Cli {
     /// not installed, so the UI can say so plainly instead of crashing.
     pub fn discover() -> Result<Self, Error> {
         paths::cli_binary()
-            .map(|binary| Self { binary })
+            .map(|binary| Self {
+                binary,
+                xdg_data_home: None,
+            })
             .ok_or(Error::BinaryNotFound)
     }
 
@@ -78,19 +84,62 @@ impl Cli {
         &self.binary
     }
 
+    /// Run every invocation against a different `$XDG_DATA_HOME`.
+    ///
+    /// Measured: the CLI resolves its data directory as
+    /// `$XDG_DATA_HOME/adguard-cli`, so pointing this at a scratch directory
+    /// holding a copy of `proxy.yaml` gives a complete, throwaway AdGuard
+    /// configuration to write to.
+    ///
+    /// That exists for the tests. The write path is the riskiest code in this
+    /// crate and the only way to cover it honestly is to run the real binary,
+    /// but doing that against the machine's own config means a test suite that
+    /// edits the user's security settings — and leaves them edited if it
+    /// panics. With this, `tests/config_sandbox.rs` exercises the same
+    /// `config_set` used in anger, including the cases that would expose the
+    /// proxy to the network, against a file nothing is listening on.
+    ///
+    /// The GUI never calls it: the application must act on the real config.
+    pub fn with_xdg_data_home(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.xdg_data_home = Some(dir.into());
+        self
+    }
+
     /// Run a subcommand and return its stripped output.
+    ///
+    /// # `stdin` is closed deliberately
+    ///
+    /// Several commands ask for input when they can get it, and one of them is
+    /// reachable from the Advanced page: `config set listen_address
+    /// <non-loopback>` prompts *"Enter username for accessing proxy server:"*
+    /// unless `listen_auth` is fully configured (contract §5).
+    ///
+    /// Everything measured about that prompt was measured with no TTY, where it
+    /// gives up immediately and warns. But a child process inherits its
+    /// parent's stdin, and a GUI started from a terminal has a real one — so
+    /// the same call that no-ops in every test would sit there **forever**
+    /// waiting for a username to be typed into a terminal the user has probably
+    /// stopped looking at, holding a worker thread and leaving the switch that
+    /// triggered it spinning.
+    ///
+    /// `Stdio::null()` makes the no-TTY path the only path, so the CLI behaves
+    /// the way the contract doc records however the app was launched. Nothing
+    /// here ever has anything to say on stdin.
     ///
     /// TODO(v1): apply a timeout. Not needed for the fast local commands used
     /// here (~10-30 ms each), but mandatory before wiring up the network ones
     /// (`check-update`, `filters update`, `update`), which can hang.
     pub fn run(&self, args: &[&str]) -> Result<Output, Error> {
-        let raw = Command::new(&self.binary)
-            .args(args)
-            .output()
-            .map_err(|source| Error::Spawn {
-                binary: self.binary.display().to_string(),
-                source,
-            })?;
+        let mut command = Command::new(&self.binary);
+        command.args(args).stdin(std::process::Stdio::null());
+        if let Some(home) = &self.xdg_data_home {
+            command.env("XDG_DATA_HOME", home);
+        }
+
+        let raw = command.output().map_err(|source| Error::Spawn {
+            binary: self.binary.display().to_string(),
+            source,
+        })?;
 
         let stdout = strip_ansi(&raw.stdout);
         let stderr = strip_ansi(&raw.stderr);
@@ -218,8 +267,32 @@ impl Cli {
     ///
     /// So `Ok` means only *"the CLI accepted the command"*. The caller must
     /// still re-read `proxy.yaml` and render from that.
+    /// # The `--` guard is not optional
+    ///
+    /// Both arguments are positionals, and CLI11 will still try to read a
+    /// leading `-` as an option. Measured:
+    ///
+    /// ```text
+    /// $ adguard-cli config set listen_auth.password --flag-shaped
+    /// <value> is required                       # exit 1, nothing written
+    /// $ adguard-cli config set listen_auth.password -abc
+    /// <value> is required                       # exit 1, nothing written
+    /// $ adguard-cli config set -- listen_auth.password --flag-shaped
+    /// listen_auth.password = --flag-shaped      # exit 0, written
+    /// ```
+    ///
+    /// `-1` happens to survive without the guard, because a negative number
+    /// parses as a positional — which is what made the manual proxy ports look
+    /// safe. A password or hostname beginning with `-` does not. Since the
+    /// guard changes nothing for ordinary values (verified for `-1`, plain
+    /// strings and every enum), it goes on unconditionally rather than being
+    /// applied by a rule someone has to remember.
+    ///
+    /// It also improves the failure mode for a bad *key*: `'--bogus' not found`
+    /// at exit 0, the ordinary semantic refusal, instead of a parse error our
+    /// own error type describes as a bug in this crate.
     pub fn config_set(&self, key: &str, value: &str) -> Result<Applied, Error> {
-        let out = self.run(&["config", "set", key, value])?;
+        let out = self.run(&["config", "set", "--", key, value])?;
 
         if out.stdout.lines().map(str::trim).any(|line| line == CONFIG_UPDATED) {
             Ok(Applied {
@@ -241,6 +314,81 @@ impl Cli {
     /// `yes` and `on` are all rejected outright.
     pub fn set_bool(&self, key: &str, value: bool) -> Result<Applied, Error> {
         self.config_set(key, if value { "true" } else { "false" })
+    }
+
+    /// Set an integer setting.
+    ///
+    /// Negative values need no `--` guard: measured, `config set
+    /// listen_ports.http_proxy -1` parses `-1` as a positional argument, not as
+    /// a flag, and `--` is accepted but changes nothing. That matters because
+    /// `-1` is how both manual proxy ports are switched off.
+    ///
+    /// The CLI checks only that the value *is* an integer. It will accept `0`,
+    /// `65536`, `99999` and `-2` for a port, and `3.5` — which lands in the YAML
+    /// as a float. Range-checking belongs to the caller; see
+    /// [`crate::model::Setting::permits_number`].
+    pub fn set_int(&self, key: &str, value: i64) -> Result<Applied, Error> {
+        self.config_set(key, &value.to_string())
+    }
+
+    /// Set a string setting, keeping the value out of any error we return.
+    ///
+    /// `config set` echoes what it was given — `listen_auth.password = hunter2`
+    /// — and [`Self::config_set`] quotes the CLI's first output line in
+    /// [`Error::Refused`], which the UI shows verbatim. For a credential that
+    /// would put the secret in a toast, so the value is scrubbed from the
+    /// message on the way out.
+    ///
+    /// # The value is visible in `argv`
+    ///
+    /// `config set` takes the value as a command-line argument, so for the
+    /// ~20 ms the process lives it is readable in `/proc/<pid>/cmdline` by
+    /// anything running as this user. There is no way around it: the CLI's only
+    /// other route for a credential is the interactive prompt, which needs a
+    /// TTY (contract §7). Worth knowing; not worth refusing over on a
+    /// single-user desktop, where anything able to read that could read
+    /// `proxy.yaml` itself.
+    pub fn set_secret(&self, key: &str, value: &str) -> Result<Applied, Error> {
+        self.config_set(key, value)
+            .map_err(|err| redact_error(err, value))
+    }
+}
+
+/// Replace a secret with a placeholder wherever it appears.
+///
+/// An empty secret is left alone — every string contains it, and there is
+/// nothing to hide.
+fn redact(message: &str, secret: &str) -> String {
+    if secret.is_empty() {
+        return message.to_owned();
+    }
+    message.replace(secret, "<hidden>")
+}
+
+/// Scrub a secret out of every error field that could be carrying it.
+///
+/// Matched per variant rather than over `to_string()`, so the error keeps its
+/// type. Two of these three variants quote the command line we built, which is
+/// where a credential would appear: `BadInvocation` should now be unreachable
+/// for a user-supplied value — that is what the `--` guard in
+/// [`Cli::config_set`] is for — but a leak that depends on another function
+/// staying correct is not one worth leaving in place.
+fn redact_error(err: Error, secret: &str) -> Error {
+    match err {
+        Error::Refused { message } => Error::Refused {
+            message: redact(&message, secret),
+        },
+        Error::BadInvocation { args, code, stderr } => Error::BadInvocation {
+            args: redact(&args, secret),
+            code,
+            stderr: redact(&stderr, secret),
+        },
+        Error::Unparseable { args, output } => Error::Unparseable {
+            args: redact(&args, secret),
+            output: redact(&output, secret),
+        },
+        // Carry no echo of the value.
+        other @ (Error::BinaryNotFound | Error::Spawn { .. }) => other,
     }
 }
 
@@ -541,5 +689,64 @@ mod tests {
         for output in [SET_OK, SET_OK_WITH_HINT, SET_OK_MULTILINE] {
             assert!(!mentions_restart(output), "{output:?} should need no restart");
         }
+    }
+
+    /// The CLI echoes the value it was given, so a refusal carrying its first
+    /// line can carry a password into a toast. Measured shape:
+    /// `listen_auth.password = hunter2`.
+    #[test]
+    fn a_secret_is_scrubbed_from_a_refusal() {
+        let message = redact("listen_auth.password = hunter2", "hunter2");
+        assert_eq!(message, "listen_auth.password = <hidden>");
+        assert!(!message.contains("hunter2"));
+    }
+
+    /// Redacting the empty string would replace nothing and match everywhere.
+    #[test]
+    fn redacting_an_empty_secret_is_a_no_op() {
+        assert_eq!(redact("listen_auth.password = ", ""), "listen_auth.password = ");
+    }
+
+    /// A password may occur more than once, and may be a substring of the key
+    /// or of surrounding words — every occurrence has to go.
+    #[test]
+    fn redaction_covers_every_occurrence() {
+        let message = redact("password rejected: password", "password");
+        assert!(!message.contains("password"), "{message:?}");
+    }
+
+    /// `BadInvocation` quotes the command line, which is where a credential
+    /// would show up if the `--` guard ever stopped working. Every variant that
+    /// echoes our arguments has to be scrubbed, not just the refusal.
+    #[test]
+    fn every_error_variant_that_quotes_arguments_is_scrubbed() {
+        let leaked = |err: &Error| err.to_string().contains("hunter2");
+
+        let bad = redact_error(
+            Error::BadInvocation {
+                args: "config set listen_auth.password hunter2".to_owned(),
+                code: 1,
+                stderr: "<value> is required".to_owned(),
+            },
+            "hunter2",
+        );
+        assert!(!leaked(&bad), "{bad}");
+
+        let unparseable = redact_error(
+            Error::Unparseable {
+                args: "config set listen_auth.password hunter2".to_owned(),
+                output: "hunter2".to_owned(),
+            },
+            "hunter2",
+        );
+        assert!(!leaked(&unparseable), "{unparseable}");
+
+        let refused = redact_error(
+            Error::Refused {
+                message: "listen_auth.password = hunter2".to_owned(),
+            },
+            "hunter2",
+        );
+        assert!(!leaked(&refused), "{refused}");
     }
 }

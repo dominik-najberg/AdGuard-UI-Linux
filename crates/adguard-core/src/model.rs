@@ -84,6 +84,260 @@ impl Toggle {
     }
 }
 
+/// What kind of control one Advanced setting needs, and the bounds the CLI
+/// will not enforce for us.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    Switch,
+
+    /// An integer setting.
+    ///
+    /// `min`/`max` are **ours**, not the CLI's. Measured on v1.4.13,
+    /// `config set` validates the *type* of an integer setting and nothing
+    /// else: `listen_ports.http_proxy` accepts `0`, `65536`, `99999` and `-2`,
+    /// and `worker_threads` accepts `0` and `-1`. `3.5` is accepted too and
+    /// lands in the YAML as a **float**, where every subsequent integer read
+    /// sees a value it cannot use. Only `abc` and the empty string are refused,
+    /// with *"The value of the setting must be an integer"*.
+    ///
+    /// So range-checking is the GUI's job, exactly like the cross-setting
+    /// dependencies in `docs/architecture.md` §5.
+    Number {
+        min: i64,
+        max: i64,
+        /// The value that means "switched off", if this setting has one —
+        /// `-1` for both manual proxy ports, per the file's own comment
+        /// (*"Use -1 to disable SOCKS5 manual proxy"*).
+        disabled_value: Option<i64>,
+    },
+
+    Text {
+        /// Render with a password entry and never echo the value — not in a
+        /// toast, not in an error message.
+        secret: bool,
+    },
+
+    /// One of a fixed set of strings.
+    ///
+    /// The CLI names the valid values in its refusal (*"Valid values are: info,
+    /// debug, trace"*) and writes whatever spelling it was given straight into
+    /// the file, so reads must be case-insensitive; see
+    /// [`crate::config::Config::choice_at`].
+    Choice { options: &'static [&'static str] },
+}
+
+/// One row of the Advanced page.
+///
+/// As with [`Toggle`], `key` is both the dotted path read from `proxy.yaml` and
+/// the argument handed to `adguard-cli config set`, so the read and the write
+/// cannot drift apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Setting {
+    pub key: &'static str,
+    pub title: &'static str,
+    /// Wording follows the explanatory comment in `proxy.yaml` where there is
+    /// one, so the GUI and a user reading the file are told the same thing.
+    pub description: &'static str,
+    pub kind: Kind,
+}
+
+impl Setting {
+    pub fn is_secret(self) -> bool {
+        matches!(self.kind, Kind::Text { secret: true })
+    }
+
+    /// Is `value` inside the range this page is willing to write?
+    ///
+    /// A file value outside it is shown read-only, with the real number named,
+    /// rather than clamped into range: clamping the *display* would misreport
+    /// the file and invite the user to write the clamped value back by
+    /// accident. Non-`Number` settings permit nothing.
+    pub fn permits_number(self, value: i64) -> bool {
+        match self.kind {
+            Kind::Number { min, max, .. } => (min..=max).contains(&value),
+            _ => false,
+        }
+    }
+
+    /// The options of a [`Kind::Choice`], or `&[]`.
+    pub fn options(self) -> &'static [&'static str] {
+        match self.kind {
+            Kind::Choice { options } => options,
+            _ => &[],
+        }
+    }
+}
+
+/// A titled block of Advanced settings.
+pub struct SettingGroup {
+    pub title: &'static str,
+    pub description: &'static str,
+    pub settings: &'static [Setting],
+}
+
+/// Valid `log_level` values, from the file's comment and the CLI's own refusal
+/// message (which lists them lowercase).
+pub const LOG_LEVELS: &[&str] = &["info", "debug", "trace"];
+
+/// Valid `outbound_proxy.mode` values. Spelled as the file's comment and its
+/// default (`'HTTP'`) do; the CLI accepts either case and preserves what it is
+/// given, so reads are case-insensitive.
+pub const OUTBOUND_MODES: &[&str] = &["HTTP", "HTTPS", "SOCKS4", "SOCKS5"];
+
+/// The Advanced page, in render order — `architecture.md` §5: ports, listen
+/// address, auth, outbound proxy, worker threads, log level.
+///
+/// `listen_address` and `listen_auth.enabled` appear here for their wording and
+/// their control type, but the page does **not** write them through the generic
+/// path: both are gated by [`crate::config::listen_address_plan`], because
+/// exposing the proxy beyond loopback has a precondition the CLI enforces by
+/// silently doing nothing.
+pub const ADVANCED: [SettingGroup; 4] = [
+    SettingGroup {
+        title: "Manual proxy ports",
+        description: "Ports AdGuard listens on in manual proxy mode. \
+                      Set a port to -1 to switch that protocol off.",
+        settings: &[
+            Setting {
+                key: crate::config::key::LISTEN_PORT_HTTP,
+                title: "HTTP proxy port",
+                description: "Use -1 to disable HTTP manual proxy",
+                kind: Kind::Number {
+                    min: -1,
+                    max: 65535,
+                    disabled_value: Some(-1),
+                },
+            },
+            Setting {
+                key: crate::config::key::LISTEN_PORT_SOCKS5,
+                title: "SOCKS5 proxy port",
+                description: "Use -1 to disable SOCKS5 manual proxy",
+                kind: Kind::Number {
+                    min: -1,
+                    max: 65535,
+                    disabled_value: Some(-1),
+                },
+            },
+        ],
+    },
+    SettingGroup {
+        title: "Listen address",
+        description: "Which addresses the proxy accepts connections on. \
+                      Anything other than a loopback address exposes it to \
+                      your network, which requires a username and password.",
+        settings: &[
+            Setting {
+                key: crate::config::key::LISTEN_ADDRESS,
+                title: "Listen address",
+                description: "An IP address without a port. 127.0.0.1 keeps \
+                              the proxy on this machine only",
+                kind: Kind::Text { secret: false },
+            },
+            Setting {
+                key: crate::config::key::LISTEN_AUTH_ENABLED,
+                title: "Require authentication",
+                description: "Ask connecting clients for the username and password below",
+                kind: Kind::Switch,
+            },
+            Setting {
+                key: crate::config::key::LISTEN_AUTH_USERNAME,
+                title: "Username",
+                description: "Username connecting clients must present",
+                kind: Kind::Text { secret: false },
+            },
+            Setting {
+                key: crate::config::key::LISTEN_AUTH_PASSWORD,
+                title: "Password",
+                description: "Password connecting clients must present",
+                kind: Kind::Text { secret: true },
+            },
+        ],
+    },
+    SettingGroup {
+        title: "Outbound proxy",
+        description: "Send AdGuard's own outgoing connections through another proxy.",
+        settings: &[
+            Setting {
+                key: crate::config::key::OUTBOUND_ENABLED,
+                title: "Use an outbound proxy",
+                description: "Route filtered traffic onwards through the proxy below",
+                kind: Kind::Switch,
+            },
+            Setting {
+                key: crate::config::key::OUTBOUND_MODE,
+                title: "Protocol",
+                description: "Supported modes are HTTP, HTTPS, SOCKS4, SOCKS5",
+                kind: Kind::Choice {
+                    options: OUTBOUND_MODES,
+                },
+            },
+            Setting {
+                key: crate::config::key::OUTBOUND_HOST,
+                title: "Host",
+                description: "Hostname or IP address of the outbound proxy",
+                kind: Kind::Text { secret: false },
+            },
+            Setting {
+                key: crate::config::key::OUTBOUND_PORT,
+                title: "Port",
+                description: "Port of the outbound proxy",
+                kind: Kind::Number {
+                    min: 1,
+                    max: 65535,
+                    disabled_value: None,
+                },
+            },
+            Setting {
+                key: crate::config::key::OUTBOUND_USERNAME,
+                title: "Username",
+                description: "Leave empty if the outbound proxy needs no credentials",
+                kind: Kind::Text { secret: false },
+            },
+            Setting {
+                key: crate::config::key::OUTBOUND_PASSWORD,
+                title: "Password",
+                description: "Password for the outbound proxy",
+                kind: Kind::Text { secret: true },
+            },
+            Setting {
+                key: crate::config::key::OUTBOUND_TRUST_ANY_CERT,
+                title: "Trust any certificate",
+                description: "Do not check certificate of HTTPS proxy",
+                kind: Kind::Switch,
+            },
+            Setting {
+                key: crate::config::key::OUTBOUND_UDP_VIA_SOCKS5,
+                title: "UDP through SOCKS5",
+                description: "Use SOCKS5 proxy for UDP. If your SOCKS5 proxy does \
+                              not support UDP, connection may break",
+                kind: Kind::Switch,
+            },
+        ],
+    },
+    SettingGroup {
+        title: "Diagnostics",
+        description: "",
+        settings: &[
+            Setting {
+                key: crate::config::key::WORKER_THREADS,
+                title: "Worker threads",
+                description: "Number of worker threads",
+                kind: Kind::Number {
+                    min: 1,
+                    max: 64,
+                    disabled_value: None,
+                },
+            },
+            Setting {
+                key: crate::config::key::LOG_LEVEL,
+                title: "Log level",
+                description: "Allowed log levels are: info, debug, trace",
+                kind: Kind::Choice { options: LOG_LEVELS },
+            },
+        ],
+    },
+];
+
 /// Which of the two filter catalogues an operation targets.
 ///
 /// They are genuinely separate: different databases, and a `dns` prefix on
@@ -333,6 +587,123 @@ mod tests {
     fn dns_commands_carry_the_dns_prefix() {
         assert_eq!(FilterSet::Http.cli_prefix(), &["filters"]);
         assert_eq!(FilterSet::Dns.cli_prefix(), &["dns", "filters"]);
+    }
+
+    fn advanced_settings() -> Vec<Setting> {
+        ADVANCED
+            .iter()
+            .flat_map(|group| group.settings.iter().copied())
+            .collect()
+    }
+
+    /// One row per key. A duplicate would give the page two controls writing
+    /// the same setting, each reconciling over the other.
+    #[test]
+    fn advanced_keys_are_unique() {
+        let mut keys: Vec<&str> = advanced_settings().iter().map(|s| s.key).collect();
+        let count = keys.len();
+        keys.sort_unstable();
+        keys.dedup();
+        assert_eq!(keys.len(), count, "duplicate key in ADVANCED");
+    }
+
+    /// The page's scope, from `architecture.md` §5.
+    #[test]
+    fn advanced_covers_the_documented_scope() {
+        use crate::config::key;
+        let keys: Vec<&str> = advanced_settings().iter().map(|s| s.key).collect();
+        for expected in [
+            key::LISTEN_PORT_HTTP,
+            key::LISTEN_PORT_SOCKS5,
+            key::LISTEN_ADDRESS,
+            key::LISTEN_AUTH_ENABLED,
+            key::LISTEN_AUTH_USERNAME,
+            key::LISTEN_AUTH_PASSWORD,
+            key::OUTBOUND_ENABLED,
+            key::OUTBOUND_MODE,
+            key::OUTBOUND_HOST,
+            key::OUTBOUND_PORT,
+            key::WORKER_THREADS,
+            key::LOG_LEVEL,
+        ] {
+            assert!(keys.contains(&expected), "{expected} is missing from ADVANCED");
+        }
+    }
+
+    /// Both passwords must be marked secret, and nothing else should be. The
+    /// flag is what keeps the value out of entry rendering and error messages.
+    #[test]
+    fn exactly_the_passwords_are_secret() {
+        use crate::config::key;
+        let secret: Vec<&str> = advanced_settings()
+            .iter()
+            .filter(|s| s.is_secret())
+            .map(|s| s.key)
+            .collect();
+        assert_eq!(
+            secret,
+            vec![key::LISTEN_AUTH_PASSWORD, key::OUTBOUND_PASSWORD]
+        );
+    }
+
+    /// The CLI range-checks nothing, so these bounds are the only thing between
+    /// a spin row and `http_proxy: 99999`.
+    #[test]
+    fn number_ranges_are_inclusive_and_reject_the_cli_accepted_junk() {
+        use crate::config::key;
+        let find = |key: &str| {
+            advanced_settings()
+                .into_iter()
+                .find(|s| s.key == key)
+                .expect("setting should exist")
+        };
+
+        let http = find(key::LISTEN_PORT_HTTP);
+        assert!(http.permits_number(-1), "-1 disables the port");
+        assert!(http.permits_number(3129));
+        assert!(http.permits_number(65535));
+        // All four of these are accepted by `config set`.
+        assert!(!http.permits_number(65536));
+        assert!(!http.permits_number(99999));
+        assert!(!http.permits_number(-2));
+
+        let threads = find(key::WORKER_THREADS);
+        assert!(threads.permits_number(1));
+        assert!(threads.permits_number(4));
+        assert!(!threads.permits_number(0), "a proxy with no workers is not a setting we offer");
+        assert!(!threads.permits_number(-1));
+
+        // An outbound port has no "off" value — the switch does that.
+        let outbound = find(key::OUTBOUND_PORT);
+        assert!(!outbound.permits_number(-1));
+        assert!(!outbound.permits_number(0));
+        assert!(outbound.permits_number(1));
+    }
+
+    /// A `Switch` or `Text` setting has no numeric range, so it must not
+    /// accidentally report one.
+    #[test]
+    fn non_numeric_settings_permit_no_numbers() {
+        use crate::config::key;
+        let listen = advanced_settings()
+            .into_iter()
+            .find(|s| s.key == key::LISTEN_ADDRESS)
+            .unwrap();
+        assert!(!listen.permits_number(0));
+        assert!(listen.options().is_empty());
+    }
+
+    /// The values the file actually ships with have to be in the option lists,
+    /// or the combo row would open on nothing and the row read as unavailable.
+    #[test]
+    fn shipped_defaults_are_among_the_options() {
+        assert!(LOG_LEVELS.contains(&"info"));
+        assert!(OUTBOUND_MODES.contains(&"HTTP"));
+        for setting in advanced_settings() {
+            if let Kind::Choice { options } = setting.kind {
+                assert!(!options.is_empty(), "{} has no options", setting.key);
+            }
+        }
     }
 
     #[test]

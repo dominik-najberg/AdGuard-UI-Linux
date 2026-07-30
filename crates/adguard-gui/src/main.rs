@@ -5,6 +5,7 @@
 //! `docs/architecture.md` for the split and `docs/cli-contract.md` for the
 //! measured CLI behaviour the wrapper encodes.
 
+mod advanced;
 mod filters;
 mod protection;
 mod status;
@@ -58,7 +59,7 @@ fn missing_cli_view(message: &str) -> adw::ToolbarView {
 }
 
 /// Sidebar entries, in order. The id doubles as the stack child name.
-const PAGES: [Page; 3] = [
+const PAGES: [Page; 4] = [
     Page {
         id: "status",
         title: "Status",
@@ -73,6 +74,11 @@ const PAGES: [Page; 3] = [
         id: "filters",
         title: "Filters",
         icon: "view-list-symbolic",
+    },
+    Page {
+        id: "advanced",
+        title: "Advanced",
+        icon: "emblem-system-symbolic",
     },
 ];
 
@@ -90,11 +96,13 @@ fn main_view(cli: &Cli) -> adw::NavigationSplitView {
     // The DNS catalogue gets its own page later: its user-rules row cannot be
     // enabled through `dns filters enable` (see docs/cli-contract.md §6).
     let filters = filters::FiltersPage::new(cli.clone(), toasts.clone(), FilterSet::Http);
+    let advanced = advanced::AdvancedPage::new(cli.clone(), toasts.clone());
 
     let stack = gtk::Stack::new();
     stack.add_named(status.widget(), Some(PAGES[0].id));
     stack.add_named(protection.widget(), Some(PAGES[1].id));
     stack.add_named(filters.widget(), Some(PAGES[2].id));
+    stack.add_named(advanced.widget(), Some(PAGES[3].id));
     toasts.set_child(Some(&stack));
 
     let content_header = adw::HeaderBar::new();
@@ -111,9 +119,11 @@ fn main_view(cli: &Cli) -> adw::NavigationSplitView {
         let status = status.clone();
         let protection = protection.clone();
         let filters = filters.clone();
+        let advanced = advanced.clone();
         move |_| match stack.visible_child_name().as_deref() {
             Some("protection") => protection.reload(),
             Some("filters") => filters.reload(),
+            Some("advanced") => advanced.reload(),
             _ => status.refresh(),
         }
     });
