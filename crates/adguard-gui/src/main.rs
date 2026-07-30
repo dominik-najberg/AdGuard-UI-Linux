@@ -11,7 +11,10 @@ mod protection;
 mod status;
 mod worker;
 
-use adguard_core::{Cli, FilterSet};
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use adguard_core::{Cli, FilterSet, Toggle};
 use adw::prelude::*;
 use gtk::glib;
 use gtk4 as gtk;
@@ -19,6 +22,10 @@ use libadwaita as adw;
 
 /// Must match the `.desktop` filename and its `StartupWMClass`, or GNOME
 /// shows a second unbranded icon instead of grouping with the launcher.
+///
+/// It is also the tray's `id`, and it is what gives the process its
+/// single-instance behaviour: launching `adguard-ui` a second time activates
+/// this one instead of starting a rival that would write the same config.
 const APP_ID: &str = "io.github.dominik-najberg.AdGuardUI";
 
 fn main() -> glib::ExitCode {
@@ -35,12 +42,127 @@ fn build_ui(app: &adw::Application) {
         .default_height(680)
         .build();
 
-    match Cli::discover() {
-        Ok(cli) => window.set_content(Some(&main_view(&cli))),
-        Err(err) => window.set_content(Some(&missing_cli_view(&err.to_string()))),
-    }
+    let view = match Cli::discover() {
+        Ok(cli) => {
+            let view = main_view(&cli);
+            window.set_content(Some(&view.root));
+            Some(view)
+        }
+        Err(err) => {
+            window.set_content(Some(&missing_cli_view(&err.to_string())));
+            None
+        }
+    };
 
+    // Before the tray, so a slow or absent StatusNotifierItem host cannot delay
+    // the window appearing.
     window.present();
+
+    // No tray without a working CLI: every menu item would be inert, and the
+    // window is already explaining why.
+    if let Some(view) = view {
+        connect_tray(app, &window, &view);
+    }
+}
+
+/// Register the tray icon and connect it to the pages.
+///
+/// The tray is a view onto this process rather than a process of its own; see
+/// `adguard_tray` for why. Three things are wired here:
+///
+/// - **state out** — the Status page's existing 2 s `status` poll and the
+///   Protection page's config reads are forwarded to the tray, so it adds no
+///   polling of its own.
+/// - **commands in** — menu activations arrive on a channel and are dispatched
+///   to the same page methods a click uses, so a tray toggle and the switch on
+///   the page cannot disagree.
+/// - **lifetime** — with a tray, closing the window hides it and the app keeps
+///   running; without one, closing quits as usual.
+fn connect_tray(app: &adw::Application, window: &adw::ApplicationWindow, view: &MainView) {
+    let tray = match adguard_tray::spawn(adguard_tray::State::default()) {
+        Ok(tray) => tray,
+        Err(err) => {
+            // A normal outcome, not a failure: GNOME has no native tray, so
+            // this is what a missing or disabled AppIndicator extension looks
+            // like. Carry on windowed — quitting because an icon could not be
+            // drawn would be far worse than going without it.
+            eprintln!("adguard-ui: continuing without a tray icon ({err})");
+            return;
+        }
+    };
+    let tray = Rc::new(tray);
+
+    // The two halves of the tray's state arrive from different pages, so they
+    // are accumulated here and pushed as a whole. `set_state` drops an
+    // unchanged state, which matters because the status poll delivers an
+    // identical one every 2 s.
+    let state = Rc::new(RefCell::new(adguard_tray::State::default()));
+
+    view.status.connect_status({
+        let tray = tray.clone();
+        let state = state.clone();
+        move |status| {
+            state.borrow_mut().running = status.running;
+            let snapshot = state.borrow().clone();
+            tray.set_state(snapshot);
+        }
+    });
+
+    view.protection.connect_config({
+        let tray = tray.clone();
+        let state = state.clone();
+        move |config| {
+            // Positional against `Toggle::ALL`, and `None` for a key that could
+            // not be read — the tray shows those items insensitive rather than
+            // unchecked, as the page shows them "unavailable".
+            state.borrow_mut().toggles = Toggle::ALL.iter().map(|t| config.toggle(*t)).collect();
+            let snapshot = state.borrow().clone();
+            tray.set_state(snapshot);
+        }
+    });
+
+    // Keep the application alive with no window on screen. Held only when a
+    // tray exists; otherwise there would be no way left to reach or quit it.
+    let hold = app.hold();
+
+    window.connect_close_request({
+        let status = view.status.clone();
+        move |window| {
+            window.set_visible(false);
+            status.set_window_visible(false);
+            glib::Propagation::Stop
+        }
+    });
+
+    glib::spawn_future_local({
+        let commands = tray.commands().clone();
+        let app = app.clone();
+        let window = window.clone();
+        let status = view.status.clone();
+        let protection = view.protection.clone();
+        async move {
+            // Owned by this future, so the hold lasts exactly as long as the
+            // tray is being served.
+            let _hold = hold;
+
+            while let Ok(command) = commands.recv().await {
+                use adguard_tray::Command;
+                match command {
+                    Command::ShowWindow => {
+                        window.present();
+                        status.set_window_visible(true);
+                    }
+                    Command::StartProxy => status.start_proxy(),
+                    Command::StopProxy => status.stop_proxy(),
+                    Command::SetToggle { toggle, on } => protection.request(toggle, on),
+                    Command::Quit => {
+                        app.quit();
+                        return;
+                    }
+                }
+            }
+        }
+    });
 }
 
 /// Shown when `adguard-cli` is not installed. Failing with an explanation
@@ -88,7 +210,18 @@ struct Page {
     icon: &'static str,
 }
 
-fn main_view(cli: &Cli) -> adw::NavigationSplitView {
+/// The window's content, plus the pages the tray needs to reach.
+///
+/// The pages were local to `main_view` while the only thing that drove them was
+/// a click inside the window. The tray dispatches to the same methods, so they
+/// have to be reachable from where it is wired up.
+struct MainView {
+    root: adw::NavigationSplitView,
+    status: Rc<status::StatusPage>,
+    protection: Rc<protection::ProtectionPage>,
+}
+
+fn main_view(cli: &Cli) -> MainView {
     let toasts = adw::ToastOverlay::new();
 
     let status = status::StatusPage::new(cli.clone(), toasts.clone());
@@ -166,7 +299,11 @@ fn main_view(cli: &Cli) -> adw::NavigationSplitView {
     sidebar_view.set_content(Some(&sidebar));
     split.set_sidebar(Some(&adw::NavigationPage::new(&sidebar_view, "AdGuard UI")));
 
-    split
+    MainView {
+        root: split,
+        status,
+        protection,
+    }
 }
 
 fn sidebar_row(page: &Page) -> gtk::ListBoxRow {

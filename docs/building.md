@@ -56,6 +56,36 @@ cargo build --workspace
 cargo run -p adguard-gui
 ```
 
+That is the whole application: `adguard-ui` is the only binary, and it serves the tray icon too. `adguard-tray` is a library (see `architecture.md` §4), so there is nothing separate to start.
+
+### Seeing the tray icon
+
+The icon appears in the top bar next to the other indicators. It needs two things:
+
+- **A real desktop session.** Under `Xvfb` the window renders but the icon has nowhere to appear — though it does still register on the session bus, which is how it can be tested headlessly (below).
+- **An AppIndicator extension**, because GNOME has no native tray. `ubuntu-appindicators@ubuntu.com` ships enabled on Ubuntu. Without it the app prints one line to stderr and runs windowed; it does not fail.
+
+Left-click the icon for the menu: start/stop the proxy, and the six Protection toggles as checkmarks. A toggle there and the switch on the Protection page are the same write, so they cannot disagree.
+
+Two behaviours worth knowing:
+
+- **While the tray is present, closing the window only hides it** and the app keeps running — "Quit" in the tray menu is how you exit. If the tray could not register, closing quits as usual, so you can never end up with a hidden app you cannot reach.
+- Launching `adguard-ui` again does not start a second copy; it activates the running one. That matters because two copies would be two writers to `proxy.yaml`.
+
+Confirm the icon registered without needing to look at the screen:
+
+```bash
+gdbus call --session --dest org.kde.StatusNotifierWatcher --object-path /StatusNotifierWatcher --method org.freedesktop.DBus.Properties.Get org.kde.StatusNotifierWatcher RegisteredStatusNotifierItems
+```
+
+Our entry is `org.kde.StatusNotifierItem-<pid>-1`. The menu itself can be read, and even driven, over D-Bus — useful for testing it without a session:
+
+```bash
+gdbus call --session --dest org.kde.StatusNotifierItem-<pid>-1 --object-path /MenuBar --method com.canonical.dbusmenu.GetLayout 0 3 '[]'
+```
+
+Note `GetLayout`'s recursion depth is given as `3` rather than `-1`: `gdbus` reads a leading `-` as one of its own options, the same trap the `--` guard exists for in `cli-contract.md` §5.
+
 Release build:
 
 ```bash

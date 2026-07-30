@@ -14,6 +14,7 @@ rust-version = "1.85"
 
 [workspace.dependencies]
 adguard-core = { path = "crates/adguard-core" }
+adguard-tray = { path = "crates/adguard-tray" }
 
 # GUI
 gtk4 = { version = "0.11", features = ["v4_10"] }

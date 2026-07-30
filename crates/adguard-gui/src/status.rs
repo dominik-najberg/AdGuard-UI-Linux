@@ -1,6 +1,6 @@
 //! The Status page: runtime state and lifecycle control.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -15,6 +15,16 @@ use crate::{toast, worker};
 /// `status` costs ~10 ms and there is no event mechanism to subscribe to, so
 /// polling is the only way to notice the proxy going down underneath us.
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
+
+/// With the window hidden and only the tray showing, poll one tick in five —
+/// `architecture.md` §3's "~10 s when only the tray is visible".
+///
+/// That policy is only expressible now that the tray lives in this process: a
+/// separate tray binary could not know whether a window was open. It matters
+/// for more than power, too — every invocation rewrites `proxy.yaml` and
+/// touches its mtime (contract §5), so the idle poll rate is also the idle
+/// churn rate a future file monitor has to see through.
+const HIDDEN_POLL_EVERY: u32 = 5;
 
 const PLACEHOLDER: &str = "—";
 
@@ -36,6 +46,18 @@ pub struct StatusPage {
     /// Set while a lifecycle command is in flight. Polling pauses so a reply
     /// that predates the command cannot re-enable the buttons mid-flight.
     busy: Cell<bool>,
+
+    /// Whether the main window is on screen. False while only the tray is.
+    window_visible: Cell<bool>,
+    /// Poll ticks since start, for the hidden-window rate.
+    ticks: Cell<u32>,
+
+    /// Notified after every successful `status` read.
+    ///
+    /// The tray renders the same runtime state this page does, and this is how
+    /// it gets it — rather than polling `status` itself, which is what a second
+    /// process had to do.
+    observer: RefCell<Option<Box<dyn Fn(&ProxyStatus)>>>,
 }
 
 impl StatusPage {
@@ -92,6 +114,9 @@ impl StatusPage {
             stop: stop.clone(),
             restart: restart.clone(),
             busy: Cell::new(false),
+            window_visible: Cell::new(true),
+            ticks: Cell::new(0),
+            observer: RefCell::new(None),
         });
 
         for (button, action) in [
@@ -130,13 +155,39 @@ impl StatusPage {
         );
     }
 
+    /// Report every `status` read to `observer` — the tray's source of state.
+    pub fn connect_status(&self, observer: impl Fn(&ProxyStatus) + 'static) {
+        self.observer.replace(Some(Box::new(observer)));
+    }
+
+    /// Tell the page whether the main window is on screen, which sets the poll
+    /// rate. Hiding the window does not stop polling: the tray still shows
+    /// whether the proxy is up.
+    pub fn set_window_visible(&self, visible: bool) {
+        self.window_visible.set(visible);
+    }
+
+    /// Start the proxy, as the tray's "Start proxy" item does. Goes through the
+    /// same act -> re-read -> reconcile path as the button.
+    pub fn start_proxy(self: &Rc<Self>) {
+        self.act(Action::Start);
+    }
+
+    pub fn stop_proxy(self: &Rc<Self>) {
+        self.act(Action::Stop);
+    }
+
     fn start_polling(self: &Rc<Self>) {
         let this = Rc::downgrade(self);
         glib::timeout_add_local(POLL_INTERVAL, move || {
             let Some(this) = this.upgrade() else {
                 return glib::ControlFlow::Break;
             };
-            if !this.busy.get() {
+            let tick = this.ticks.get().wrapping_add(1);
+            this.ticks.set(tick);
+
+            let due = this.window_visible.get() || tick % HIDDEN_POLL_EVERY == 0;
+            if due && !this.busy.get() {
                 this.refresh();
             }
             glib::ControlFlow::Continue
@@ -181,6 +232,10 @@ impl StatusPage {
         self.start.set_sensitive(!status.running);
         self.stop.set_sensitive(status.running);
         self.restart.set_sensitive(status.running);
+
+        if let Some(observer) = self.observer.borrow().as_ref() {
+            observer(status);
+        }
     }
 }
 

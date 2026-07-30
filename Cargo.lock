@@ -17,6 +17,7 @@ name = "adguard-gui"
 version = "0.1.0"
 dependencies = [
  "adguard-core",
+ "adguard-tray",
  "async-channel",
  "gtk4",
  "libadwaita",
@@ -27,7 +28,9 @@ name = "adguard-tray"
 version = "0.1.0"
 dependencies = [
  "adguard-core",
+ "async-channel",
  "ksni",
+ "thiserror",
  "tokio",
 ]
 

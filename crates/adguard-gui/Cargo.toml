@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 adguard-core.workspace = true
+adguard-tray.workspace = true
 gtk4.workspace = true
 libadwaita.workspace = true
 async-channel.workspace = true

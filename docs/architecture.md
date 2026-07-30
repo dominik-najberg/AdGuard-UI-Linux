@@ -14,7 +14,7 @@ Read [`cli-contract.md`](cli-contract.md) first. It records the measured behavio
 | Toolkit | **GTK4 4.22 + libadwaita 1.9** | Dev headers already present (`libgtk-4-dev`, `libadwaita-1-dev`). Native GNOME 50 look on Ubuntu 26.04. Zero apt installs needed to start. |
 | Crates | `gtk4` 0.11, `libadwaita` 0.9 (feature `v1_7`), `zbus` 5, `ksni`, `rusqlite`, `yaml-rust2`, `strip-ansi-escapes`, `tokio` (process + time) | Mirrors the versions already proven in `crates/legion-gui`. |
 | YAML | **`yaml-rust2`**, read into a generic value tree — not `serde_yaml` and not a `derive(Deserialize)` struct | `serde_yaml` is archived upstream (its last release is literally `0.9.34+deprecated`). More decisive: `config set <bool key> 1` is accepted and writes a literal `enabled: 1`, so a strict deserialise would fail the *whole document* on one type-punned key and blank every switch on the page. Reading scalars by dotted path keeps the blast radius at one row — and the dotted path is the same string `config set` takes, so one constant drives both directions. |
-| Tray | **StatusNotifierItem via `ksni`** | `org.kde.StatusNotifierWatcher` is live on the session bus and `ubuntu-appindicators@ubuntu.com` is ACTIVE. `ksni` speaks SNI over D-Bus with **no C headers** — relevant because `libayatana-appindicator3-dev` is not installed. |
+| Tray | **StatusNotifierItem via `ksni`**, as a library inside the GUI process | `org.kde.StatusNotifierWatcher` is live on the session bus and `ubuntu-appindicators@ubuntu.com` is ACTIVE. `ksni` speaks SNI over D-Bus with **no C headers** — relevant because `libayatana-appindicator3-dev` is not installed. One process, not two: see §4. |
 | Process model | **No daemon of our own** | The AdGuard proxy is already the daemon. CLI calls cost 10–30 ms, so there is nothing to amortise. |
 | Build system | **Cargo** | Keep it plain. Meson only if flatpak packaging later demands it. |
 | v1 scope | Tray + core controls | See §7. |
@@ -39,7 +39,7 @@ adguard-ui/
 │   │   ├── model.rs            # ProxyStatus, Filter, FilterGroup, Userscript, License, Toggles
 │   │   └── paths.rs            # locate binary + data dir, XDG-aware
 │   ├── adguard-gui/            # GTK4 + libadwaita application
-│   └── adguard-tray/           # ksni StatusNotifierItem
+│   └── adguard-tray/           # ksni StatusNotifierItem — a library, not a binary
 ├── data/
 │   ├── com.github.<you>.AdGuardUI.desktop
 │   ├── com.github.<you>.AdGuardUI.metainfo.xml
@@ -76,7 +76,7 @@ Three channels, each with a single direction and purpose:
 
 There is no push/event mechanism anywhere in the CLI, so:
 
-- **Runtime status** — poll `adguard-cli status` on a ~2 s timer while a window is open; slow to ~10 s when only the tray is visible. At 10 ms per call this is negligible.
+- **Runtime status** — poll `adguard-cli status` on a ~2 s timer while a window is open; slow to ~10 s when only the tray is visible. At 10 ms per call this is negligible. Implemented in `status.rs` as one tick in five while the window is hidden, which is only possible because the tray shares this process (§4).
 - **Config** — watch `proxy.yaml` with `gio::FileMonitor`. External edits (the user is expected to hand-edit; the CLI even suggests it) then appear live in the UI.
 - **Filters** — watch the `.db` files with the same mechanism, debounced; the daemon rewrites them on update.
 
@@ -90,9 +90,27 @@ Because semantic failures exit 0 (contract §3), every mutation follows **act �
 
 ---
 
-## 4. Threading
+## 4. Threading, and why the tray is not its own process
 
 All CLI invocations and SQLite reads happen off the main thread. Use the pattern already proven in `legion-gui`: a worker task plus `async-channel`, results delivered to the UI via `glib::spawn_future_local`.
+
+### One process owns everything
+
+`adguard-tray` began as a second binary, because `ksni` needs a tokio runtime and the GUI runs a glib main loop. That is a real constraint — the two cannot share a thread — but it was the wrong thing to organise the process model around.
+
+The problem with two processes was not duplicated code. `adguard-core` is synchronous and GTK-free, so both already shared the act and re-read halves; and the tray's reconcile is far simpler than the GUI's, because a `ksni` menu is rebuilt from state on every update and so needs none of the pending/painted machinery that exists to stop GTK widgets drifting.
+
+The problem was **two independent writers to `proxy.yaml`, with neither observing the other**. Toggle ad blocking from the tray with a window open and the Protection page went on showing the old value until the user pressed refresh. It also made the refresh policy in §3 inexpressible: a separate tray binary cannot know whether a window is open, and it doubled the `status` polling — which, given that every invocation touches the config's mtime, doubles the churn a file monitor has to see through.
+
+So the GUI binary owns the process, and `adguard-tray` is a library holding the ksni layer:
+
+- The tray thread runs a `current_thread` tokio runtime that serves D-Bus and waits on one channel. **No timer, no `Cli`, no config reads.**
+- Menu activations become a `Command` on an unbounded channel, drained on the GTK main loop and dispatched to the same page methods a click uses — so a tray toggle and the switch on the page cannot disagree. This is also what `ksni`'s own documentation asks for: callbacks must not block, or the menu freezes.
+- State flows the other way from the polls that already exist — the Status page's `status` read and the Protection page's config read — into `Tray::set_state`, which drops an unchanged state so an idle session generates no D-Bus traffic.
+- Registration failure is a **normal outcome**, not an error. GNOME has no native tray, so a missing or disabled AppIndicator extension is expected; the application carries on windowed.
+- With a tray, closing the window hides it and the process is held alive; without one, closing quits. Getting that backwards would leave a hidden app with no way to reach or quit it.
+
+The single-instance behaviour that `adw::Application` gives us for free matters more now: launching `adguard-ui` twice activates the running one rather than starting a rival writer.
 
 Fast reads (`status`, `config get`) can be `tokio::process::Command` awaits. Network commands (`check-update`, `filters update`, `update`) need a visible progress state and a generous timeout — a real `HttpClientNetworkError` reaching `filters.adtidy.org` is already in this machine's logs, so failure is a normal path, not an edge case.
 
@@ -154,6 +172,8 @@ Because `adguard-cli` and its data live under `~/.local`, a root-invoked helper 
 **Out (v2):** live blocked-request stats (needs log tailing; format undocumented and unstable — contract §9), userscript installation from URL, HAR capture, `speed` benchmark UI, import/export, full advanced-settings parity.
 
 Ship the tray + core controls first; it is the part that replaces day-to-day terminal use.
+
+Status: Status, Protection, Filters (HTTP) and Advanced are done, and the tray carries start/stop plus the six Protection toggles as quick toggles (§4). Still open for v1: the first-run assistant, the DNS page, auto-mode via polkit, and autostart so the tray is there at login without launching the window.
 
 ---
 

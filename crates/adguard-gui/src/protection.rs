@@ -51,6 +51,12 @@ pub struct ProtectionPage {
     /// tell a user's click from our own reconcile. Property notifications are
     /// synchronous, so a plain flag around the write is enough.
     reconciling: Cell<bool>,
+
+    /// Notified with every fresh reading of `proxy.yaml`.
+    ///
+    /// The tray shows these same six toggles, and this is how it learns their
+    /// state — it holds no `Cli` and reads no config of its own.
+    observer: RefCell<Option<Box<dyn Fn(&Config)>>>,
 }
 
 impl ProtectionPage {
@@ -61,6 +67,7 @@ impl ProtectionPage {
             toasts,
             rows: RefCell::new(Vec::new()),
             reconciling: Cell::new(false),
+            observer: RefCell::new(None),
         });
         this.reload();
         this
@@ -68,6 +75,23 @@ impl ProtectionPage {
 
     pub fn widget(&self) -> &adw::Bin {
         &self.bin
+    }
+
+    /// Report every reading of `proxy.yaml` to `observer` — the tray's source
+    /// of toggle state.
+    pub fn connect_config(&self, observer: impl Fn(&Config) + 'static) {
+        self.observer.replace(Some(Box::new(observer)));
+    }
+
+    /// Flip a toggle on the tray's behalf.
+    ///
+    /// Deliberately the *same* entry point a switch click uses, rather than a
+    /// second write path: the row goes insensitive, the write is verified
+    /// against the file, and the switch on this page ends up showing what the
+    /// tray asked for. Two writers that could disagree is exactly what merging
+    /// the tray into this process was meant to prevent.
+    pub fn request(self: &Rc<Self>, toggle: Toggle, on: bool) {
+        self.toggle(toggle, on);
     }
 
     /// Re-read `proxy.yaml` and rebuild the page.
@@ -155,6 +179,10 @@ impl ProtectionPage {
     /// `listen_address` echoes `listen_auth` back too), so the cheapest way to
     /// stay truthful is to re-render everything from the file we just read.
     fn apply(&self, config: &Config) {
+        if let Some(observer) = self.observer.borrow().as_ref() {
+            observer(config);
+        }
+
         let dns_is_inert = config.dns_filtering_is_inert();
 
         for row in self.rows.borrow().iter() {

@@ -6,11 +6,12 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
-[[bin]]
-name = "adguard-tray"
-path = "src/main.rs"
-
 [dependencies]
 adguard-core.workspace = true
+async-channel.workspace = true
 ksni.workspace = true
-tokio = { version = "1", features = ["rt", "macros", "time"] }
+thiserror.workspace = true
+# `ksni` needs a tokio runtime and the GUI runs a glib main loop, so the tray
+# gets a thread of its own. `net`/`time` are for the D-Bus reactor; nothing here
+# runs a timer.
+tokio = { version = "1", features = ["rt", "net", "time"] }
