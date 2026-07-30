@@ -79,6 +79,10 @@ What remains needs a decision from §5, which is not an agent's to make.
 
 ## 5. Decisions still open
 
+> **All five were settled by the project owner on 30 July 2026.** [`handoff.md`](handoff.md) §2 indexes the answers and points at the doc that now owns each one. What follows is left unedited as the evidence the decisions were taken from — **two of its recommendations were overturned**, so read it as history, not advice.
+>
+> Items 2 and 3 were the ones that changed, and for the same reason in both cases: reading the `adguard-cli` binary's strings contradicted what had been inferred without it. Activation is **in**, as a user-driven finish button rather than a poll. Auto mode needs **no helper of ours at all** — AdGuard ships `sudo <path>/adguard_root_helper -s` and checks `owned_by_root`/`has_suid`/`is_executable` itself, which contract §8 had concluded did not exist. Item 5 also went the other way from the recommendation below: a toast, gated on a displayed row actually having moved.
+
 Not to be invented by an agent. Each blocks the item beside it.
 
 1. **Is a Userscripts page in v1?** `handoff.md` §1 and `architecture.md` §5 both list it; §7's "In" list does not. Recommendation: **out** — §7 is the scope authority, and §7 already pushes userscript *installation* to v2, which leaves a read-only list of thin value.

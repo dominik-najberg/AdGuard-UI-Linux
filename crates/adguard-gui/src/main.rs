@@ -9,6 +9,7 @@ mod advanced;
 mod filters;
 mod protection;
 mod status;
+mod style;
 mod watch;
 mod worker;
 
@@ -139,11 +140,15 @@ fn start(
         return Ok(());
     }
 
+    // Before any widget exists, so nothing is ever drawn once unstyled and then
+    // restyled a frame later.
+    style::install();
+
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .title("AdGuard UI")
-        .default_width(820)
-        .default_height(680)
+        .default_width(880)
+        .default_height(720)
         .build();
 
     let view = match Cli::discover() {
@@ -396,9 +401,10 @@ fn main_view(cli: &Cli) -> MainView {
     let content_title = adw::WindowTitle::new(PAGES[0].title, "");
     content_header.set_title_widget(Some(&content_title));
 
-    // Refreshes whichever page is showing: status re-runs `status`, filters
-    // re-reads the catalogue. Both also refresh themselves after any change
-    // they make; this is for changes made behind our back, from a terminal.
+    // Refreshes whichever page is showing: status re-runs `status` and re-reads
+    // the licence, filters re-reads the catalogue. Every page also refreshes
+    // itself after any change it makes; this is for changes made behind our
+    // back, from a terminal.
     let refresh = gtk::Button::from_icon_name("view-refresh-symbolic");
     refresh.set_tooltip_text(Some("Refresh"));
     refresh.connect_clicked({
@@ -413,7 +419,7 @@ fn main_view(cli: &Cli) -> MainView {
             Some("filters") => filters.reload(),
             Some("stealth") => stealth.reload(),
             Some("advanced") => advanced.reload(),
-            _ => status.refresh(),
+            _ => status.reload(),
         }
     });
     content_header.pack_end(&refresh);
@@ -438,11 +444,20 @@ fn main_view(cli: &Cli) -> MainView {
     sidebar.connect_row_selected({
         let stack = stack.clone();
         let split = split.clone();
+        let status = status.clone();
         move |_, row| {
             let Some(row) = row else { return };
             let page = &PAGES[row.index().max(0) as usize];
             stack.set_visible_child_name(page.id);
             content_title.set_title(page.title);
+            // The Status page's three figures count things the *other* pages
+            // change, and nothing signals a switch flip across pages. Coming
+            // back to it is therefore the moment to recount — cheap, because
+            // those figures are read from `proxy.yaml` and the two catalogues
+            // rather than from `adguard-cli`, so this cannot race the 2 s poll.
+            if page.id == PAGES[0].id {
+                status.refresh_stats();
+            }
             // On a narrow window the sidebar and content are separate views;
             // choosing a page should move to it.
             split.set_show_content(true);
@@ -457,7 +472,7 @@ fn main_view(cli: &Cli) -> MainView {
 
     // After the pages are built, so priming the snapshot cannot race the first
     // render, and so a repaint always has rows to patch rather than a spinner.
-    let watch = watch::install(&protection, &[advanced, stealth]);
+    let watch = watch::install(&status, &protection, &[advanced, stealth]);
 
     MainView {
         root: split,

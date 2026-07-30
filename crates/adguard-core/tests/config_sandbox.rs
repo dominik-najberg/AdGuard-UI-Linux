@@ -43,10 +43,12 @@ use adguard_core::{AddressPlan, Cli, Config};
 /// You need to activate an AdGuard license to use this command
 /// ```
 ///
-/// The `config` family, and `--version`, need no licence and behave exactly as
-/// they do against the real data directory — which is all this suite exercises.
-/// Anything licence-gated belongs in `config_mutate.rs` or `filters_*.rs`,
-/// against the real install.
+/// The `config` family, `--version` and — measured since — `activate` need no
+/// licence and behave exactly as they do against the real data directory.
+/// `activate` is the interesting one: it is the command that exists to *fix* an
+/// unlicensed install, so an unlicensed sandbox is the only honest place to
+/// exercise it. Anything that needs a *working* licence belongs in
+/// `config_mutate.rs` or `filters_*.rs`, against the real install.
 struct Sandbox {
     root: PathBuf,
     cli: Cli,
@@ -123,16 +125,24 @@ fn licence_gated_commands_name_the_licence() {
         return;
     };
 
-    let err = sandbox.cli.status().expect_err("a sandbox is unlicensed");
-    eprintln!("status in an unlicensed install -> {err:?}");
-    assert!(
-        matches!(err, adguard_core::Error::Unlicensed { .. }),
-        "expected Unlicensed, got {err:?}"
-    );
-    assert!(
-        !err.to_string().contains("rejected"),
-        "must not read as our own malformed command line: {err}"
-    );
+    // `license` is here beside `status` because it is the one the activation
+    // flow rests on: it is itself licence-gated, which is precisely why nothing
+    // can poll it while waiting for an activation to land (contract §7).
+    for (command, err) in [
+        ("status", sandbox.cli.status().err()),
+        ("license", sandbox.cli.license().err()),
+    ] {
+        let err = err.unwrap_or_else(|| panic!("`{command}` should be refused: a sandbox is unlicensed"));
+        eprintln!("{command} in an unlicensed install -> {err:?}");
+        assert!(
+            matches!(err, adguard_core::Error::Unlicensed { .. }),
+            "expected Unlicensed from `{command}`, got {err:?}"
+        );
+        assert!(
+            !err.to_string().contains("rejected"),
+            "must not read as our own malformed command line: {err}"
+        );
+    }
 
     // The config family is what still works there, which is the premise the
     // rest of this suite rests on.
@@ -140,6 +150,48 @@ fn licence_gated_commands_name_the_licence() {
         .cli
         .config_set(key::LOG_LEVEL, "info")
         .expect("the config family is not licence-gated");
+}
+
+/// The first half of licence activation, against the only kind of install where
+/// it means anything.
+///
+/// Everything up to the browser log-in is provable here. The half that is not
+/// is the success leg: it needs a real account, and completing an activation
+/// spends a device slot, so it ships as a stated claim rather than a
+/// measurement (`handoff.md` §3).
+///
+/// Nothing is consumed by this test. `activate` hands back a log-in link and
+/// stops; no login happens, and the link belongs to a data directory that is
+/// deleted when the test ends.
+#[test]
+#[ignore = "invokes the real adguard-cli"]
+fn activate_offers_a_login_link_in_an_unlicensed_install() {
+    let Some(sandbox) = Sandbox::new("activate") else { return };
+
+    let activation = sandbox.cli.activate().expect("activate should not fail");
+    eprintln!("activate in an unlicensed install -> {activation:?}");
+
+    let adguard_core::Activation::NeedsLogin { url } = activation else {
+        panic!("expected a log-in link, got {activation:?}");
+    };
+    // The scheme is the part that must not come from parsed text: this string
+    // is handed to `gtk::UriLauncher`, which hands it to the desktop's handler
+    // for whatever scheme it names.
+    assert!(url.starts_with("https://"), "{url}");
+    // Cut short at the first `&`, this would be a link that could not say which
+    // install is asking.
+    assert!(url.contains("appid="), "the link does not identify this install: {url}");
+
+    // The measured claim the *finish* button rests on: running `activate` again
+    // asks after the same pending activation rather than starting a new one, so
+    // a user who logs in and comes back is answering the question they were
+    // asked. A second link here would make the whole flow unwinnable.
+    let again = sandbox.cli.activate().expect("activate should not fail");
+    assert_eq!(
+        again,
+        adguard_core::Activation::NeedsLogin { url },
+        "the log-in link moved between invocations"
+    );
 }
 
 /// The sandbox is only useful if the CLI really does follow `$XDG_DATA_HOME`.

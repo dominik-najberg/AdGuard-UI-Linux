@@ -19,7 +19,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use crate::model::{FilterAction, FilterSet, ProxyStatus};
+use crate::model::{FilterAction, FilterSet, License, ProxyStatus};
 use crate::paths;
 
 /// Deadline for the local commands — `status`, `config get/set`, `start`.
@@ -31,11 +31,15 @@ use crate::paths;
 const LOCAL_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Deadline for the commands that reach the network — `filters update`,
-/// `check-update`, `update` (`architecture.md` §4).
+/// `check-update`, `update` (`architecture.md` §4), and [`Cli::activate`].
 ///
-/// Nothing wires these up yet. The constant exists so that when something does,
-/// the choice is to name a deadline rather than to invent the whole mechanism.
-#[allow(dead_code)]
+/// `activate` is the one wired up so far, and it is a mixed case worth stating.
+/// Measured, its *first* leg is entirely local: 0.14 s in a fresh data
+/// directory, which it seeds, and 0.01–0.02 s every time after — the log-in URL
+/// it prints is derived on this machine, not fetched. The second leg is the
+/// network one, because completing an activation means asking AdGuard whether
+/// the log-in happened. One command, two very different costs, so it takes the
+/// generous deadline.
 pub const NETWORK_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// How often the deadline is checked while a child runs.
@@ -112,9 +116,13 @@ pub enum Error {
         timeout: std::time::Duration,
     },
 
-    /// A command the CLI accepted but refused to carry out. Exit code was 0
-    /// and the explanation came back on stdout, so `message` is the CLI's own
-    /// wording — suitable to show the user verbatim.
+    /// A command the CLI would not carry out, in its own words.
+    ///
+    /// The explanation came back on **stdout**, which is where this CLI puts
+    /// them. Usually at exit 0 — every semantic failure does that — but not
+    /// always: an initialisation race exits 1 and still prints on stdout, so
+    /// the stream is what identifies this, not the status. Either way `message`
+    /// is the CLI's own wording, suitable to show the user verbatim.
     #[error("{message}")]
     Refused { message: String },
 }
@@ -288,10 +296,34 @@ impl Cli {
 
         if !status.success() {
             // Exit 1 is not exclusively our own malformed command line, which
-            // is what contract §3 first assumed. Sort the two apart before
+            // is what contract §3 first assumed. Sort the cases apart before
             // blaming ourselves.
             if let Some(message) = licence_complaint(&stderr) {
                 return Err(Error::Unlicensed { message });
+            }
+            // Nor does a failure always explain itself on stderr, which is the
+            // other half of what §3 first assumed. Measured: two invocations
+            // racing to initialise a data directory that has never been used
+            // leave one exiting **1** with `Filter manager initialization
+            // failed` on **stdout** and stderr empty — eight runs in twelve,
+            // and the shape it needs is this app's own startup, where the
+            // Status page's `status` and the licence read go out together.
+            //
+            // So the stream is the discriminator. CLI11 rejects a command line
+            // on stderr; the program refusing to do the work prints on stdout,
+            // exactly as it does at exit 0. Blaming that on our arguments would
+            // be the lapsed-licence mistake again, in a new disguise.
+            //
+            // The *last* line, not the first, for the same reason
+            // [`Cli::activate`] reads its own output that way: the one measured
+            // shape here is a single line, so the two agree on it, but `activate`
+            // opens with a menu prompt that was never asked and a failure of
+            // *that* command would otherwise be reported to the user as "How do
+            // you want to activate AdGuard CLI?".
+            if stderr.trim().is_empty() {
+                if let Some(message) = last_line(&stdout) {
+                    return Err(Error::Refused { message });
+                }
             }
             return Err(Error::BadInvocation {
                 args: args.join(" "),
@@ -329,6 +361,74 @@ impl Cli {
     /// Restart the proxy. Re-read status afterwards.
     pub fn restart(&self) -> Result<String, Error> {
         Ok(self.run(&["restart"])?.stdout.trim().to_owned())
+    }
+
+    /// Read the licence.
+    ///
+    /// Refused outright while the install is unlicensed — exit 1 with the
+    /// complaint on stderr, which [`Self::run_within`] has already turned into
+    /// [`Error::Unlicensed`] by the time we get here. That is the whole reason
+    /// activation cannot be driven by polling this: there is no status to poll
+    /// for until the thing being waited on has already happened (contract §7).
+    ///
+    /// # The output is the most sensitive thing this CLI prints
+    ///
+    /// Owner e-mail and licence key, in full, on every successful read. So a
+    /// parse failure must **not** quote what it could not parse, the way
+    /// [`Self::status`] does: that message ends up in a row subtitle or a toast.
+    /// [`redact_values`] keeps the shape and drops every value, which is enough
+    /// to recognise a rewording and useless to anyone reading over a shoulder.
+    pub fn license(&self) -> Result<License, Error> {
+        let out = self.run(&["license"])?;
+        parse_license(&out.stdout).ok_or_else(|| Error::Unparseable {
+            args: "license".to_owned(),
+            output: redact_values(&out.stdout),
+        })
+    }
+
+    /// Begin — or complete — licence activation.
+    ///
+    /// The same command does both, which is what makes the flow work without a
+    /// TTY. Measured on v1.4.13 with stdin closed, against an unlicensed
+    /// sandbox:
+    ///
+    /// ```text
+    /// $ adguard-cli activate
+    /// How do you want to activate AdGuard CLI?
+    /// Warning: No TTY for user input. Please visit https://link.adtidy.org/…&appid=<id>
+    /// to log in, then run `adguard-cli activate` again to complete activation.
+    /// ```
+    ///
+    /// Exit 0, on stdout, no ANSI. The first line is a menu prompt that never
+    /// got asked; the second is the one worth acting on.
+    ///
+    /// # Why running it twice is not a poll
+    ///
+    /// Measured: the `appid` in that URL is **stable for a given data
+    /// directory** — three invocations produced the identical link, and a
+    /// second sandbox produced a different one. So "run `activate` again" does
+    /// not start a fresh attempt that races the first; it asks after the one the
+    /// user was already sent to log into. That is what makes a *finish* button
+    /// the honest shape for this flow, rather than a lesser version of a poll
+    /// nobody can write (`architecture.md` §5).
+    ///
+    /// # Only reached while the licence is not active
+    ///
+    /// What this prints against an already-licensed install is **not measured**,
+    /// deliberately: the one install available to measure it on is the author's
+    /// own, and `activate` is not a command to point at a working licence to
+    /// see what happens. The UI therefore offers it only while `license` says
+    /// the licence is not active, and decides the outcome by reading `license`
+    /// afterwards rather than by believing anything printed here.
+    pub fn activate(&self) -> Result<Activation, Error> {
+        let out = self.run_within(&["activate"], NETWORK_TIMEOUT)?;
+        Ok(match activation_url(&out.stdout) {
+            Some(url) => Activation::NeedsLogin { url },
+            None => Activation::Replied {
+                message: last_line(&out.stdout)
+                    .unwrap_or_else(|| "`adguard-cli activate` said nothing at all".to_owned()),
+            },
+        })
     }
 
     /// Add, enable or disable one filter.
@@ -563,6 +663,24 @@ pub struct Applied {
     pub restart_required: bool,
 }
 
+/// What [`Cli::activate`] came back with.
+///
+/// Two variants rather than a `Result`, because neither of these is a failure:
+/// the CLI did what it was asked, and what it asked for in return is the
+/// interesting part.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Activation {
+    /// Log in at this URL, then run `activate` again. The measured no-TTY path,
+    /// and the only one the UI has a flow for.
+    NeedsLogin { url: String },
+
+    /// Something else — an install that is already activated, or a shape that
+    /// changed upstream. Unmeasured, so nothing is inferred from it: the caller
+    /// reads `license` to learn where the install actually stands, and shows
+    /// this sentence only to explain itself if that read still refuses.
+    Replied { message: String },
+}
+
 /// The line `config set` prints when it accepted the command.
 const CONFIG_UPDATED: &str = "Config has been updated";
 
@@ -595,6 +713,20 @@ fn first_line(stdout: &str) -> Option<String> {
         .lines()
         .map(str::trim)
         .find(|line| !line.is_empty())
+        .map(str::to_owned)
+}
+
+/// The last non-empty line, which is where this CLI puts its conclusions.
+///
+/// Used only by [`Cli::activate`], where the first line is a menu prompt that
+/// was never asked ("How do you want to activate AdGuard CLI?") and the line
+/// worth showing is the one after it.
+fn last_line(stdout: &str) -> Option<String> {
+    stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .next_back()
         .map(str::to_owned)
 }
 
@@ -724,6 +856,87 @@ fn parse_status(stdout: &str) -> Option<ProxyStatus> {
 
 fn is_enabled(line: &str) -> bool {
     line.ends_with("enabled") && !line.ends_with("disabled")
+}
+
+/// Parse `adguard-cli license`.
+///
+/// Defined positively on the **status** line, the way [`parse_status`] is
+/// defined on the running/stopped line: it is the field every decision is made
+/// from, and a reading without one is an output shape we do not recognise
+/// rather than a licence in an unknown state. Owner and key are read where they
+/// appear and left empty where they do not — a display can say so, and neither
+/// is worth failing the whole read over.
+fn parse_license(stdout: &str) -> Option<License> {
+    let mut license = License::default();
+    let mut saw_status = false;
+
+    for line in stdout.lines().map(str::trim) {
+        if let Some(value) = line.strip_prefix("License owner:") {
+            license.owner = value.trim().to_owned();
+        } else if let Some(value) = line.strip_prefix("License key:") {
+            license.key = value.trim().to_owned();
+        } else if let Some(value) = line.strip_prefix("License status:") {
+            license.status = value.trim().to_owned();
+            saw_status = !license.status.is_empty();
+        }
+    }
+
+    saw_status.then_some(license)
+}
+
+/// Keep the shape of some output and drop every value in it.
+///
+/// For the one failure path that would otherwise quote `license` output
+/// verbatim into a subtitle. `Label: <hidden>` per line says which fields were
+/// there and which the parser did not recognise, which is what a rewording
+/// looks like; a line with no label at all is dropped whole, since there is no
+/// way to tell a heading from a value.
+///
+/// Joined onto one line for the same reason [`licence_complaint`] drops the
+/// usage dump: the destination is an `AdwActionRow` subtitle.
+fn redact_values(stdout: &str) -> String {
+    stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| match line.split_once(':') {
+            Some((label, _)) => format!("{}: <hidden>", label.trim()),
+            None => "<hidden>".to_owned(),
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// The scheme an activation link must have before it is handed to a launcher.
+const HTTPS: &str = "https://";
+
+/// Pull the log-in URL out of `activate`'s no-TTY message.
+///
+/// The URL sits mid-sentence — *"Please visit &lt;url&gt; to log in, then run
+/// …"* — so there is no prefix to strip and no field to take. It is found by
+/// scheme instead, as the first whitespace-delimited token that begins one,
+/// with sentence punctuation trimmed off both ends. The measured link carries a
+/// query string (`?action=activate&app=cli&appid=…`) and no whitespace, so
+/// splitting on whitespace keeps it whole; the trimming is for the shapes this
+/// CLI uses elsewhere, which wrap things it wants you to type in backticks.
+///
+/// **`https://` only, and that is a security bar rather than tidiness.**
+/// Whatever comes back from here is handed to `gtk::UriLauncher`, which hands it
+/// to the desktop's registered handler for whatever scheme it names — so the
+/// scheme is the part that must not be taken from parsed text. Everything else
+/// about the URL is AdGuard's business; this is ours.
+fn activation_url(stdout: &str) -> Option<String> {
+    stdout
+        .split_whitespace()
+        .map(|token| {
+            token
+                .trim_start_matches(['(', '[', '<', '"', '\'', '`'])
+                .trim_end_matches(['.', ',', ';', ':', ')', ']', '>', '"', '\'', '`'])
+        })
+        // A bare scheme is not a link. Nothing measured produces one; the check
+        // costs a clause and the alternative is launching "https://".
+        .find(|token| token.starts_with(HTTPS) && token.len() > HTTPS.len())
+        .map(str::to_owned)
 }
 
 #[cfg(test)]
@@ -1069,6 +1282,67 @@ mod tests {
         );
     }
 
+    /// The third thing exit 1 can mean, after "our command line" and "no
+    /// licence": the program ran, refused, and said so on **stdout**.
+    ///
+    /// Measured, and reachable from this app's own startup — `status` and the
+    /// licence read racing to initialise a data directory that has never been
+    /// used leave one of them exactly here. Reported as `BadInvocation` it read
+    /// as *"adguard-cli rejected `license` (exit 1): "* with nothing after the
+    /// colon: our bug, according to us, with no evidence and no advice.
+    #[test]
+    fn a_failure_that_explains_itself_on_stdout_is_not_our_bug() {
+        let err = cli_for("/bin/sh")
+            .run_within(
+                &["-c", "echo 'Filter manager initialization failed'; exit 1"],
+                Duration::from_secs(10),
+            )
+            .expect_err("exit 1 is a failure");
+
+        assert!(
+            matches!(&err, Error::Refused { message } if message == "Filter manager initialization failed"),
+            "expected the CLI's own sentence, got {err:?}"
+        );
+        // What the user reads is the CLI's line, not a claim about our
+        // arguments.
+        assert_eq!(err.to_string(), "Filter manager initialization failed");
+    }
+
+    /// `activate` opens with a menu prompt nobody answered, so a failure of
+    /// *that* command must not be reported to the user as "How do you want to
+    /// activate AdGuard CLI?".
+    #[test]
+    fn a_dangling_prompt_is_not_the_failure_message() {
+        let err = cli_for("/bin/sh")
+            .run_within(
+                &[
+                    "-c",
+                    "echo 'How do you want to activate AdGuard CLI?'; \
+                     echo 'Filter manager initialization failed'; exit 1",
+                ],
+                Duration::from_secs(10),
+            )
+            .expect_err("exit 1 is a failure");
+
+        assert_eq!(err.to_string(), "Filter manager initialization failed");
+    }
+
+    /// The discriminator is the stream, so a message on stderr must stay our
+    /// bug even when stdout also has something in it.
+    #[test]
+    fn stderr_still_wins_when_both_streams_speak() {
+        let err = cli_for("/bin/sh")
+            .run_within(
+                &["-c", "echo noise; echo '<value> is required' >&2; exit 1"],
+                Duration::from_secs(10),
+            )
+            .expect_err("exit 1 is a failure");
+        assert!(
+            matches!(err, Error::BadInvocation { .. }),
+            "expected BadInvocation, got {err:?}"
+        );
+    }
+
     /// The exact stderr an unlicensed v1.4.13 produces, captured from a sandbox
     /// `$XDG_DATA_HOME`. Kept verbatim so a CLI upgrade that reworded it shows
     /// up here as a failing test rather than as a user being blamed for our bug.
@@ -1165,6 +1439,175 @@ mod tests {
                 "should NOT read as a licence problem: {unrelated:?}"
             );
         }
+    }
+
+    // ---- `license` and `activate`, both captured from v1.4.13 ----
+
+    /// The real shape, with a key of the right length and an owner that is not
+    /// anybody's. Measured: three lines, exit 0, nothing on stderr, and — alone
+    /// among this CLI's output — no ANSI escapes at all.
+    const LICENSE_READING: &str = "License owner: someone@example.com\n\
+         License key: ABCDEFGH12345678\n\
+         License status: APP_ACTIVE\n";
+
+    #[test]
+    fn parses_the_licence_reading() {
+        let license = parse_license(LICENSE_READING).expect("should parse");
+        assert_eq!(license.owner, "someone@example.com");
+        assert_eq!(license.status, License::ACTIVE);
+        assert!(license.is_active());
+        assert_eq!(license.masked_key(), "••••••••••••5678");
+    }
+
+    /// The status line is what every decision is made from, so a reading
+    /// without one is an unrecognised shape — not a licence in an unknown
+    /// state, and certainly not an inactive one.
+    #[test]
+    fn a_reading_with_no_status_is_rejected() {
+        for output in [
+            "License owner: someone@example.com\nLicense key: ABCDEFGH12345678\n",
+            "License status:\n",
+            "something else entirely",
+            "",
+        ] {
+            assert!(
+                parse_license(output).is_none(),
+                "{output:?} read as a licence"
+            );
+        }
+    }
+
+    /// The other two fields are worth having and not worth failing over: a
+    /// reading that names only the status still tells the user where they
+    /// stand.
+    #[test]
+    fn owner_and_key_are_optional_around_the_status() {
+        let license = parse_license("License status: APP_ACTIVE\n").expect("should parse");
+        assert!(license.is_active());
+        assert!(license.owner.is_empty());
+        assert!(license.masked_key().is_empty());
+    }
+
+    /// The failure path for a reading we cannot parse must not do what
+    /// [`Error::Unparseable`] does everywhere else and quote the output: that
+    /// message is destined for a row subtitle, and this output holds the key.
+    #[test]
+    fn an_unparseable_reading_is_not_quoted_in_full() {
+        let redacted = redact_values(LICENSE_READING);
+
+        assert!(!redacted.contains("ABCDEFGH12345678"), "{redacted}");
+        assert!(!redacted.contains("someone@example.com"), "{redacted}");
+        // Enough shape left to recognise a rewording from a bug report.
+        assert!(redacted.contains("License key: <hidden>"), "{redacted}");
+        assert_eq!(redacted.lines().count(), 1, "must fit one subtitle");
+    }
+
+    /// A line with no label could be a heading or a value, and there is no way
+    /// to tell — so it goes entirely.
+    #[test]
+    fn a_line_with_no_label_is_dropped_whole() {
+        assert_eq!(redact_values("ABCDEFGH12345678\n"), "<hidden>");
+    }
+
+    /// The redactor is only worth anything if `license` actually calls it, and
+    /// the two tests above would pass with that call deleted — they exercise
+    /// the helper, not the wiring.
+    ///
+    /// So this one goes through [`Cli::license`] itself. `echo` stands in for
+    /// the CLI and prints back the one argument it is given, which is an
+    /// unrecognisable reading: the error must carry the *shape* of what came
+    /// back and none of it. Remove the `redact_values` call and the message
+    /// reads `…: license` instead.
+    #[test]
+    fn license_redacts_what_it_could_not_parse() {
+        let err = cli_for("/bin/echo")
+            .license()
+            .expect_err("`license` is not a licence reading");
+
+        assert!(
+            matches!(&err, Error::Unparseable { output, .. } if output == "<hidden>"),
+            "the reading reached the error unredacted: {err:?}"
+        );
+    }
+
+    /// Exactly what an unlicensed sandbox printed, with the install's own id
+    /// swapped out. The first line is a menu prompt that was never asked; the
+    /// URL sits mid-sentence in the second.
+    const ACTIVATE_NO_TTY: &str = "How do you want to activate AdGuard CLI?\n\
+         Warning: No TTY for user input. Please visit \
+         https://link.adtidy.org/forward.html?action=activate&app=cli\
+         &appid=0123456789abcdef0123456789abcdef to log in, then run \
+         `adguard-cli activate` again to complete activation.\n";
+
+    #[test]
+    fn finds_the_activation_url_in_the_measured_message() {
+        let url = activation_url(ACTIVATE_NO_TTY).expect("should find a link");
+        assert_eq!(
+            url,
+            "https://link.adtidy.org/forward.html?action=activate&app=cli\
+             &appid=0123456789abcdef0123456789abcdef"
+        );
+    }
+
+    /// The link ends in a query string, so anything that stopped at `&` or `=`
+    /// would open a page that could not identify this install.
+    #[test]
+    fn the_query_string_is_part_of_the_url() {
+        let url = activation_url(ACTIVATE_NO_TTY).unwrap();
+        assert!(url.contains("appid="), "{url}");
+        assert!(url.contains("&app=cli"), "{url}");
+    }
+
+    /// It is found mid-sentence, so the sentence must not come with it.
+    #[test]
+    fn sentence_punctuation_is_not_part_of_the_url() {
+        for line in [
+            "Please visit https://example.com/activate.",
+            "Please visit https://example.com/activate,",
+            "Please visit `https://example.com/activate`",
+            "Please visit (https://example.com/activate)",
+        ] {
+            assert_eq!(
+                activation_url(line).as_deref(),
+                Some("https://example.com/activate"),
+                "{line:?}"
+            );
+        }
+    }
+
+    /// This string is handed to the desktop's handler for whatever scheme it
+    /// names, so the scheme is the one part that may not come from parsed text.
+    #[test]
+    fn only_an_https_link_is_offered_to_a_launcher() {
+        for output in [
+            "Please visit http://link.adtidy.org/activate to log in",
+            "Please visit file:///etc/passwd to log in",
+            "Please visit javascript:alert(1) to log in",
+            "Please visit https:// to log in",
+            "How do you want to activate AdGuard CLI?",
+            "",
+        ] {
+            assert!(
+                activation_url(output).is_none(),
+                "{output:?} produced a link to launch"
+            );
+        }
+    }
+
+    /// With no link there is nothing to open, and the CLI's conclusion is the
+    /// last line rather than the first — the first is the prompt.
+    #[test]
+    fn without_a_link_the_conclusion_is_the_last_line() {
+        assert_eq!(
+            last_line(ACTIVATE_NO_TTY).as_deref().map(|line| line
+                .starts_with("Warning: No TTY")),
+            Some(true)
+        );
+        assert_eq!(
+            last_line("How do you want to activate AdGuard CLI?\nAlready activated\n").as_deref(),
+            Some("Already activated")
+        );
+        assert_eq!(last_line("\n \n"), None);
     }
 
     /// A descendant holding the pipe open must not wedge the caller.

@@ -12,11 +12,11 @@ pub mod locale;
 pub mod model;
 pub mod paths;
 
-pub use cli::{Applied, Cli, Error};
+pub use cli::{Activation, Applied, Cli, Error};
 pub use config::{AddressPlan, AuthState, Config, Watch};
 pub use filters::Catalogue;
 pub use locale::Locale;
 pub use model::{
-    Filter, FilterAction, FilterCatalogue, FilterGroup, FilterSet, FilterState, Kind, ProxyStatus,
-    Setting, SettingGroup, Toggle, ADVANCED, STEALTH,
+    Filter, FilterAction, FilterCatalogue, FilterGroup, FilterSet, FilterState, Kind, License,
+    ProxyStatus, Setting, SettingGroup, Toggle, ADVANCED, STEALTH,
 };

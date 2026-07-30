@@ -57,6 +57,8 @@ Measured directly (not through a pipe — piping makes `$?` report the *last* co
 
 **The rule:** exit code 1 means the command never ran, and the message goes to **stderr**. Every *semantic* failure — unknown config key, wrong key type, missing section — prints to **stdout** and exits **0**.
 
+That rule survives as far as the *stream*, and no further: see [exit 1 is usually our bug](#exit-1-is-usually-our-bug-but-not-always) for the two cases where a failure exits 1 anyway, one of them on stdout. **The stream is the reliable discriminator, not the status.**
+
 Consequences for the wrapper layer:
 
 - Real failures must be detected by **matching output text**. This is inherently brittle: pin the patterns in one place, and treat an unrecognised output shape as failure rather than success.
@@ -64,14 +66,23 @@ Consequences for the wrapper layer:
 
 ### Exit 1 is *usually* our bug, but not always
 
-The original reading of the table above was that exit 1 always means CLI11 rejected our command line — a programming error in this codebase, never a user-facing condition. Two later measurements show that is too strong, and `Error::BadInvocation` should not be treated as unreachable:
+The original reading of the table above was that exit 1 always means CLI11 rejected our command line — a programming error in this codebase, never a user-facing condition. Three later measurements show that is too strong, and `Error::BadInvocation` should not be treated as unreachable:
 
-| Also exits 1, on stderr | Cause | Whose fault |
-| --- | --- | --- |
-| `config set <key> --anything` | A positional value beginning with `-` is read as an option: `<value> is required` | ours — fixed by the `--` guard in [§5](#the----guard-is-mandatory) |
-| `status`, `license`, `filters list` in an unlicensed install | `You need to activate an AdGuard license to use this command` | **neither** — a real user state |
+| Also exits 1 | Stream | Cause | Whose fault |
+| --- | --- | --- | --- |
+| `config set <key> --anything` | stderr | A positional value beginning with `-` is read as an option: `<value> is required` | ours — fixed by the `--` guard in [§5](#the----guard-is-mandatory) |
+| `status`, `license`, `filters list` in an unlicensed install | stderr | `You need to activate an AdGuard license to use this command` | **neither** — a real user state |
+| any command, while another is initialising the same **fresh** data directory | **stdout** | `Filter manager initialization failed` | AdGuard's — a race in its own start-up |
 
-The second is the one that matters. It is not reachable on this machine (`license` reports `APP_ACTIVE`), which is why it went unnoticed, but a lapsed licence made `Cli::status` return "adguard-cli rejected `status`" — describing the user's expired licence as an internal error. `Error::Unlicensed` now carries it instead, matched on the two tokens *licen…* and *activat…* rather than the exact sentence, so a rewording degrades to the old behaviour rather than to a missed case.
+The second is the one that matters most. It is not reachable on this machine (`license` reports `APP_ACTIVE`), which is why it went unnoticed, but a lapsed licence made `Cli::status` return "adguard-cli rejected `status`" — describing the user's expired licence as an internal error. `Error::Unlicensed` now carries it instead, matched on the two tokens *licen…* and *activat…* rather than the exact sentence, so a rewording degrades to the old behaviour rather than to a missed case.
+
+**The third breaks the "exit 1 means stderr" half of the rule**, and it was found by driving the licence page against a data directory that had never been used. Measured: run two commands at once against such a directory and one of them exits **1** with `Filter manager initialization failed` on **stdout** and stderr *empty* — eight runs in twelve. Once the directory is initialised it never happens again.
+
+The shape it needs was not exotic: it was this application's own start-up, where `status` and the licence read went out together. `StatusPage::reload` now runs them one after the other on a single worker for exactly this reason — not racing is cheaper than recovering, and the licence read has no poll behind it to try again. The mapping stays anyway, because two invocations can still meet by other routes and because a wrong answer here is one that blames the user's command line for AdGuard's own start-up.
+
+Reported as `BadInvocation` that read as *"adguard-cli rejected `license` (exit 1): "* — a claim that our command line was malformed, with nothing after the colon to support it. So the wrapper reads the **stream**: a non-zero exit whose only text is on stdout is the program refusing, not the parser rejecting, and becomes `Error::Refused` carrying AdGuard's own sentence. `Refused` is therefore no longer exclusive to exit 0.
+
+This is also the one failure a developer meets routinely, because `XDG_DATA_HOME=/tmp/fake` (`building.md` §3) creates exactly that never-used directory.
 
 **The complaint is not the whole of stderr.** Measured after the mapping was first written against only the opening line: the CLI follows that sentence with its entire usage dump — every subcommand, one per line — and then the one line worth acting on.
 
@@ -89,7 +100,23 @@ You can activate your AdGuard license by running `/home/you/.local/bin/adguard-c
 
 Roughly twenty lines, destined for an `AdwActionRow` subtitle. `Cli` keeps the first line and the advice and drops the dump.
 
-Activation itself — opening the URL and polling until `APP_ACTIVE` — is still unbuilt (`architecture.md` §5).
+Activation is built (`architecture.md` §5): it opens the URL and waits for the user, and does **not** poll — see [§7](#7-commands-that-need-a-tty) for why.
+
+**`license` output is sensitive.** On a licensed machine it returns three lines — owner e-mail, licence key, status — at exit 0, with nothing on stderr and, alone among this CLI's output, **no ANSI escapes**:
+
+```
+License owner: someone@example.com
+License key: XXXXXXXXXXXXXXXX
+License status: APP_ACTIVE
+```
+
+The key is sixteen characters, and it is a secret; the e-mail is personal data. Anything that surfaces this — a Status row, a toast, a log line, an error path — masks the key to its last four characters. `License::masked_key` is that mask, and `License`'s `Debug` is hand-written so a `{:?}` cannot leak either field.
+
+The crate's existing scrubber does not reach this. `redact_error` replaces a secret **the caller already holds** — that is why its only caller is `Cli::set_secret`, which knows the password it just passed on the command line. A licence key is what came *back*, so there is nothing to hand it.
+
+Which matters for one path in particular: `Cli::license` must not report a parse failure the way `Cli::status` does. `Error::Unparseable` quotes the output it could not read, and that output is the key — so this one call redacts by shape instead, with `redact_values`, keeping the labels (`License key: <hidden>`) and dropping every value. Enough to recognise a rewording; useless to anyone reading over a shoulder.
+
+`license_live.rs` runs the real command on every `cargo test`, so a rewording upstream shows up as a failing test rather than as a blank row. It skips when AdGuard is absent, and skips again when the install is unlicensed.
 
 Discovered by running the CLI against a sandboxed data directory ([§5](#measuring-writes-without-touching-the-real-config)), where nothing is licensed.
 
@@ -150,7 +177,7 @@ This is how everything in this section was measured, and `Cli::with_xdg_data_hom
 
 Two limits:
 
-- A sandbox is an **unlicensed** install, and copying `gm.db` across does not change that, so the licence evidently lives elsewhere. `status`, `license` and `filters list` all fail there with exit 1 (see [§3](#exit-1-is-usually-our-bug-but-not-always)). The `config` family and `--version` need no licence and behave exactly as they do for real.
+- A sandbox is an **unlicensed** install, and copying `gm.db` across does not change that, so the licence evidently lives elsewhere. `status`, `license` and `filters list` all fail there with exit 1 (see [§3](#exit-1-is-usually-our-bug-but-not-always)). The `config` family, `--version` and `activate` need no licence and behave exactly as they do for real — `activate` because it is the command that exists to *fix* an unlicensed install, which makes a sandbox the only honest place to exercise it.
 - It says nothing about whether our *reads* point at the file AdGuard really uses. That still needs a test against the live install — which is what `config_live.rs` and the one round-trip left in `config_mutate.rs` are for.
 
 ### The `--` guard is mandatory
@@ -395,7 +422,22 @@ Opening read-only is also verified not to create `-wal`/`-shm` side-car files ne
 `configure` and `activate` are interactive and cannot be driven headlessly. So, conditionally, is one `config set`.
 
 - **`configure`** — a wizard that writes the same keys we can set individually. The GUI reimplements it as a first-run assistant calling `config set`. Never invoke it.
-- **`activate`** — browser-based licence flow. Without a TTY it prints: *"No TTY for user input. Please visit <url> to log in, then run `activate` again."* The GUI should open that URL with `gtk::UriLauncher` and then poll `license` until status becomes `APP_ACTIVE`. `activate` is absent from `--help-all` but is a real command.
+- **`activate`** — browser-based licence flow, absent from `--help-all` but a real command. Measured against an unlicensed sandbox, with stdin closed: exit **0**, both lines on **stdout**, no ANSI.
+
+  ```text
+  How do you want to activate AdGuard CLI?
+  Warning: No TTY for user input. Please visit https://link.adtidy.org/forward.html?action=activate&app=cli&appid=<id> to log in, then run `adguard-cli activate` again to complete activation.
+  ```
+
+  The first line is a menu prompt that never got asked; the URL sits mid-sentence in the second, so it is found by its `https://` scheme rather than by position — and **only** `https://`, because that string is handed to `gtk::UriLauncher` and thence to the desktop's handler for whatever scheme it names.
+
+  The GUI opens that URL and then waits for the user to say they are done — **it does not poll.** Two measured facts rule polling out: `license` is itself licence-gated, so while unlicensed it refuses rather than reporting a status to poll for; and the CLI's own sentence says the flow is completed by running `activate` *again*, not by waiting. A poll would therefore have no readable exit condition and might never see one. The finish button re-runs `activate` once, then reads `license` — and `license` is what decides, not anything `activate` printed.
+
+  **The `appid` belongs to the data directory, not to the invocation.** Measured: three runs against one sandbox produced the identical link, a second sandbox produced a different one. That is what makes a finish button work rather than merely sound plausible — running `activate` again asks after the same pending activation the user was sent to log into, instead of starting a race with it.
+
+  Timing: 0.14 s the first time in a fresh data directory, which it seeds, and 0.01–0.02 s afterwards. The link is computed locally; it is the *completion* leg that reaches AdGuard, which is why `Cli::activate` takes `NETWORK_TIMEOUT` rather than the local one.
+
+  What `activate` does against an **already licensed** install is deliberately **not measured**: the only install available to try it on is the author's own, and pointing an activation command at a working licence to see what happens is not a measurement worth its risk. The UI therefore offers activation only while `license` says the licence is not active, and never from a reading that failed for some other reason.
 - **`config set listen_address <non-loopback>`**, but only while `listen_auth` is not fully configured — it prompts for a username. This one is the nastiest of the three because it does not *look* interactive and it reports success anyway; see [§5](#listen_address-needs-authentication-fully-configured-first). Configure `listen_auth` completely and it needs no TTY at all.
 
 ### The wrapper closes stdin, so "no TTY" is the only path
@@ -408,9 +450,22 @@ Everything measured about that prompt was measured without a TTY, where the CLI 
 
 ## 8. Privileged operations
 
-`adguard_root_helper` is **not setuid** (`-rwxr-xr-x potworny potworny`) and the package ships **no polkit policy** — a search of `/usr/share/polkit-1/actions/` and `/etc/polkit-1/` for "adguard" returns nothing.
+`adguard_root_helper` is **not setuid** as shipped (`-rwxr-xr-x potworny potworny`, in `~/.local/opt/adguard-cli/`) and the package ships **no polkit policy** — a search of `/usr/share/polkit-1/actions/` and `/etc/polkit-1/` for "adguard" returns nothing.
 
-So there is no existing escalation path to reuse. Anything needing root — `proxy_mode: auto` (system-wide traffic redirection), system DNS filtering, installing the CA into the system trust store — requires us to author our own polkit action. See `architecture.md` §6.
+**But AdGuard ships its own escalation path, and it is the one to use.** Measured from the binary's strings, `adguard-cli` checks the helper three ways and tells the user exactly how to satisfy the check:
+
+```
+Root helper check: owned_by_root={}, has_suid={}, is_executable={}
+Automatic mode requires root helper to have suid bit set
+Automatic mode requires root helper to be set up, do you want to set it up?
+Please run `sudo {} -s` to set it
+```
+
+So `sudo ~/.local/opt/adguard-cli/adguard_root_helper -s` is AdGuard's own documented setup, and once it has run, `config set proxy_mode auto` needs no privilege from us at all. An `adguard-ui-helper` of our own would duplicate a root capability that already exists and would shell out to the same unprivileged `config set` in the end. **We author no polkit action and no privileged binary** — the GUI stats the helper for the same three properties and, when they are unmet, shows AdGuard's command with an explanation. See `architecture.md` §6.
+
+The reason to leave that `sudo` to the user rather than run it for them: the helper lives in a user-writable directory, so the suid bit makes anyone who can write that file root. That is AdGuard's design decision, and the user opted into it by installing AdGuard — but it is not something to confer from behind a button.
+
+An earlier revision of this section concluded there was "no existing escalation path to reuse". That was wrong; it was inferred from the file mode without reading the binary.
 
 ---
 
@@ -442,10 +497,10 @@ Caveats before building stats on this:
 Anything in the `adguard-cli` wrapper crate must:
 
 1. Strip ANSI from every captured stream.
-2. Treat exit 1 as *our* bug — with the two exceptions in [§3](#exit-1-is-usually-our-bug-but-not-always) — and detect user-facing failure by matching stdout text.
+2. Treat exit 1 as *our* bug — with the three exceptions in [§3](#exit-1-is-usually-our-bug-but-not-always) — and detect user-facing failure by matching stdout text. A failure whose only text is on stdout is never our command line, whatever the exit status.
 3. Verify state changes by re-reading state, not by trusting exit 0.
 4. Never write `proxy.yaml`, and never write the `.db` files.
-5. Never invoke `configure`, `activate` (bare), or any command expecting a TTY.
+5. Never invoke `configure`, or any other command that expects a TTY to be useful. `activate` is the one exception, and only because closing stdin makes its no-TTY branch the only branch: it prints a log-in link and returns rather than waiting for anything ([§7](#7-commands-that-need-a-tty)).
 6. Apply a timeout — network commands (`check-update`, `filters update`, `update`) can hang; a filter update failure was observed in the logs (`HttpClientNetworkError` reaching `filters.adtidy.org`).
 7. Run off the GTK main thread.
 8. Spawn with **stdin closed**, so a command that would prompt cannot hang ([§7](#the-wrapper-closes-stdin-so-no-tty-is-the-only-path)).

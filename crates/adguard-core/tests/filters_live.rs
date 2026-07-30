@@ -46,6 +46,20 @@ fn check_catalogue(path: PathBuf, label: &str) {
         "{label}: user-rules pseudo-filter leaked into filters()"
     );
 
+    // The Status page's figure and the Filters page's switches are two
+    // different queries over one table, and the whole point of the figure is
+    // that a user can count the switches and get the same answer. Two ways for
+    // that to break silently: `enabled_count` forgetting to exclude the
+    // user-rules pseudo-filter — which `filters()` does exclude, so the figure
+    // would read one high whenever the user has their own rules switched on —
+    // and the `is_enabled` column changing meaning underneath both.
+    let counted = catalogue.enabled_count().expect("should count filter");
+    let enabled = filters.iter().filter(|f| f.enabled).count();
+    assert_eq!(
+        counted, enabled,
+        "{label}: enabled_count() disagrees with filters() about how many are on"
+    );
+
     for filter in &filters {
         assert!(
             groups.iter().any(|g| g.id == filter.group_id),

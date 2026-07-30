@@ -198,7 +198,7 @@ cargo test -p adguard-core --test config_mutate -- --ignored --nocapture
 
 `config_mutate` is deliberately kept to one boolean round-trip plus the claim the whole no-YAML-writes rule rests on — that `config set` rewrites exactly one line and preserves every comment. Anything riskier belongs in `config_sandbox`.
 
-The `*_live` suites are safe and run by default; they read the real `proxy.yaml` and filter databases, and **skip** rather than fail when AdGuard CLI is not installed.
+The `*_live` suites are safe and run by default, and **skip** rather than fail when AdGuard CLI is not installed. `config_live` and `filters_live` read the real `proxy.yaml` and filter databases. `license_live` is the one that shells out — `adguard-cli license`, read-only, ~20 ms — because the licensed three-line reading cannot be captured in a sandbox: a sandbox is unlicensed by construction. It skips again when this install is not licensed, and it is written so that no assertion message can print the key.
 
 ### Driving the GUI against a fake config
 
@@ -215,6 +215,10 @@ XDG_DATA_HOME=/tmp/fake cargo run -p adguard-gui
 ```
 
 Writes made in the app land in the fake config. Note the Filters page will fail to open its catalogue there unless the `agflm_*.db` files are copied across too — the CLI seeds a fresh data directory with its own bundled defaults on first use.
+
+That seeding is also why nothing should run two `adguard-cli` commands at once against a brand-new directory: one of them loses a race with the other's initialisation and exits 1 with `Filter manager initialization failed` (contract §3). The app itself no longer does this — `StatusPage::reload` sequences its two reads — but a script of your own easily can. Run any `adguard-cli` command against the directory first and it is settled for good.
+
+A fake config is also an *unlicensed* one, which is the only way to see the Status page's activation flow. If you are going to press **Activate…** there, make sure the log-in link cannot reach a browser that is signed in to AdGuard — it is a real link, and completing it would bind a device slot to a throwaway install. `handoff.md` §4 has the two lines that arrange that.
 
 GUI code needs a display. Under Wayland, headless CI requires a compositor:
 
@@ -262,11 +266,7 @@ install -Dm644 data/autostart/*.desktop ~/.config/autostart/
 
 **The desktop file, the GTK application ID, and `StartupWMClass` must all be the same reverse-DNS string.** If they diverge, GNOME shows a second, unbranded icon below the dock separator instead of grouping the window with its launcher.
 
-The polkit action must go to a system path — this step needs root and is the only part that does:
-
-```bash
-sudo install -Dm644 data/*.policy /usr/share/polkit-1/actions/
-```
+**Nothing here needs root, and nothing should.** This section used to end with a `sudo install` of `data/*.policy` into `/usr/share/polkit-1/actions/`. Do not run it. The application performs no privileged operation and ships no privileged component (`architecture.md` §6): `auto` mode uses AdGuard's own root helper, set up by the user with AdGuard's own `sudo` command. The `.policy` file is dead scaffolding naming a helper binary that will never be written — installing it would leave a root-owned file authorising nothing, and removing it again needs root a second time. `handoff.md` §3 has its deletion as part of the auto-mode work.
 
 ---
 
@@ -279,10 +279,10 @@ Assessed for this machine specifically:
 | **Tarball + `.desktop`** | Ready | Least friction; matches existing habit for personal tools. |
 | **`.deb`** | `dpkg-dev` 1.23.7 present; `debhelper` **not** installed | `dpkg-deb -b` on a hand-built tree works today. `sudo apt install debhelper devscripts` for a proper `debian/` setup. |
 | **Flatpak** | **Not installed at all** | Needs `flatpak` + `flatpak-builder` + the `org.gnome.Platform//50` runtime/SDK (~1–2 GB download). The most "correct" GNOME distribution route, but greenfield here. |
-| **Snap** | `snapd` 2.76.1 running; `snapcraft` **not** installed | Strict confinement would fight both `pkexec` and reaching `~/.local/bin/adguard-cli`. Not recommended. |
-| **AppImage** | No tooling | Awkward for an app shipping a polkit policy. |
+| **Snap** | `snapd` 2.76.1 running; `snapcraft` **not** installed | Strict confinement would fight reaching `~/.local/bin/adguard-cli` and its data directory — which is the whole application. Not recommended. |
+| **AppImage** | No tooling | Possible; nothing in the app resists it. |
 
-Recommendation: **tarball for personal use, `.deb` for release.** Both keep `pkexec` and the polkit action working, which confined formats do not.
+Recommendation: **tarball for personal use, `.deb` for release.** The constraint is not privilege — there is none to preserve — but reach: this GUI is a front-end to a binary and a data directory under `$HOME`, and confinement is what breaks that.
 
 Note that a packaged GUI still depends on `adguard-cli` being installed separately — declare it, and fail with a clear message rather than a crash when the binary is absent (see `adguard-core::paths`).
 

@@ -18,9 +18,9 @@ Read [`cli-contract.md`](cli-contract.md) first. It records the measured behavio
 | Process model | **No daemon of our own** | The AdGuard proxy is already the daemon. CLI calls cost 10–30 ms, so there is nothing to amortise. |
 | Build system | **Cargo** | Keep it plain. Meson only if flatpak packaging later demands it. |
 | v1 scope | Tray + core controls | See §7. |
-| Privileged ops | polkit action + `pkexec` | Needed for `auto` mode; see §6. |
+| Privileged ops | **None of our own** | AdGuard already ships the root helper `auto` mode needs; we detect and instruct. See §6. |
 
-**The no-daemon point is worth stating explicitly**, because it differs from `LenovoLegionToolLinux`. That project needs `legiond` because hardware registers require sustained root. Here, root is needed only for occasional discrete actions (switching to auto mode, system DNS, system cert install) — so escalate per-action via `pkexec` and keep the GUI a plain user-session app. A persistent root daemon would be a larger attack surface for no benefit.
+**The no-daemon point is worth stating explicitly**, because it differs from `LenovoLegionToolLinux`. That project needs `legiond` because hardware registers require sustained root. Here, root is needed only for one occasional action — setting up AdGuard's own root helper so `auto` mode can work — and AdGuard already provides the command for it, so the GUI stays a plain user-session app that never escalates at all. A persistent root daemon would be a larger attack surface for no benefit; so, it turns out, would a one-shot helper of ours. See §6.
 
 ---
 
@@ -36,14 +36,15 @@ adguard-ui/
 │   │   ├── cli.rs              # process wrapper: spawn, ANSI strip, error mapping, timeouts
 │   │   ├── config.rs           # read proxy.yaml (yaml-rust2); writes delegate to cli.rs
 │   │   ├── filters.rs          # read-only rusqlite over agflm_*.db
-│   │   ├── model.rs            # ProxyStatus, Filter, FilterGroup, Userscript, License, Toggles
+│   │   ├── model.rs            # ProxyStatus, Filter, FilterGroup, License, Toggles, settings tables
 │   │   └── paths.rs            # locate binary + data dir, XDG-aware
 │   ├── adguard-gui/            # GTK4 + libadwaita application
+│   │   └── style.rs            # the app's one stylesheet: layout + theme-derived tints, §5
 │   └── adguard-tray/           # ksni StatusNotifierItem — a library, not a binary
 ├── data/
 │   ├── com.github.<you>.AdGuardUI.desktop
 │   ├── com.github.<you>.AdGuardUI.metainfo.xml
-│   ├── com.github.<you>.AdGuardUI.policy      # polkit action
+│   ├── autostart/                             # the --background entry, §4
 │   └── icons/
 └── docs/
 ```
@@ -65,7 +66,8 @@ Three channels, each with a single direction and purpose:
 
    WRITE all ───────► adguard-cli <subcommand>              only mutation path
 
-   PRIVILEGED ──────► pkexec adguard-ui-helper <action>     auto mode, system DNS, system cert
+   PRIVILEGED ──────► nothing. AdGuard's own root helper,    auto mode; §6
+                      set up by the user, out of process
 ```
 
 **Reads never go through the CLI where a file will do.** Two reasons, both from the contract doc: the `filters list` table is unparseable for long titles (column overflow), and `config show` masks secrets and folds sections. Files give exact values; the CLI gives a presentation layer.
@@ -85,6 +87,10 @@ There is no push/event mechanism anywhere in the CLI, so:
 So the monitor compares content, not notification: `config::Watch` holds the text behind the last reading and answers whether anything actually moved, and that answer — not the event — drives the repaint. Debouncing alone would not help, because the churn never stops. Measured with the app running: 40 s of idling moves the mtime and produces no reconcile at all; an edit produces exactly one; a bare `touch` produces none. The same measurement has a small silver lining — a key deleted from the file is silently restored with its default by the next invocation, so a missing setting is self-healing.
 
 A repaint driven from outside goes to `reconcile`, never `reload`: reload swaps in a spinner and rebuilds every widget, which would discard the Advanced page's per-row `painted` guard and with it any half-typed entry. The one case that does rebuild is a page showing a spinner or an error, which has no rows to patch — so a config that was unreadable and becomes readable heals itself.
+
+**The monitor cannot tell an outside edit from one of our own**, and it must not pretend otherwise. `Watch::prime` runs once at install and nothing re-primes after the app's own `config set`, so a user flipping a switch in the UI produces a genuine content change and therefore a reconcile — a harmless no-op repaint, since the rows already match. Re-priming after each write is not the fix: our write and the re-prime are not atomic, and losing that race means either announcing a change that was ours or missing one that was not.
+
+So the *signal* is "the file moved"; the *fact worth reporting* is "a row you can see moved". `reconcile` returns how many displayed rows actually differed, and only a non-zero count raises an `AdwToast`. Self-inflicted writes then suppress themselves for free, and an edit to a key no page displays stays silent — which is right, because nothing the user is looking at changed. The stderr diagnostic follows the same rule and must not claim the change came from outside the app; it cannot know that.
 
 ### Verify, don't trust
 
@@ -134,15 +140,17 @@ An `AdwApplicationWindow` with `AdwNavigationSplitView`, plus `AdwToastOverlay` 
 
 | View | Contents | Backing |
 | --- | --- | --- |
-| **Status** | Running/stopped, start/stop/restart, HTTP + SOCKS5 endpoints, licence state | `status`, `license` |
+| **Status** | Hero panel: protection on/off, one primary action, restart; three at-a-glance figures; HTTP + SOCKS5 endpoints; licence state | `status`, `license`, plus `proxy.yaml` and `agflm_*.db` for the figures |
 | **Protection** | `AdwSwitchRow`s: ad blocking, HTTPS filtering, stealth mode, DNS filtering, Safe Browsing, CRLite | `proxy.yaml` → `config set` |
 | **Filters** | `AdwPreferencesGroup` per `filter_group`, switch per filter, custom-filter add | `agflm_standard.db` → `filters …` |
-| **DNS** | DNS filter list, upstream/fallback/bootstrap entries | `agflm_dns.db`, `dns_filtering.*` |
-| **Userscripts** | Installed list, enable/disable/remove | `userscripts list` (parseable — small, stable) |
+| **DNS** | DNS filter list, upstream/fallback/bootstrap entries, listen port | `agflm_dns.db`, `dns_filtering.*` |
 | **Advanced** | Ports, listen address, auth, outbound proxy, worker threads, log level | `proxy.yaml` → `config set` |
 
 Notes that shape the widgets:
 
+- **Status is the one page that is not a settings list**, and it is built differently on purpose: it answers *am I protected?*, which a row reading `Status: Running` answers in the same visual weight as the eleven rows around it. The answer is lifted into a tinted `.card` panel carrying the state, one sentence, and the single lifecycle action that applies — Start *or* Stop, never both — with the rows below it as the detail. `status.rs` opens with the reasoning.
+- **The three figures on Status never come from `adguard-cli`.** They are read from `proxy.yaml` (modules on, out of six) and the two catalogues (`Catalogue::enabled_count`), which is what lets them be refreshed on a page switch: `status` is on a 2 s timer, and a figure that needed the CLI could not be recounted freely without risking the concurrent-invocation failure in contract §3.
+- **One stylesheet, `gui/style.rs`**, at `APPLICATION` priority — above the platform stylesheet, below the user's `gtk.css`. It holds layout and tints only, and every colour in it is `alpha(@success_color, …)` or similar rather than a literal, so dark mode, the user's accent colour and high contrast all still apply. Prefer libadwaita's own classes (`.card`, `.title-2`, `.dim-label`, `.numeric`, `.success`) over adding to it.
 - Use the **localised** filter names from `filter_localisation` (3828 rows, keyed by `lang`) rather than the English `filter.title`, matching the system locale. The tags are POSIX-style (`pt_BR`, not `pt-BR`) — see contract §6.
 - **Filter text is data, not markup.** `AdwPreferencesRow:use-markup` and `AdwToast:use-markup` both default to *true*, and filter 216 is literally titled "Official Polish filters for AdBlock, uBlock Origin & AdGuard". Left on, Pango fails to parse the `&`, GTK warns, and the label renders mangled. Every row and toast carrying AdGuard's text — or the CLI's — must turn markup off, and must do so **before** the title is assigned: the label is rendered as the property is set, so passing a title to the builder warns regardless of what happens afterwards. (`AdwPreferencesGroup` has no such property; its heading is a plain `GtkLabel`, where markup is off by default.)
 - Reconcile a switch **per row**, not by rebuilding the page: a 54-filter group like "Language-specific" makes losing the scroll position on every toggle obvious. The row keeps the last database-confirmed state, so `action_for` always decides from observed reality, and a programmatic write is flagged so it is not mistaken for a click.
@@ -150,10 +158,13 @@ Notes that shape the widgets:
 - Enabling authentication is **not sufficient**: the same silent no-op happens when `listen_auth.username` *or* `listen_auth.password` is empty (contract §5). The plan cannot fix that by reordering, and must not invent a credential the user could never log in past — so it refuses and names what is missing, and the Advanced page states the requirement in the group description before the user meets it. Conversely, a *retreat* to loopback always succeeds from any state, so it is never gated: a user exposed with unusable credentials must always be able to come back.
 - **The Advanced page enforces the invariant from both directions.** Authentication cannot be switched off while the listen address is beyond loopback, and moving beyond loopback asks for confirmation first — exposing a proxy to the network is not something to do on a mistyped keystroke. The row also carries a warning while it *is* exposed, for the same reason the DNS filtering row carries one while it is inert.
 - **Numeric settings are the GUI's responsibility to bound.** `config set` type-checks and nothing more: it accepts port `99999`, `worker_threads 0`, and `3.5` — which writes a float that every later integer read then fails on (contract §5). `Setting::permits_number` holds the ranges. A file value outside them renders read-only with the real number shown, never clamped, since clamping the display would invite the user to write the clamped value back by accident.
-- A setting that reads "on" is not necessarily doing anything. `dns_filtering.enabled` has no effect in `manual` proxy mode unless `dns_filtering.listen_port` names a real port, and the CLI enforces no such dependency — so the Protection page marks the row rather than letting the switch imply protection the user does not have.
+- A setting that reads "on" is not necessarily doing anything. `dns_filtering.enabled` has no effect in `manual` proxy mode unless `dns_filtering.listen_port` names a real port, and the CLI enforces no such dependency — so the Protection page marks the row rather than letting the switch imply protection the user does not have. **The DNS page carries the cure**, and Protection's caveat links to it: a row offering the three states the config file documents — disabled (`-1`), automatic port (`0`), or a fixed port (`N`, bounded 1..65535 through `Setting::permits_number` like every other number). Nothing is written until the user picks one, so no listener ever appears unbidden. Before that row ships, **measure which address the listener binds**: if it is not loopback it needs the same confirmation-and-warning treatment `listen_address` already has, and the row's description should state the answer either way.
 - **Distinguish "off" from "unknown".** A key that is absent, or holds something that is not a boolean, renders as an insensitive row reading *unavailable* — never as off. Claiming ad blocking is disabled when we simply could not read the setting is the more dangerous of the two errors.
 - First run replaces the TTY-only `configure` wizard with an `AdwNavigationView` assistant issuing discrete `config set` calls.
-- Licence activation opens the activation URL with `gtk::UriLauncher`, then polls `license` until `APP_ACTIVE` (contract §7).
+- **Licence activation is user-driven, not polled.** Run `activate`, take the URL out of its no-TTY message, open it with `gtk::UriLauncher`, and show a *finish activation* button that re-runs `activate` once and then reads `license`. The obvious design — poll `license` until `APP_ACTIVE` — cannot work: while unlicensed, `license` is itself refused, so there is no status to poll; and the CLI says the flow completes by running `activate` again, so waiting alone may never succeed (contract §7). The button is not a lesser version of the poll, it is the only shape the CLI supports. What makes that shape sound rather than merely available is measured: the `appid` in the link belongs to the data directory, so running `activate` again asks after the same pending activation rather than starting a rival one.
+- **The link is shown as well as opened.** `UriLauncher` can fail — no browser, a portal that refuses — and a flow whose only exit is a browser that did not open is a dead end. The row carries the link with a copy button, and the launcher's failure becomes a toast rather than the end of the road.
+- **Activation is offered only from a licence that is readably inactive.** Not from one we merely failed to read: what `activate` does to a working licence is not measured, and the app should not find out on a user's machine. "The licence is not active" and "the licence could not be read" are different facts and the page keeps them apart, exactly as it distinguishes "off" from "unknown" everywhere else.
+- **A successful `license` read is sensitive output.** It carries the owner's e-mail and the licence key in full. `License::masked_key` shows the key's last four characters and nothing else, and `License`'s `Debug` is hand-written to mask both fields, so a stray `{:?}` in a log or an error cannot leak them. Note that the crate's older scrubber is no help here: `redact_error` replaces a secret the *caller* already knows, which is why its only caller is `Cli::set_secret`. A licence key is what came back, so there is nothing to hand it — `Cli::license` redacts by shape instead, with `redact_values` (contract §3).
 
 ### GNOME dock icon grouping
 
@@ -163,29 +174,33 @@ Set the GTK application ID, the `.desktop` filename, and `StartupWMClass` to the
 
 ## 6. Privileged operations
 
-`auto` proxy mode is in scope for v1. There is nothing to reuse: `adguard_root_helper` is not setuid, and the package ships no polkit policy (contract §8).
+`auto` proxy mode is in scope for v1. **This application performs no privileged operation and ships no privileged component** — no helper binary, no polkit action, no `pkexec` call, no setuid bit.
+
+That is possible because AdGuard already ships the escalation path, which an earlier revision of contract §8 missed. `adguard-cli` gates auto mode on `adguard_root_helper` being `owned_by_root`, `has_suid` and `is_executable`, and when the check fails it names the fix itself: `sudo <path>/adguard_root_helper -s`. Once that has run, switching mode is an ordinary unprivileged `config set proxy_mode auto`.
 
 Design:
 
-1. A small **`adguard-ui-helper`** binary with a closed, enumerated set of actions — `set-proxy-mode auto|manual`, `install-system-cert`, `set-system-dns on|off`. It takes no free-form arguments, no paths, no shell strings.
-2. A polkit action file in `data/`, `auth_admin_keep`, so one authentication covers a short burst of changes.
-3. The GUI invokes it via `pkexec`; never `sudo`, never a setuid bit of our own.
-4. The helper validates every argument against its enum and refuses anything else. It performs the change by calling `adguard-cli config set proxy_mode …` (or the documented system operation) — it does **not** reimplement AdGuard's logic.
-5. Toggles that require escalation are visually marked so the authentication prompt is never a surprise.
+1. **Detect.** `stat` the helper for the same three properties `adguard-cli` checks. Report the check, not a guess — three separate facts, so a helper that is root-owned but not suid says so.
+2. **Instruct.** When unmet, the Advanced page shows AdGuard's own command with a copy button, an explanation of what the suid bit grants, and no way to run it from the app. Re-check when the window regains focus, so a user who runs it in a terminal sees the row change without hunting for a refresh.
+3. **Switch.** When met, `config set proxy_mode auto` — a plain write through the path every other setting uses.
 
-Because `adguard-cli` and its data live under `~/.local`, a root-invoked helper must be explicit about which user's config it edits — pass the target `$HOME`/UID explicitly rather than relying on the ambient environment, and refuse to operate on a path outside that user's data dir. Getting this wrong is a local privilege-escalation bug.
+**Why the app does not run that `sudo` for the user, even via `pkexec`.** The helper lives in a user-writable directory, so setting suid-root on it makes anyone who can write that file root. AdGuard chose that design and the user accepted it by installing AdGuard; conferring it from behind a GUI button is a different act from typing `sudo` at a prompt, and the deliberateness is the only safeguard the arrangement has.
+
+The corollary is worth stating for anyone tempted to add one later: a root-invoked helper of ours would have to be explicit about which user's config it edits — `adguard-cli` and its data live under `~/.local`, so it would need the target `$HOME`/UID passed explicitly and would have to refuse any path outside that user's data dir. Getting that wrong is a local privilege-escalation bug. Not writing the helper is how this project avoids owning that problem.
 
 ---
 
 ## 7. v1 scope
 
-**In:** status + lifecycle control, protection toggles, filter enable/disable with the SQLite-backed catalogue, tray icon with quick toggles, first-run assistant, auto-mode switch via polkit.
+**In:** status + lifecycle control, protection toggles, filter enable/disable with the SQLite-backed catalogue, tray icon with quick toggles, first-run assistant, licence activation, the DNS page including its listen port, and the auto-mode switch — the last as detection and instruction, never as an escalation of our own (§6).
 
-**Out (v2):** live blocked-request stats (needs log tailing; format undocumented and unstable — contract §9), userscript installation from URL, HAR capture, `speed` benchmark UI, import/export, full advanced-settings parity.
+**Out (v2):** live blocked-request stats (needs log tailing; format undocumented and unstable — contract §9), **userscripts entirely**, HAR capture, `speed` benchmark UI, import/export, full advanced-settings parity.
+
+Userscripts are out because there is only one. `userscripts list` returns a single entry, `adguard-extra`, and `proxy.yaml` says in AdGuard's own words that only AdGuard Extra is supported; with installation deferred, the feature is one switch for one script that ships pre-enabled. A sidebar page for that is navigation without content. This section is the scope authority — §5 and `handoff.md` no longer list a Userscripts view, and if the upstream ever supports more, this is the decision to revisit.
 
 Ship the tray + core controls first; it is the part that replaces day-to-day terminal use.
 
-Status: Status, Protection, Filters (HTTP) and Advanced are done; the tray carries start/stop plus the six Protection toggles as quick toggles (§4); and `--background` plus the autostart entry put that tray on screen at login without a window. Still open for v1: the first-run assistant, the DNS page, and auto-mode via polkit.
+Status: Status, Protection, Filters (HTTP), Advanced and Stealth are done; licence activation lives on the Status page; the tray carries start/stop plus the six Protection toggles as quick toggles (§4); and `--background` plus the autostart entry put that tray on screen at login without a window. Still open for v1: the first-run assistant, the DNS page, auto-mode detection, and the reconcile toast (§3).
 
 ---
 
@@ -199,7 +214,9 @@ Status: Status, Protection, Filters (HTTP) and Advanced are done; the tray carri
 | SQLite schema changes | Treat as read-only cache; degrade to `filters list` parsing (with its known limits) if the schema is unrecognised, rather than crashing. |
 | `proxy.yaml` key renamed or retyped upstream | Per-key tolerant reads, so one bad key costs one row; `config_live.rs` asserts every key the UI depends on still resolves in the real file *and* is still recognised by `config get`. |
 | `proxy.yaml` comments destroyed | Never write YAML; enforced by keeping write access out of `config.rs`, and asserted by `config_mutate::a_write_disturbs_exactly_one_line`. |
-| Helper misuse | Enumerated actions only, no free-form input, explicit target user. |
+| A privileged helper of ours being misused | Retired as a risk: there is no such helper, and §6 explains why there will not be. `auto` mode uses AdGuard's own, set up by the user. |
+| A licence key or owner e-mail leaking into a toast or log | `license` returns both on every successful read. `License::masked_key` is the only sanctioned way to show the key; `License`'s `Debug` masks both fields so a `{:?}` cannot leak them; and `Cli::license` redacts the values out of its own parse-failure message, which would otherwise quote the reading verbatim. `license_live.rs` asserts the first two against the machine's real key; the third is pinned by `cli::tests::license_redacts_what_it_could_not_parse`, which goes through `Cli::license` rather than the helper — deleting the call at its one call site used to leave the whole suite green. |
+| A GUI that blames the user's licence — or itself — for the wrong thing | Three ways an invocation can fail are told apart rather than flattened: no licence (`Unlicensed`), the program refusing on stdout (`Refused`), and a command line we built wrong (`BadInvocation`). The middle one was found by driving the licence page against a never-used data directory; see contract §3. |
 | Proxy stopping underneath the UI | Status polling already detects it; surface it as a toast rather than failing silently. |
 | A test suite that edits the user's real settings | `Cli::with_xdg_data_home` gives the real binary a throwaway config, so the write path — including the cases that expose the proxy — is covered against a copy (contract §5). Only one boolean round-trip still touches the live install, behind a restoring `Drop` guard. |
 | A credential leaking into a log or toast | `config set` echoes the value it was given and our own error type quotes the command line; `Cli::set_secret` scrubs both. The value is still visible in `argv` for the ~20 ms of the call — unavoidable, since the CLI's only other route for a credential is the interactive prompt. |

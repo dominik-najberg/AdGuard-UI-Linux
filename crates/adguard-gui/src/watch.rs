@@ -26,6 +26,7 @@ use gtk4 as gtk;
 
 use crate::advanced::AdvancedPage;
 use crate::protection::ProtectionPage;
+use crate::status::StatusPage;
 use crate::worker;
 
 /// A live subscription to `proxy.yaml`.
@@ -47,6 +48,9 @@ struct State {
     /// again since that read started, so exactly one more look is owed —
     /// however many events arrived, since each look reads the current file.
     dirty: Cell<bool>,
+    /// Only its module count is reconciled from here — the rest of that page is
+    /// `status` output, which this file says nothing about.
+    status: Rc<StatusPage>,
     protection: Rc<ProtectionPage>,
     /// Every table-driven page. Both render from `proxy.yaml`, so both are
     /// reconciled from one reading of it.
@@ -59,6 +63,7 @@ struct State {
 /// Failure is not fatal and is not reported: the refresh button still works,
 /// which is exactly where the app was before this existed.
 pub fn install(
+    status: &Rc<StatusPage>,
     protection: &Rc<ProtectionPage>,
     tables: &[Rc<AdvancedPage>],
 ) -> Option<ConfigWatch> {
@@ -82,6 +87,7 @@ pub fn install(
         watch: RefCell::new(Some(watch)),
         busy: Cell::new(false),
         dirty: Cell::new(false),
+        status: status.clone(),
         protection: protection.clone(),
         tables: tables.to_vec(),
     });
@@ -134,6 +140,7 @@ fn look(state: &Rc<State>) {
                 // traffic. It is also a permanent diagnostic for the next
                 // person who wonders whether the monitor is doing anything.
                 eprintln!("adguard-ui: proxy.yaml changed outside the app, reconciling");
+                state.status.reconcile(&config);
                 state.protection.reconcile(&config);
                 for page in &state.tables {
                     page.reconcile(&config);

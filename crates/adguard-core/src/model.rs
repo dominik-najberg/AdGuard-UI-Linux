@@ -17,6 +17,89 @@ pub struct ProxyStatus {
     pub system_dns_filtering: bool,
 }
 
+/// A successful reading of `adguard-cli license`.
+///
+/// Measured on v1.4.13 against the licensed install on this machine: three
+/// lines on stdout, exit 0, nothing on stderr, and — unusually for this CLI —
+/// no ANSI escapes at all.
+///
+/// ```text
+/// License owner: someone@example.com
+/// License key: XXXXXXXXXXXXXXXX
+/// License status: APP_ACTIVE
+/// ```
+///
+/// # Every field here is sensitive
+///
+/// The key is a secret and the owner is personal data, which makes this the one
+/// state type in this crate that must not be printed whole. [`Self::masked_key`]
+/// is the only sanctioned way to show the key, and the `Debug` implementation
+/// below is hand-written so that a `{:?}` in a log line, a test failure or an
+/// error path cannot leak either of them (`architecture.md` §8).
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct License {
+    /// The account the licence belongs to — an e-mail address.
+    pub owner: String,
+    /// The licence key, in full. Show it through [`Self::masked_key`].
+    pub key: String,
+    /// The CLI's own status word, e.g. `APP_ACTIVE`. Kept verbatim rather than
+    /// mapped to a boolean: a status we do not recognise should render as
+    /// itself, not as "inactive".
+    pub status: String,
+}
+
+impl License {
+    /// The status word of a licence that is working.
+    pub const ACTIVE: &'static str = "APP_ACTIVE";
+
+    /// How much of the key [`Self::masked_key`] leaves visible —
+    /// `architecture.md` §5: "mask the key to its last four characters".
+    const VISIBLE: usize = 4;
+
+    /// Is this licence actually working?
+    ///
+    /// Compared case-insensitively for the same reason config values are: the
+    /// spelling is the CLI's, and matching it exactly would turn a cosmetic
+    /// upstream change into a user being told their licence is dead.
+    pub fn is_active(&self) -> bool {
+        self.status.eq_ignore_ascii_case(Self::ACTIVE)
+    }
+
+    /// The key with everything but its last four characters replaced.
+    ///
+    /// Enough to tell two licences apart or to read down the phone to support,
+    /// and not enough to use. A key of four characters or fewer is masked
+    /// **entirely** — the rule is "the last four", not "at least the last
+    /// four", and a short value is far more likely to be junk than a key worth
+    /// revealing.
+    ///
+    /// Length is preserved, which says how long the key is. That is not a
+    /// secret: every key AdGuard issues is sixteen characters, measured.
+    pub fn masked_key(&self) -> String {
+        let count = self.key.chars().count();
+        let visible = if count <= Self::VISIBLE { 0 } else { Self::VISIBLE };
+        let mut masked: String = "•".repeat(count - visible);
+        masked.extend(self.key.chars().skip(count - visible));
+        masked
+    }
+}
+
+/// Hand-written so the key and the owner cannot ride out on a `{:?}`.
+///
+/// Both of the derived alternative's escape routes are real: `Error` values are
+/// printed with `{err:?}` all over the test suites, and a `dbg!` left in a page
+/// would put a licence key on stderr. Masking here means the leak has to be
+/// written deliberately, by naming the field.
+impl std::fmt::Debug for License {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("License")
+            .field("owner", &"<hidden>")
+            .field("key", &self.masked_key())
+            .field("status", &self.status)
+            .finish()
+    }
+}
+
 /// A switch on the Protection page.
 ///
 /// Each variant names one boolean in `proxy.yaml`. [`Self::key`] is both the
@@ -785,6 +868,86 @@ impl FilterCatalogue {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The real shape, with the key replaced by sixteen characters of the same
+    /// length as the one this machine holds.
+    fn license() -> License {
+        License {
+            owner: "someone@example.com".to_owned(),
+            key: "ABCDEFGH12345678".to_owned(),
+            status: License::ACTIVE.to_owned(),
+        }
+    }
+
+    #[test]
+    fn masking_keeps_only_the_last_four_characters() {
+        let license = license();
+        assert_eq!(license.masked_key(), "••••••••••••5678");
+        assert!(
+            !license.masked_key().contains("ABCDEFGH"),
+            "the key survived masking"
+        );
+    }
+
+    /// The rule is "the last four", not "at least the last four": a value too
+    /// short to mask is not a reason to print it in full.
+    #[test]
+    fn a_short_key_is_masked_entirely() {
+        for key in ["", "1", "abcd"] {
+            let license = License {
+                key: key.to_owned(),
+                ..license()
+            };
+            let masked = license.masked_key();
+            assert_eq!(masked.chars().count(), key.chars().count());
+            assert!(
+                masked.chars().all(|c| c == '•'),
+                "{key:?} rendered as {masked:?}"
+            );
+        }
+    }
+
+    /// A key is bytes, not ASCII, and slicing one by byte index would panic on
+    /// the first multi-byte character.
+    #[test]
+    fn masking_counts_characters_not_bytes() {
+        let license = License {
+            key: "ключ-ЖЖЖЖ".to_owned(),
+            ..license()
+        };
+        assert_eq!(license.masked_key(), "•••••ЖЖЖЖ");
+    }
+
+    /// The one thing that must never work: a `{:?}` that carries the secret.
+    /// `Error` values are printed this way throughout the test suites.
+    #[test]
+    fn debug_leaks_neither_the_key_nor_the_owner() {
+        let printed = format!("{:?}", license());
+        assert!(!printed.contains("ABCDEFGH12345678"), "{printed}");
+        assert!(!printed.contains("someone@example.com"), "{printed}");
+        // The status is not sensitive and is the part worth having in a log.
+        assert!(printed.contains(License::ACTIVE), "{printed}");
+    }
+
+    /// The spelling is AdGuard's, so a case change upstream must not read as a
+    /// dead licence.
+    #[test]
+    fn active_is_recognised_whatever_its_case() {
+        for status in ["APP_ACTIVE", "app_active", "App_Active"] {
+            assert!(License {
+                status: status.to_owned(),
+                ..license()
+            }
+            .is_active());
+        }
+        for status in ["APP_EXPIRED", "", "ACTIVE_APP"] {
+            assert!(!License {
+                status: status.to_owned(),
+                ..license()
+            }
+            .is_active());
+        }
+    }
 
     fn filter(id: i64, enabled: bool, installed: bool) -> Filter {
         Filter {

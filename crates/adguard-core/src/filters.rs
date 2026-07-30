@@ -143,6 +143,31 @@ impl Catalogue {
         }
     }
 
+    /// How many filters in this set are switched on.
+    ///
+    /// For the Status page's at-a-glance count, which wants one number and not
+    /// the ~200-row localised catalogue [`read`] builds to get it.
+    ///
+    /// Counts the same population the Filters page renders switches for, so the
+    /// number and the page can be checked against each other: the user-rules
+    /// pseudo-filter is excluded, exactly as [`filters`] excludes it, because it
+    /// is not a list and the page shows it in a group of its own.
+    ///
+    /// [`read`]: Self::read
+    /// [`filters`]: Self::filters
+    pub fn enabled_count(&self) -> Result<usize, Error> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT COUNT(*) FROM filter WHERE is_enabled != 0 AND filter_id != ?1")?;
+        let mut rows = stmt.query([Filter::USER_RULES_ID])?;
+        match rows.next()? {
+            Some(row) => Ok(row.get::<_, i64>(0)?.max(0) as usize),
+            // `COUNT(*)` always returns a row; this arm exists so a driver that
+            // somehow disagreed reads as "no count" rather than panicking.
+            None => Ok(0),
+        }
+    }
+
     /// Re-read one filter's flags.
     ///
     /// This is the verification half of act -> re-read -> reconcile: a CLI
