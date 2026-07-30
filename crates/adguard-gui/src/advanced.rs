@@ -518,6 +518,43 @@ impl AdvancedPage {
                 None => self.mark_unavailable(row, "holds a value this page does not recognise"),
             },
         }
+
+        self.mark_unmet_dependency(row, config);
+    }
+
+    /// Flag a setting that reads fine but currently does nothing.
+    ///
+    /// Two `https_filtering` keys are documented as requiring `dns_filtering`,
+    /// and the CLI enforces neither — it accepts the write and reports success,
+    /// leaving a row that says "on" for protection the user does not have.
+    /// This is the same judgement the Protection page makes about DNS filtering
+    /// that is enabled but has no listen port: the honest rendering is the real
+    /// value plus a warning, not a lie in either direction.
+    ///
+    /// Deliberately **not** insensitive. The value is real and writable, and
+    /// greying it out would strand a user who wants to set it before switching
+    /// the dependency on — which is a perfectly sensible order to work in.
+    fn mark_unmet_dependency(&self, row: &Rc<Row>, config: &Config) {
+        let Some(required) = row.setting.requires() else {
+            return;
+        };
+        // A row already marked unavailable has a more urgent problem, and its
+        // explanation should not be overwritten by this one.
+        let resolved = match row.setting.kind {
+            Kind::Switch => config.bool_at(row.setting.key).is_some(),
+            Kind::Number { .. } => config.int_at(row.setting.key).is_some(),
+            Kind::Text { .. } => config.str_at(row.setting.key).is_some(),
+            Kind::Choice { options } => config.choice_at(row.setting.key, options).is_some(),
+        };
+        if !resolved || config.bool_at(required) == Some(true) {
+            return;
+        }
+
+        row.caveat.set_visible(true);
+        row.control.set_explanation(&format!(
+            "{} — no effect until {required} is on",
+            row.setting.description
+        ));
     }
 
     /// A key we could not read. Insensitive and explicit, never rendered as a

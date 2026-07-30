@@ -334,6 +334,13 @@ pub mod key {
 
     pub const DNS_LISTEN_PORT: &str = "dns_filtering.listen_port";
 
+    // Both documented in `proxy.yaml` as "Requires dns_filtering to be
+    // enabled", and neither enforced: measured, `config set
+    // https_filtering.encrypted_client_hello true` succeeds with
+    // `dns_filtering.enabled = false` and reports `Config has been updated`.
+    pub const HTTPS_ECH: &str = "https_filtering.encrypted_client_hello";
+    pub const FILTER_SECURE_DNS_MODE: &str = "https_filtering.filter_secure_dns_mode";
+
     // --- the Advanced page ---
     pub const LISTEN_ADDRESS: &str = "listen_address";
     pub const LISTEN_AUTH_ENABLED: &str = "listen_auth.enabled";

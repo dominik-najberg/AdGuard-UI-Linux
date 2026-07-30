@@ -479,7 +479,15 @@ fn sidebar_row(page: &Page) -> gtk::ListBoxRow {
     box_.append(&gtk::Image::from_icon_name(page.icon));
     box_.append(&gtk::Label::new(Some(page.title)));
 
-    gtk::ListBoxRow::builder().child(&box_).build()
+    let row = gtk::ListBoxRow::builder().child(&box_).build();
+    // Without this the row reaches the accessibility tree unnamed: it is a bare
+    // `GtkListBoxRow` wrapping an icon and a label, and neither is promoted to
+    // be the row's name. A screen reader then announces five anonymous list
+    // items where the whole navigation is — and, less importantly but usefully,
+    // nothing outside the process can tell the pages apart either, which is
+    // what stops a headless test from opening any page but Status.
+    row.update_property(&[gtk::accessible::Property::Label(page.title)]);
+    row
 }
 
 /// A toast carrying text we did not write.

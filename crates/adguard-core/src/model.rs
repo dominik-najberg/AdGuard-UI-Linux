@@ -159,6 +159,28 @@ impl Setting {
         }
     }
 
+    /// The setting that must be **on** for this one to do anything.
+    ///
+    /// `proxy.yaml` states these dependencies in its comments and nothing
+    /// enforces them. Measured: `config set
+    /// https_filtering.encrypted_client_hello true` succeeds and prints
+    /// `Config has been updated` with `dns_filtering.enabled = false`, leaving
+    /// a setting that reads "on" and does nothing. `architecture.md` §5 makes
+    /// that the GUI's problem — the same reason the Protection page marks DNS
+    /// filtering that is switched on but inert.
+    ///
+    /// A method over the key rather than a field on every literal: two of the
+    /// forty-odd settings have a dependency, and one place listing them reads
+    /// better than forty-two `requires: None`.
+    pub fn requires(self) -> Option<&'static str> {
+        match self.key {
+            crate::config::key::HTTPS_ECH | crate::config::key::FILTER_SECURE_DNS_MODE => {
+                Some(crate::config::key::DNS_FILTERING)
+            }
+            _ => None,
+        }
+    }
+
     /// The options of a [`Kind::Choice`], or `&[]`.
     pub fn options(self) -> &'static [&'static str] {
         match self.kind {
@@ -183,6 +205,10 @@ pub const LOG_LEVELS: &[&str] = &["info", "debug", "trace"];
 /// default (`'HTTP'`) do; the CLI accepts either case and preserves what it is
 /// given, so reads are case-insensitive.
 pub const OUTBOUND_MODES: &[&str] = &["HTTP", "HTTPS", "SOCKS4", "SOCKS5"];
+
+/// Valid `https_filtering.filter_secure_dns_mode` values, from the CLI's own
+/// refusal: *"Valid values are: off, transparent, redirect"*.
+pub const SECURE_DNS_MODES: &[&str] = &["off", "transparent", "redirect"];
 
 /// The Advanced page, in render order — `architecture.md` §5: ports, listen
 /// address, auth, outbound proxy, worker threads, log level.
@@ -393,7 +419,30 @@ pub const STEALTH: [SettingGroup; 5] = [
     },
 ];
 
-pub const ADVANCED: [SettingGroup; 4] = [
+pub const ADVANCED: [SettingGroup; 5] = [
+    SettingGroup {
+        title: "Secure DNS filtering",
+        description: "Both need DNS filtering switched on to have any effect, and \
+                      the CLI will not stop you setting them without it.",
+        settings: &[
+            Setting {
+                key: crate::config::key::FILTER_SECURE_DNS_MODE,
+                title: "Secure DNS filtering mode",
+                description: "Filters DoH/DoT requests through the local DNS proxy. \
+                              'transparent' filters inline; 'redirect' forces the \
+                              configured upstream",
+                kind: Kind::Choice {
+                    options: SECURE_DNS_MODES,
+                },
+            },
+            Setting {
+                key: crate::config::key::HTTPS_ECH,
+                title: "Encrypted Client Hello",
+                description: "Enables ECH for better privacy",
+                kind: Kind::Switch,
+            },
+        ],
+    },
     SettingGroup {
         title: "Manual proxy ports",
         description: "Ports AdGuard listens on in manual proxy mode. \
@@ -806,6 +855,43 @@ mod tests {
         keys.sort_unstable();
         keys.dedup();
         assert_eq!(keys.len(), count, "duplicate key in ADVANCED");
+    }
+
+    /// Exactly the two settings `proxy.yaml` documents as needing
+    /// `dns_filtering`, and nothing else. A dependency the GUI invents would be
+    /// as wrong as one it misses.
+    #[test]
+    fn only_the_documented_settings_declare_a_dependency() {
+        use crate::config::key;
+
+        let dependent: Vec<(&str, &str)> = ADVANCED
+            .iter()
+            .chain(STEALTH.iter())
+            .flat_map(|group| group.settings.iter())
+            .filter_map(|s| s.requires().map(|r| (s.key, r)))
+            .collect();
+
+        assert_eq!(
+            dependent,
+            vec![
+                (key::FILTER_SECURE_DNS_MODE, key::DNS_FILTERING),
+                (key::HTTPS_ECH, key::DNS_FILTERING),
+            ]
+        );
+    }
+
+    /// Both are reachable from a page, or the dependency marking has nowhere to
+    /// appear.
+    #[test]
+    fn the_dependent_settings_are_on_a_page() {
+        use crate::config::key;
+        let keys: Vec<&str> = ADVANCED
+            .iter()
+            .flat_map(|group| group.settings.iter())
+            .map(|s| s.key)
+            .collect();
+        assert!(keys.contains(&key::HTTPS_ECH));
+        assert!(keys.contains(&key::FILTER_SECURE_DNS_MODE));
     }
 
     /// Same rule for the Stealth table, and one more: the master switch must
