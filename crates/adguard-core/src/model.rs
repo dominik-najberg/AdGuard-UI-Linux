@@ -293,6 +293,16 @@ pub const OUTBOUND_MODES: &[&str] = &["HTTP", "HTTPS", "SOCKS4", "SOCKS5"];
 /// refusal: *"Valid values are: off, transparent, redirect"*.
 pub const SECURE_DNS_MODES: &[&str] = &["off", "transparent", "redirect"];
 
+/// Valid `proxy_mode` values, from the CLI's own refusal: *"Valid values are:
+/// manual, auto"* (contract §8).
+///
+/// `auto` needs AdGuard's root helper set up, and **the CLI does not check that
+/// when the value is written** — measured, `config set proxy_mode auto`
+/// succeeds with all three properties unmet and the file really holds `auto`
+/// afterwards. So the check belongs to the GUI, and the unmet state has to be
+/// renderable as well as preventable: a terminal can put the file into it.
+pub const PROXY_MODES: &[&str] = &["manual", "auto"];
+
 /// The Advanced page, in render order — `architecture.md` §5: ports, listen
 /// address, auth, outbound proxy, worker threads, log level.
 ///
@@ -502,7 +512,22 @@ pub const STEALTH: [SettingGroup; 5] = [
     },
 ];
 
-pub const ADVANCED: [SettingGroup; 5] = [
+pub const ADVANCED: [SettingGroup; 6] = [
+    SettingGroup {
+        title: "Proxy mode",
+        description: "Manual mode listens on the ports below and leaves it to you \
+                      to point applications at them. Automatic mode redirects \
+                      traffic system-wide, which needs AdGuard's root helper set \
+                      up first.",
+        settings: &[Setting {
+            key: crate::config::key::PROXY_MODE,
+            title: "Proxy mode",
+            description: "How traffic reaches the proxy",
+            kind: Kind::Choice {
+                options: PROXY_MODES,
+            },
+        }],
+    },
     SettingGroup {
         title: "Secure DNS filtering",
         description: "Both need DNS filtering switched on to have any effect, and \
@@ -679,7 +704,7 @@ pub const ADVANCED: [SettingGroup; 5] = [
 ///
 /// | Wizard prompt | Key | Why not here |
 /// | --- | --- | --- |
-/// | proxy server mode | `proxy_mode` | `auto` needs AdGuard's root helper set up first (`architecture.md` §6). Offering a mode that silently does nothing is the `dns_filtering` mistake again. |
+/// | proxy server mode | `proxy_mode` | Still out, and now for a **measured** reason rather than an assumed one — see below. |
 /// | proxy listen address | `listen_address` | Always blocked at first run: the seeded config has `listen_auth` off with empty credentials, and moving beyond loopback in that state is a **measured silent no-op** (contract §5). The Advanced page owns it, after setup, where the credentials can be set first. |
 /// | certificate name | `https_filtering.root_certificate_name` | Cosmetic, and the seeded default is the name the CA on disk already carries. |
 /// | filter list groups | the `filters` list | The Filters page is the whole of this, with a localised catalogue the wizard's numbered list cannot match. |
@@ -687,6 +712,20 @@ pub const ADVANCED: [SettingGroup; 5] = [
 /// What remains is: the one protection switch whose answer changes what the
 /// proxy does on day one, the two ports someone with a port conflict has to
 /// change before anything works, and a consent question no other page asks.
+///
+/// **`proxy_mode` was revisited when auto mode landed, and stays out.** The
+/// decision that put it here was "auto needs the root helper", which was an
+/// assumption about *when* AdGuard enforces that; the measurement is worse than
+/// the assumption. `config set proxy_mode auto` succeeds with the helper unmet
+/// — exit 0, `Config has been updated`, and the file really holds `auto`
+/// (contract §8). So the assistant could not offer the question honestly even
+/// if it wanted to: it would have to run the helper check, explain the suid
+/// bit, and show a `sudo` command, at the one moment the user is being walked
+/// through first-time setup and has not yet seen a single page of the app. The
+/// Advanced page has the room for that and the focus re-check that makes it
+/// live; a wizard step has neither. The row there also has to render the unmet
+/// state rather than merely prevent it, which is a second thing this table has
+/// no way to express.
 ///
 /// Each `key` is written with an ordinary `config set` **after** the directory
 /// has been seeded — before that, every one of them is refused (contract §5).

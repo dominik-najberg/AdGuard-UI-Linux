@@ -191,13 +191,21 @@ That is possible because AdGuard already ships the escalation path, which an ear
 
 Design:
 
-1. **Detect.** `stat` the helper for the same three properties `adguard-cli` checks. Report the check, not a guess — three separate facts, so a helper that is root-owned but not suid says so.
-2. **Instruct.** When unmet, the Advanced page shows AdGuard's own command with a copy button, an explanation of what the suid bit grants, and no way to run it from the app. Re-check when the window regains focus, so a user who runs it in a terminal sees the row change without hunting for a refresh.
+1. **Detect.** `stat` the helper for the same three properties `adguard-cli` checks. Report the check, not a guess — three separate facts, so a helper that is root-owned but not suid says so. `helper::RootHelper` takes the path as a **parameter**, not a constant: the helper ships unmet on every machine, so the met branch would otherwise be unreachable without setting a suid bit on something — the one act this whole design exists to avoid. `$ADGUARD_ROOT_HELPER` overrides it, and a file that is already setuid-root (`/usr/bin/passwd`) is what the met branch is proven against.
+2. **Instruct.** When unmet, the Advanced page shows AdGuard's own command with a copy button, an explanation of what the suid bit grants, and no way to run it from the app. Re-check when the window regains focus, so a user who runs it in a terminal sees the row change without hunting for a refresh. The check is re-read every time rather than cached — a cache would be wrong at precisely the moment the re-check exists for.
 3. **Switch.** When met, `config set proxy_mode auto` — a plain write through the path every other setting uses.
+
+**The gate is load-bearing, and that is a measurement rather than an assumption.** `config set proxy_mode auto` **succeeds with all three properties unmet**: exit 0, `Config has been updated`, and `proxy.yaml` really holds `auto` afterwards (contract §8). AdGuard does not consult its helper at config-write time. So nothing but this application stands between the user and a mode that quietly does nothing, which is the `dns_filtering` mistake §5 already refuses to repeat.
+
+It also means the unmet state has to be **rendered**, not merely prevented. A terminal or a text editor reaches `proxy_mode: 'auto'` with an unmet helper in one step, and the mode row marks that rather than correcting it — the same judgement Protection makes about DNS filtering that is switched on but inert. Writing `manual` back over the user's setting would be a change nobody asked for.
+
+**Where AdGuard's check does fire is not measured**, and the honest place to say so is here. Reaching it needs `start`: a sandbox is unlicensed so `start` never gets that far, and starting the real proxy in `auto` is a system-wide change that is the owner's call. The design does not depend on the answer — the GUI checks before writing either way — but nobody should read the code as though the moment of enforcement were known.
 
 **Why the app does not run that `sudo` for the user, even via `pkexec`.** The helper lives in a user-writable directory, so setting suid-root on it makes anyone who can write that file root. AdGuard chose that design and the user accepted it by installing AdGuard; conferring it from behind a GUI button is a different act from typing `sudo` at a prompt, and the deliberateness is the only safeguard the arrangement has.
 
 The corollary is worth stating for anyone tempted to add one later: a root-invoked helper of ours would have to be explicit about which user's config it edits — `adguard-cli` and its data live under `~/.local`, so it would need the target `$HOME`/UID passed explicitly and would have to refuse any path outside that user's data dir. Getting that wrong is a local privilege-escalation bug. Not writing the helper is how this project avoids owning that problem.
+
+`data/io.github.dominik-najberg.AdGuardUI.policy` was deleted with this work. It declared three polkit actions against `/usr/libexec/adguard-ui-helper`, a binary that was never written and now never will be, and its own header still asserted that AdGuard "ships no polkit policy … so there is nothing to reuse" — the conclusion contract §8 retracted. Nothing installed it; `building.md` §4 says so and now says how to remove it if an older checkout did.
 
 ---
 
@@ -211,7 +219,7 @@ Userscripts are out because there is only one. `userscripts list` returns a sing
 
 Ship the tray + core controls first; it is the part that replaces day-to-day terminal use.
 
-Status: Status, Protection, Filters (HTTP), DNS, Advanced and Stealth are done; both filter pages install custom lists by URL (§5); licence activation lives on the Status page; the first-run assistant seeds an unconfigured install and hands the window to the pages when it is finished (§5); the tray carries start/stop plus the six Protection toggles as quick toggles (§4); the config monitor reports an external edit with a toast, gated on a row the user can see having moved (§3). Still open for v1: auto-mode detection, and removing a custom filter — the one destructive filter action, deliberately left out of the install change.
+Status: Status, Protection, Filters (HTTP), DNS, Advanced and Stealth are done; both filter pages install custom lists by URL (§5); licence activation lives on the Status page; the first-run assistant seeds an unconfigured install and hands the window to the pages when it is finished (§5); the tray carries start/stop plus the six Protection toggles as quick toggles (§4); the config monitor reports an external edit with a toast, gated on a row the user can see having moved (§3); and the Advanced page carries the proxy mode with AdGuard's root-helper check beside it (§6). Still open for v1: removing a custom filter — the one destructive filter action, deliberately left out of the install change.
 
 ---
 

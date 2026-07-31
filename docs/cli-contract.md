@@ -672,6 +672,51 @@ The reason to leave that `sudo` to the user rather than run it for them: the hel
 
 An earlier revision of this section concluded there was "no existing escalation path to reuse". That was wrong; it was inferred from the file mode without reading the binary.
 
+### `config set proxy_mode auto` does not check anything
+
+The measurement the auto-mode design actually rests on, and it is the opposite of what the three strings above suggest. With the helper in its shipped state — `owned_by_root=false, has_suid=false, is_executable=true` — the write **succeeds**:
+
+```console
+$ adguard-cli config set -- proxy_mode auto      # exit 0, stderr empty
+proxy_mode = auto
+Config has been updated
+$ adguard-cli config get proxy_mode              # re-read, not the confirmation
+proxy_mode = auto
+```
+
+`proxy.yaml` really does hold `proxy_mode: 'auto'` afterwards. No warning, nothing on stderr, no mention of the root helper. So the helper check does **not** run at config-write time, and `config set` will happily leave the user in a mode that cannot work.
+
+That makes the GUI's check load-bearing rather than decorative, and it has a second consequence: `proxy_mode: 'auto'` with an unmet helper is a state the app must be able to *render*, not merely to prevent. A user can reach it from a terminal or by hand-editing, and it is the same shape as `dns_filtering.enabled` with no listen port — a setting that reads on and does nothing (`architecture.md` §5).
+
+**Where the check does fire is not measured.** Reaching it needs `start`, and neither route is available: a sandbox is unlicensed so `start` is refused long before any helper is consulted, and starting the real proxy in `auto` mode is a system-wide change that is the owner's call, not an agent's. The three strings are in the same block as the `listen_address` authorisation messages, which suggests validation at use rather than at write, but that is an inference and is written here as one.
+
+For contrast, a value that is not a mode at all *is* refused at write time, and the CLI names the valid values itself:
+
+```console
+$ adguard-cli config set -- proxy_mode banana    # exit 0, stderr empty
+Invalid value for key `proxy_mode`. Valid values are: manual, auto
+```
+
+Note the absent `Config has been updated`: this is the shape §5 describes, where the confirmation line's *absence* is the signal and the file is the evidence. `proxy_mode` was unchanged afterwards.
+
+### The helper is a sibling of the *resolved* binary
+
+`paths::cli_binary` finds `~/.local/bin/adguard-cli` first, because `$PATH` is searched before the known install sites — and on this machine that is a **symlink** into `~/.local/opt/adguard-cli/`. The helper lives beside the real binary, not beside the link:
+
+```console
+$ command -v adguard-cli
+/home/potworny/.local/bin/adguard-cli
+$ readlink -f "$(command -v adguard-cli)"
+/home/potworny/.local/opt/adguard-cli/adguard-cli
+$ ls ~/.local/bin/adguard_root_helper          # does not exist
+$ ls ~/.local/opt/adguard-cli/adguard_root_helper
+-rwxr-xr-x 1 potworny potworny 14063808 May 27 15:21 …
+```
+
+So the helper path must be taken from the **canonicalised** binary path. Joining `cli_binary().parent()` finds nothing here, and "nothing" is indistinguishable from "AdGuard is not installed" unless the code is careful to say which.
+
+The same applies to reading the three properties: follow symlinks. `stat` without `-L` reports the *link's* mode — `lrwxrwxrwx`, uid whatever — so a helper reached through a symlink would read as world-writable and not root-owned regardless of what it points at. Rust's `fs::metadata` follows; `fs::symlink_metadata` does not.
+
 ---
 
 ## 9. Live activity data

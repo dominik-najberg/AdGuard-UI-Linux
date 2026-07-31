@@ -314,7 +314,13 @@ install -Dm644 data/autostart/*.desktop ~/.config/autostart/
 
 **The desktop file, the GTK application ID, `StartupWMClass`, and the icon filename must all be the same reverse-DNS string.** If the first three diverge, GNOME shows a second, unbranded icon below the dock separator instead of grouping the window with its launcher. If the icon is the one that drifts, the grouping still works and the icon is simply the generic cog — the quieter failure of the two, and the one to suspect first when the artwork is right but nothing shows it.
 
-**Nothing here needs root, and nothing should.** This section used to end with a `sudo install` of `data/*.policy` into `/usr/share/polkit-1/actions/`. Do not run it. The application performs no privileged operation and ships no privileged component (`architecture.md` §6): `auto` mode uses AdGuard's own root helper, set up by the user with AdGuard's own `sudo` command. The `.policy` file is dead scaffolding naming a helper binary that will never be written — installing it would leave a root-owned file authorising nothing, and removing it again needs root a second time. `handoff.md` §3 has its deletion as part of the auto-mode work.
+**Nothing here needs root, and nothing should.** This section used to end with a `sudo install` of `data/*.policy` into `/usr/share/polkit-1/actions/`. Do not run it, and there is nothing left to run it against: **the `.policy` file was deleted with the auto-mode work.** The application performs no privileged operation and ships no privileged component (`architecture.md` §6): `auto` mode uses AdGuard's own root helper, set up by the user with AdGuard's own `sudo` command, which the Advanced page shows and never runs.
+
+If an older checkout of this repo installed that file, remove it — it is a root-owned file authorising a helper binary that does not exist and never will:
+
+```bash
+sudo rm -f /usr/share/polkit-1/actions/io.github.dominik-najberg.AdGuardUI.policy
+```
 
 ---
 

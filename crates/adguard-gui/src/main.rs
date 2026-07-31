@@ -219,6 +219,7 @@ fn start(
         Ok(cli) => {
             let view = main_view(&cli);
             window.set_content(Some(&view.root));
+            connect_helper_recheck(&window, &view);
             Ok(view)
         }
         Err(err) => {
@@ -287,6 +288,7 @@ fn install_main_view(
 ) {
     let view = main_view(cli);
     window.set_content(Some(&view.root));
+    connect_helper_recheck(window, &view);
 
     if let Err(reason) = connect_tray(app, window, &view) {
         eprintln!("adguard-ui: continuing without a tray icon ({reason})");
@@ -468,6 +470,9 @@ struct MainView {
     root: adw::NavigationSplitView,
     status: Rc<status::StatusPage>,
     protection: Rc<protection::ProtectionPage>,
+    /// Held for the root-helper re-check, which needs the window and so cannot
+    /// be wired up in `main_view` itself.
+    advanced: Rc<advanced::AdvancedPage>,
     /// The `proxy.yaml` subscription. Dropping it ends the subscription, so it
     /// lives exactly as long as the pages it reconciles — and it is what keeps
     /// the Advanced page reachable, since nothing else here holds one.
@@ -577,14 +582,41 @@ fn main_view(cli: &Cli) -> MainView {
 
     // After the pages are built, so priming the snapshot cannot race the first
     // render, and so a repaint always has rows to patch rather than a spinner.
-    let watch = watch::install(&status, &protection, &[advanced, stealth], &dns, &toasts);
+    let watch = watch::install(
+        &status,
+        &protection,
+        &[advanced.clone(), stealth],
+        &dns,
+        &toasts,
+    );
 
     MainView {
         root: split,
         status,
         protection,
+        advanced,
         _watch: watch,
     }
+}
+
+/// Re-read AdGuard's root-helper check whenever the window regains focus.
+///
+/// The user's way out of the unmet state is a `sudo` command they run in a
+/// terminal, so the moment they come back to this window is exactly the moment
+/// the answer has changed — and hunting for a refresh button to be told so
+/// would make the instruction feel like it had not worked
+/// (`architecture.md` §6).
+///
+/// `is-active` rather than a focus event on the widget: the check is about the
+/// window as a whole, and the row the user needs to see may not be the one with
+/// the keyboard focus. It fires on losing focus too, which costs one `stat`.
+fn connect_helper_recheck(window: &adw::ApplicationWindow, view: &MainView) {
+    let advanced = view.advanced.clone();
+    window.connect_is_active_notify(move |window| {
+        if window.is_active() {
+            advanced.recheck_helper();
+        }
+    });
 }
 
 fn sidebar_row(page: &Page) -> gtk::ListBoxRow {

@@ -8,6 +8,7 @@ use std::env;
 use std::path::{Path, PathBuf};
 
 const BINARY: &str = "adguard-cli";
+const ROOT_HELPER: &str = "adguard_root_helper";
 const DATA_SUBDIR: &str = "adguard-cli";
 const CONFIG_FILE: &str = "proxy.yaml";
 
@@ -44,6 +45,27 @@ pub fn cli_binary() -> Option<PathBuf> {
     ]
     .into_iter()
     .find(|candidate| candidate.is_file())
+}
+
+/// AdGuard's own root helper, beside the **resolved** `adguard-cli` binary.
+///
+/// Resolved, not merely the path [`cli_binary`] returned: `$PATH` is searched
+/// first and on the reference machine that finds `~/.local/bin/adguard-cli`,
+/// which is a symlink into `~/.local/opt/adguard-cli/`. The helper is a sibling
+/// of the real binary, so joining the *link's* parent finds nothing at all —
+/// and "nothing" would be indistinguishable from AdGuard not being installed
+/// (contract §8).
+///
+/// Returns the path whether or not anything is there; whether it exists, and
+/// what its mode is, is [`crate::helper::RootHelper`]'s question. `None` means
+/// only that the CLI itself could not be located.
+pub fn root_helper() -> Option<PathBuf> {
+    let binary = cli_binary()?;
+    // `canonicalize` needs the target to exist, which it does — `cli_binary`
+    // only returns paths that passed `is_file`. Falling back to the unresolved
+    // path keeps a non-symlink install working if it ever failed.
+    let resolved = std::fs::canonicalize(&binary).unwrap_or(binary);
+    Some(resolved.parent()?.join(ROOT_HELPER))
 }
 
 /// AdGuard CLI's data directory: config, databases, logs, certificates.

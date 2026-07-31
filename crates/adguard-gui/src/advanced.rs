@@ -27,17 +27,24 @@
 //! is exposed.
 
 use std::cell::{Cell, RefCell};
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
 
 use adguard_core::config::{key, listen_address_plan};
-use adguard_core::{AddressPlan, Applied, Cli, Config, Kind, Setting, SettingGroup};
+use adguard_core::{
+    AddressPlan, Applied, Cli, Config, Kind, RootHelper, Setting, SettingGroup,
+};
 use adw::prelude::*;
 use gtk::glib;
 use gtk4 as gtk;
 use libadwaita as adw;
 
 use crate::{abbreviate, toast, worker};
+
+/// The `proxy_mode` value that needs AdGuard's root helper. The other is
+/// `manual`, which needs nothing and is never gated.
+const AUTO: &str = "auto";
 
 /// How long a spin row sits still before its value is written.
 ///
@@ -135,6 +142,36 @@ pub struct AdvancedPage {
     /// The "Listen address" group, whose description carries the credential
     /// requirement when it is not yet met.
     listen_group: RefCell<Option<adw::PreferencesGroup>>,
+    /// The root-helper rows under the proxy-mode group, and the last reading
+    /// they were painted from. `None` on a table without `proxy_mode`, which is
+    /// how the Stealth page gets none of this for free.
+    helper_view: RefCell<Option<HelperView>>,
+    /// Where the helper check is read from.
+    ///
+    /// A field rather than a call to [`RootHelper::detect`] so a test — or
+    /// anyone wanting to see the *met* branch on a machine where the helper is
+    /// shipped unmet, which is every machine — can point it somewhere else.
+    /// `$ADGUARD_ROOT_HELPER` is read once, at construction.
+    helper_path: Option<PathBuf>,
+}
+
+/// The widgets that report AdGuard's root-helper check.
+///
+/// Three separate facts, not a verdict: a helper that is root-owned but not
+/// suid says exactly that, because a user who has already run the `sudo`
+/// command and still cannot switch modes needs to know which property is
+/// missing (`architecture.md` §6).
+struct HelperView {
+    /// Holds everything below; hidden entirely once the check passes, because
+    /// a satisfied requirement is not worth a permanent row.
+    group: adw::PreferencesGroup,
+    /// What the check found, in AdGuard's own three-property wording.
+    status: adw::ActionRow,
+    /// AdGuard's own command, with a copy button. Never run from here.
+    command: adw::ActionRow,
+    /// The last check rendered, so a focus re-check that found nothing new
+    /// does not rebuild the rows under the user's pointer.
+    painted: RefCell<Option<String>>,
 }
 
 impl AdvancedPage {
@@ -148,9 +185,35 @@ impl AdvancedPage {
             reconciling: Cell::new(false),
             last: RefCell::new(None),
             listen_group: RefCell::new(None),
+            helper_view: RefCell::new(None),
+            // Read once, here, rather than at every check: an override that
+            // changed underneath a running window would make the row's history
+            // impossible to follow. Absent — the normal case — means AdGuard's
+            // own helper, wherever this machine's CLI is installed.
+            helper_path: std::env::var_os("ADGUARD_ROOT_HELPER")
+                .map(PathBuf::from)
+                .or_else(adguard_core::paths::root_helper),
         });
         this.reload();
         this
+    }
+
+    /// The root-helper check, as it stands right now.
+    ///
+    /// Read fresh every time rather than cached: the whole point of the focus
+    /// re-check is that the user has just run AdGuard's `sudo` command in a
+    /// terminal, and a cache would be exactly wrong at the one moment that
+    /// matters. It is a `stat`, so it is cheap enough to do on the main loop.
+    fn helper(&self) -> Option<std::io::Result<RootHelper>> {
+        self.helper_path.as_ref().map(RootHelper::inspect)
+    }
+
+    /// Whether auto mode would actually work. Anything this check could not
+    /// establish reads as **not** set up — the same rule as everywhere else
+    /// here, that a fact we could not read is never rendered as the reassuring
+    /// answer.
+    fn helper_is_set_up(&self) -> bool {
+        matches!(self.helper(), Some(Ok(helper)) if helper.is_set_up())
     }
 
     pub fn widget(&self) -> &adw::Bin {
@@ -204,6 +267,7 @@ impl AdvancedPage {
     fn build(self: &Rc<Self>, config: &Config) -> adw::PreferencesPage {
         self.rows.borrow_mut().clear();
         self.listen_group.replace(None);
+        self.helper_view.replace(None);
 
         let page = adw::PreferencesPage::new();
 
@@ -228,10 +292,155 @@ impl AdvancedPage {
                 self.listen_group.replace(Some(widget.clone()));
             }
             page.add(&widget);
+
+            // The helper rows belong immediately under the mode they explain,
+            // not at the foot of the page: keyed off `proxy_mode` the way the
+            // listen-address special-casing is keyed off its own setting, so a
+            // table without that key — Stealth — never builds them.
+            if group.settings.iter().any(|s| s.key == key::PROXY_MODE) {
+                let view = self.build_helper_view();
+                page.add(&view.group);
+                self.helper_view.replace(Some(view));
+            }
         }
 
         self.apply(config);
         page
+    }
+
+    /// The rows that report AdGuard's root-helper check and carry its command.
+    ///
+    /// Built once and then patched, so a focus re-check does not rebuild
+    /// widgets under the pointer. Nothing here can run the command — there is a
+    /// copy button and no other affordance, which is the whole design
+    /// (`architecture.md` §6).
+    fn build_helper_view(self: &Rc<Self>) -> HelperView {
+        let group = adw::PreferencesGroup::builder()
+            .title("AdGuard's root helper")
+            .build();
+
+        let status = adw::ActionRow::new();
+        status.set_use_markup(false);
+        status.set_title("Root helper");
+        status.set_subtitle_lines(3);
+        status.add_prefix(&gtk::Image::from_icon_name("dialog-warning-symbolic"));
+        group.add(&status);
+
+        let command = adw::ActionRow::new();
+        command.set_use_markup(false);
+        command.set_title("Run this in a terminal");
+        command.set_subtitle_lines(3);
+        // `.monospace` on the subtitle would need a stylesheet rule; the
+        // command is the subtitle so it stays a plain label and the copy button
+        // is the thing that makes it usable.
+        let copy = gtk::Button::from_icon_name("edit-copy-symbolic");
+        copy.set_tooltip_text(Some("Copy the command"));
+        copy.set_valign(gtk::Align::Center);
+        copy.add_css_class("flat");
+        copy.connect_clicked({
+            let this = Rc::downgrade(self);
+            let command = command.clone();
+            move |_| {
+                let Some(this) = this.upgrade() else { return };
+                let text = command.subtitle().unwrap_or_default();
+                command.clipboard().set_text(&text);
+                this.toasts.add_toast(toast("Command copied"));
+            }
+        });
+        command.add_suffix(&copy);
+        group.add(&command);
+
+        HelperView {
+            group,
+            status,
+            command,
+            painted: RefCell::new(None),
+        }
+    }
+
+    /// Re-read the helper check and repaint the rows that report it.
+    ///
+    /// Public because the window calls it when it regains focus: the user runs
+    /// AdGuard's `sudo` command in a terminal and comes back, and the row
+    /// should have changed without them hunting for a refresh
+    /// (`architecture.md` §6). Cheap enough for that — one `stat`.
+    ///
+    /// Also repaints the mode row, whose caveat depends on the same check: a
+    /// helper that has just been set up turns `auto` from a warning into an
+    /// ordinary value, and vice versa.
+    pub fn recheck_helper(self: &Rc<Self>) {
+        if self.helper_view.borrow().is_none() {
+            return;
+        }
+        self.paint_helper();
+
+        // The mode row's rendering reads the check, and `render` skips a row
+        // whose snapshot has not moved — which is exactly what happens here,
+        // because `proxy.yaml` has not changed at all. Force it.
+        let mode_row = self
+            .rows
+            .borrow()
+            .iter()
+            .find(|row| row.setting.key == key::PROXY_MODE)
+            .cloned();
+        if let (Some(row), Some(config)) = (mode_row, self.last.borrow().clone()) {
+            self.repaint(&row);
+            self.render(&row, &config);
+        }
+    }
+
+    /// Render the check into the three-property row and the command row.
+    fn paint_helper(&self) {
+        let view = self.helper_view.borrow();
+        let Some(view) = view.as_ref() else { return };
+
+        let check = self.helper();
+        let snapshot = format!("{check:?}");
+        if view.painted.borrow().as_deref() == Some(snapshot.as_str()) {
+            return;
+        }
+        view.painted.replace(Some(snapshot));
+
+        match check {
+            // Set up. The group goes away entirely: a requirement that is met
+            // is not worth a standing row, and leaving one would invite a user
+            // to run a `sudo` command they no longer need.
+            Some(Ok(helper)) if helper.is_set_up() => {
+                view.group.set_visible(false);
+            }
+            Some(Ok(helper)) => {
+                view.group.set_visible(true);
+                view.command.set_visible(true);
+                view.status.set_subtitle(&format!(
+                    "Automatic mode needs it {}. Checked {}.",
+                    join_with_and(&helper.unmet()),
+                    helper.path.display()
+                ));
+                view.command.set_subtitle(&helper.setup_command());
+                view.group.set_description(Some(
+                    "The setuid bit lets any user on this machine run the helper as \
+                     root. AdGuard's helper lives in a directory you can write to, so \
+                     anyone who can replace that file would gain root with it — which \
+                     is why this application shows the command rather than running it \
+                     for you.",
+                ));
+            }
+            // Installed, but the helper could not be read. Different from "not
+            // set up", and the command would be a guess.
+            Some(Err(err)) => {
+                view.group.set_visible(true);
+                view.command.set_visible(false);
+                view.status
+                    .set_subtitle(&format!("Could not be read — {err}"));
+                view.group.set_description(Some(
+                    "Automatic mode needs AdGuard's root helper, and this check could \
+                     not read it.",
+                ));
+            }
+            // The CLI itself could not be located, which the window already
+            // says elsewhere. Nothing useful to add here.
+            None => view.group.set_visible(false),
+        }
     }
 
     fn row(self: &Rc<Self>, setting: Setting) -> Rc<Row> {
@@ -352,7 +561,7 @@ impl AdvancedPage {
                     let Some(chosen) = options.get(combo.selected() as usize) else {
                         return;
                     };
-                    page.write(&this, chosen.to_string());
+                    page.chose(&this, chosen);
                 });
             }
         }
@@ -403,6 +612,12 @@ impl AdvancedPage {
             }
         }
 
+        // Not counted towards `moved`. These rows report the filesystem, not
+        // `proxy.yaml`, so they cannot have moved because of the edit that
+        // brought us here — and a toast saying the config changed would be
+        // wrong about a row that changed for another reason entirely.
+        self.paint_helper();
+
         self.last.replace(Some(config.clone()));
         moved
     }
@@ -442,6 +657,13 @@ impl AdvancedPage {
         };
         if let Some(required) = setting.requires() {
             snapshot.push_str(&format!(" requires {:?}", config.bool_at(required)));
+        }
+        // The mode row's caveat reads the root-helper check, which lives outside
+        // `proxy.yaml` entirely and can move while the file does not — that is
+        // the whole point of the focus re-check. Without this the row would keep
+        // warning about a helper the user had just set up.
+        if setting.key == key::PROXY_MODE {
+            snapshot.push_str(&format!(" helper_set_up={}", self.helper_is_set_up()));
         }
         if row.painted.borrow().as_deref() == Some(snapshot.as_str()) {
             return false;
@@ -541,7 +763,25 @@ impl AdvancedPage {
                         .position(|option| *option == chosen)
                         .unwrap_or(0);
                     self.without_feedback(|| combo.set_selected(index as u32));
-                    combo.set_subtitle(setting.description);
+
+                    // `auto` in the file with the helper unmet is a real state,
+                    // not one this page can prevent — `config set proxy_mode
+                    // auto` succeeds regardless (contract §8), so a terminal or
+                    // a text editor reaches it. Marked rather than corrected,
+                    // for the same reason the Protection page marks DNS
+                    // filtering that is on but inert: the value is what it is,
+                    // and quietly writing `manual` over the user's setting
+                    // would be a change nobody asked for.
+                    let inert = setting.key == key::PROXY_MODE
+                        && chosen == AUTO
+                        && !self.helper_is_set_up();
+                    row.caveat.set_visible(inert);
+                    combo.set_subtitle(if inert {
+                        "Set to automatic, but AdGuard's root helper is not set up — \
+                         see below. Traffic is not being redirected system-wide."
+                    } else {
+                        setting.description
+                    });
                 }
                 None => self.mark_unavailable(row, "holds a value this page does not recognise"),
             },
@@ -631,6 +871,49 @@ impl AdvancedPage {
         }
 
         self.write(row, if on { "true" } else { "false" }.to_owned());
+    }
+
+    /// A combo row was changed.
+    ///
+    /// `proxy_mode` is the one choice with a precondition, and it is the GUI's
+    /// alone to enforce: **`config set proxy_mode auto` succeeds with the root
+    /// helper unmet** — exit 0, `Config has been updated`, and the file really
+    /// holds `auto` afterwards (contract §8). Nothing downstream would stop the
+    /// user, and what they would get is a mode that quietly does nothing, which
+    /// is the `dns_filtering` mistake this app already refuses to repeat.
+    ///
+    /// So this refuses locally and says which of the three properties is
+    /// missing, and the row goes back to whatever the file says rather than
+    /// being forced to `manual` — if a hand edit really has left `auto` in
+    /// there with an unmet helper, the honest thing is to keep showing it.
+    fn chose(self: &Rc<Self>, row: &Rc<Row>, chosen: &str) {
+        if row.setting.key == key::PROXY_MODE && chosen == AUTO {
+            let refusal = match self.helper() {
+                Some(Ok(helper)) if helper.is_set_up() => None,
+                Some(Ok(helper)) => Some(format!(
+                    "Automatic mode needs AdGuard's root helper {}. Run `{}` in a \
+                     terminal first — the row below has it.",
+                    join_with_and(&helper.unmet()),
+                    helper.setup_command()
+                )),
+                Some(Err(err)) => Some(format!(
+                    "Automatic mode needs AdGuard's root helper, which could not be \
+                     read — {err}"
+                )),
+                None => Some(
+                    "Automatic mode needs AdGuard's root helper, and adguard-cli \
+                     could not be located"
+                        .to_owned(),
+                ),
+            };
+            if let Some(message) = refusal {
+                self.toasts.add_toast(toast(&message));
+                self.reset_row(row);
+                return;
+            }
+        }
+
+        self.write(row, chosen.to_owned());
     }
 
     /// A spin row moved. Collapse a burst of changes into one write.
@@ -874,6 +1157,20 @@ impl AdvancedPage {
 }
 
 /// The subtitle for a number row that holds a value we can write.
+/// Join the missing properties into something readable: "owned by root and the
+/// setuid bit set", rather than a debug-printed list.
+///
+/// The three facts are reported separately on purpose (`architecture.md` §6),
+/// and a user who has already run AdGuard's command needs to read which one is
+/// still missing without decoding punctuation.
+fn join_with_and(parts: &[&str]) -> String {
+    match parts {
+        [] => "nothing".to_owned(),
+        [one] => (*one).to_owned(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
 fn describe_number(setting: Setting, value: i64) -> String {
     match setting.kind {
         Kind::Number {

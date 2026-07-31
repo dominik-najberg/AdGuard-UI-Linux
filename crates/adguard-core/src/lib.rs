@@ -8,12 +8,14 @@
 pub mod cli;
 pub mod config;
 pub mod filters;
+pub mod helper;
 pub mod locale;
 pub mod model;
 pub mod paths;
 
 pub use cli::{Activation, Applied, Cli, Error};
 pub use config::{AddressPlan, AuthState, Config, DnsListenPort, Watch};
+pub use helper::RootHelper;
 pub use filters::Catalogue;
 pub use locale::Locale;
 pub use model::{

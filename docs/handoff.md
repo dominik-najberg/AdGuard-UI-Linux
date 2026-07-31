@@ -1,14 +1,19 @@
 # Handoff
 
 > **Where the night of 31 July 2026 stopped.** `overnight-plan.md` §2.1 (the
-> reconcile toast) is **done and verified headlessly**; §2.2 (auto mode) and
-> §2.3 (custom filter removal) are **not started**. Next thing is §2.2.
+> reconcile toast) and §2.2 (auto mode) are **done and verified headlessly**;
+> §2.3 (custom filter removal) is **not started**, and it is the last v1 item.
+> Next thing is §2.3 — and note it is the one carrying a design decision rather
+> than a specification, which is why the plan put it last.
 >
-> The toast work turned up one thing worth carrying forward: the Status page's
-> module figure is **repainted but not counted**, because it is derived from the
-> keys Protection owns and so moves for the app's own writes. `architecture.md`
-> §3 has the reasoning. If a later page ever renders a figure derived from
-> another page's keys, it wants the same treatment.
+> Two things from tonight worth carrying forward. The Status page's module
+> figure is **repainted but not counted** by the reconcile, because it is
+> derived from the keys Protection owns and so moves for the app's own writes
+> (`architecture.md` §3) — if a later page ever renders a figure derived from
+> another page's keys, it wants the same treatment. And `config set proxy_mode
+> auto` **succeeds with AdGuard's root helper unmet** (contract §8), which is
+> why the auto-mode gate lives in this app and why the unmet state is rendered
+> rather than merely prevented.
 
 Working state as of 31 July 2026. The overnight run closed the config monitor, the CLI timeout, the lapsed-licence mapping, the Stealth page and the `dns_filtering` dependency caveat; the session after it built **licence activation**, the one after that the **DNS page**, the one after that the **first-run assistant** — the first page here that exists for a machine where AdGuard has never been configured at all — and the one after that **custom filter install by URL**. Read [`cli-contract.md`](cli-contract.md) and [`architecture.md`](architecture.md) first — the contract doc records measured CLI behaviour and the code depends on it. §5 of the contract is the part that matters for anything touching config; §4 of architecture.md is the part that matters for anything touching the tray or the way the process starts.
 
@@ -20,7 +25,7 @@ That subsection also carries the correction worth reading before trusting anythi
 
 ## 1. Where things stand
 
-**150 tests pass by default** and 42 more are `#[ignore]`d.
+**159 tests pass by default** and 42 more are `#[ignore]`d.
 
 | Page | State |
 | --- | --- |
@@ -38,7 +43,7 @@ That subsection also carries the correction worth reading before trusting anythi
 | Licence activation | Done, bar the success leg. Owner and masked key when licensed; `activate` → open the link → *finish activation* when not. Never polled. |
 | First-run assistant | Done. Shown when there is no `proxy.yaml`: licence check → one guarded `configure` to seed → four questions pre-filled from the seeded file → writes the deltas and reports what landed → hands the window to the pages. Driven end to end headlessly. |
 | Custom filter removal | Not started, and it makes install a one-way door. `filters remove` **deletes** a custom row outright, unlike a catalogue filter — so it wants a confirmation, `architecture.md` §5. |
-| Auto mode | Not started. No privileged component of ours — detection and instruction only, `architecture.md` §6. |
+| Auto mode | Done. A `proxy_mode` row on Advanced, AdGuard's three-property helper check beside it, its `sudo` command with a copy button, and a re-check on window focus. No privileged component of ours, `architecture.md` §6. |
 | Reconcile toast | Done. One toast per reading, gated on `reconcile`'s count of rows that actually moved; the Status module figure is repainted but not counted, `architecture.md` §3. |
 
 Userscripts are **out of v1** — `architecture.md` §7 has the reasoning.
@@ -74,7 +79,13 @@ Two of these overturned a recommendation in `overnight-plan.md` §5, both becaus
 ## 3. Known gaps, in the order I would fix them
 
 1. **Removing a custom filter.** Install landed without it, which makes the feature a one-way door: a list added by URL can be switched off but not taken out of the page. `filters remove <id>` does it, and unlike a catalogue filter — where `remove` only clears `is_installed` — it **deletes the row outright** (contract §6). That asymmetry is the whole design question: it wants a confirmation, and it is the only genuinely destructive thing either filter page would do, which is why it was not bolted onto the install change.
-2. **Auto mode** — `architecture.md` §6. No longer a polkit item: AdGuard ships its own setup path, so the work is a `stat` of `~/.local/opt/adguard-cli/adguard_root_helper` for the three properties `adguard-cli` itself checks (`owned_by_root`, `has_suid`, `is_executable`), a row showing AdGuard's `sudo … -s` command when they are unmet, a re-check on window focus, and an ordinary `config set proxy_mode auto` when they are met. Both branches are provable headlessly by pointing the check at a fake path. **`data/io.github.dominik-najberg.AdGuardUI.policy` is now dead scaffolding** — delete it with this work, and do not install it; it names a helper that will never exist. Note the first-run assistant deliberately does *not* offer `proxy_mode`, and `model::SETUP`'s comment says why; when auto mode lands, that is the decision to revisit.
+2. ~~**Auto mode**~~ — done, `architecture.md` §6. The `.policy` file is deleted. Three things it found are worth carrying:
+
+   - **`config set proxy_mode auto` succeeds with the helper unmet.** Exit 0, `Config has been updated`, and the file really holds `auto` (contract §8). AdGuard does not check its own helper at write time, so the GUI's gate is the only one there is — and the unmet state has to be *rendered* as well as prevented, because a terminal reaches it in one command.
+   - **The helper is a sibling of the *resolved* binary.** `$PATH` finds `~/.local/bin/adguard-cli`, which is a symlink; the helper is next to the real file. `paths::root_helper` canonicalises, and `RootHelper::inspect` uses `fs::metadata` so symlinks are followed — `symlink_metadata` would report the link's `lrwxrwxrwx` and read as not-root-owned whatever it pointed at.
+   - **The met branch needs no privilege to test.** `/usr/bin/passwd` is already `-rwsr-xr-x root root`, so pointing `$ADGUARD_ROOT_HELPER` at it exercises the whole met path without this project ever setting a suid bit on anything.
+
+   What is **not** verified: the `connect_is_active_notify` line itself. There is no `xdotool` or `wmctrl` here to take focus from an Xvfb window and give it back. The half underneath it is verified — repointing the helper mid-session and provoking a repaint takes the group off the page — so what is untested is the trigger, not the re-check.
 3. ~~**Reconcile toast**~~ — done, `architecture.md` §3. Left here for the one thing it found: the suppression of our own writes comes from the per-row `pending` flag, not from counting, so any figure rendered *outside* the page that writes it has no such flag and will announce the user's own click back at them. The Status module count is that figure, and it is now repainted without being counted. The stderr line no longer claims the change came from "outside the app"; it reports the count instead, which is a fact it has.
 4. **The certificate is seeded but not trusted.** `configure` turns HTTPS filtering on and silently skips its own *"Do you want to install the certificate on the system?"* prompt, because that one needs a password and there is no TTY (contract §7). So every install this app sets up ends with HTTPS filtering on and the CA outside the system trust store — filtering that will fail on the first HTTPS site until the user installs it. The assistant's HTTPS row says the certificate is needed, which is honest but weaker than it should be: nothing yet *detects* whether the CA is trusted, and §6 rules out installing it for the user, so the shape is the auto-mode one — detect, then show AdGuard's own instructions. Worth doing alongside gap 2, since they are the same kind of work.
 5. **The activation success leg is a claim, not a measurement.** Everything up to the browser log-in is proven, including against a real unlicensed install: `activate` hands back a link, the page shows it, *finish activation* re-runs `activate`, reads `license`, and says "not activated yet" without pretending otherwise. What nobody has watched is the leg after a genuine log-in — it needs a real account, and completing an activation spends a device slot. **This is the owner's call, not an agent's.** Two things go with it: what `activate` prints against an install that is *already* licensed is unmeasured for the same reason, and the "AdGuard is activated" wording has never been seen on screen.
