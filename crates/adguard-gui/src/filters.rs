@@ -12,8 +12,11 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use adguard_core::filters::{self, Catalogue};
-use adguard_core::{Cli, Filter, FilterCatalogue, FilterSet, FilterState, Locale};
+use adguard_core::{
+    Cli, Filter, FilterAction, FilterCatalogue, FilterSet, FilterState, Locale,
+};
 use adw::prelude::*;
+use gtk::glib;
 use gtk4 as gtk;
 use libadwaita as adw;
 
@@ -232,10 +235,167 @@ impl FiltersPage {
 
         group.add(&entry);
         for filter in customs {
-            group.add(&self.row(filter));
+            let row = self.row(filter);
+            row.add_suffix(&self.remove_button(filter));
+            group.add(&row);
         }
 
         group
+    }
+
+    /// The one control in this application that destroys something.
+    ///
+    /// **Only custom rows get one.** `filters remove` against a catalogue
+    /// filter merely clears `is_installed` and the row stays, so turning a
+    /// catalogue switch off is `disable` and there is nothing to remove;
+    /// against a custom filter the row is deleted from the database outright
+    /// and the only undo is re-fetching the URL (contract §6). That asymmetry
+    /// is why this is a button with a confirmation of its own rather than a
+    /// quiet suffix action — `architecture.md` §5.
+    ///
+    /// A suffix button rather than a swipe or a context menu because the row is
+    /// an `AdwSwitchRow` whose activatable widget is the switch: anything
+    /// subtler would be reached by the same gesture that toggles the list, and
+    /// "off" and "gone" are exactly the two things that must not be confusable
+    /// here.
+    fn remove_button(self: &Rc<Self>, filter: &Filter) -> gtk::Button {
+        let button = gtk::Button::from_icon_name("user-trash-symbolic");
+        button.set_tooltip_text(Some("Remove this list"));
+        button.set_valign(gtk::Align::Center);
+        button.add_css_class("flat");
+        // Adwaita's own colour for an action with no undo. The confirmation is
+        // the real safeguard; this is what stops the button reading as "off".
+        button.add_css_class("destructive-action");
+        // The switch already carries the row's name, so an icon button beside
+        // it reaches the accessibility tree as an unnamed control otherwise —
+        // and a screen reader would announce "button" next to every list.
+        button.update_property(&[gtk::accessible::Property::Label(&format!(
+            "Remove {}",
+            filter.display_name()
+        ))]);
+
+        let this = Rc::downgrade(self);
+        let filter = filter.clone();
+        button.connect_clicked(move |_| {
+            let Some(this) = this.upgrade() else {
+                return;
+            };
+            let filter = filter.clone();
+            glib::spawn_future_local(async move {
+                if this.confirm_removal(&filter).await {
+                    this.remove(&filter);
+                }
+            });
+        });
+
+        button
+    }
+
+    /// Ask before deleting a list, and say what cannot be undone.
+    ///
+    /// The wording names the URL because that is the only thing that can bring
+    /// the list back, and because a custom list installed without a `! Title:`
+    /// header has no name of its own — its URL *is* its identity (contract §6).
+    async fn confirm_removal(&self, filter: &Filter) -> bool {
+        let dialog = adw::AlertDialog::new(
+            Some("Remove this filter list?"),
+            Some(&format!(
+                "{} will be deleted from AdGuard, not just switched off. There is no \
+                 undo: getting it back means adding {} again.\n\nTo stop it filtering \
+                 without losing it, switch it off instead.",
+                filter.display_name(),
+                filter.download_url,
+            )),
+        );
+        // Not markup: a list's title is AdGuard's text or the user's, and both
+        // can carry `&` — the same rule every row and toast here follows.
+        dialog.set_body_use_markup(false);
+        dialog.add_response("cancel", "Cancel");
+        dialog.add_response("remove", "Remove");
+        dialog.set_response_appearance("remove", adw::ResponseAppearance::Destructive);
+        // Cancel is the default and the escape route, because the other answer
+        // is the irreversible one.
+        dialog.set_default_response(Some("cancel"));
+        dialog.set_close_response("cancel");
+
+        dialog.choose_future(Some(&self.bin)).await == "remove"
+    }
+
+    /// Delete one custom list, then confirm it against the database.
+    ///
+    /// Verified by the row being **gone**, not by `Filter [ID: …] removed`,
+    /// which proves nothing: every filter command exits 0 and prints a
+    /// confirmation whether or not it did anything (contract §6). This is the
+    /// mirror of `install`'s check — there, a row that was not there before;
+    /// here, a row that is not there after.
+    fn remove(self: &Rc<Self>, filter: &Filter) {
+        let id = filter.id;
+        let name = filter.display_name().to_owned();
+        if let Some(row) = self.rows.borrow().get(&id) {
+            // Insensitive for the duration, so the switch cannot be flipped on
+            // a filter that is being deleted.
+            row.switch.set_sensitive(false);
+        }
+
+        let cli = self.cli.clone();
+        let set = self.set;
+        let locale = self.locale.clone();
+        let this = self.clone();
+        worker::run(
+            move || {
+                let refused = cli
+                    .filter_action(set, FilterAction::Remove, id)
+                    .err()
+                    .map(|err| err.to_string());
+                // `None` when the catalogue could not be read at all, which is
+                // not the same as "no row with that id" — reporting an
+                // unreadable database as a successful deletion would be the
+                // worst possible direction to guess in.
+                let still_there = Catalogue::open_set(set)
+                    .and_then(|catalogue| catalogue.custom_filters(&locale))
+                    .ok()
+                    .map(|customs| customs.iter().any(|f| f.id == id));
+                (refused, still_there)
+            },
+            move |(refused, still_there)| this.settle_removal(id, &name, refused, still_there),
+        );
+    }
+
+    fn settle_removal(
+        self: &Rc<Self>,
+        id: i64,
+        name: &str,
+        refused: Option<String>,
+        still_there: Option<bool>,
+    ) {
+        match still_there {
+            Some(false) => {
+                self.toasts.add_toast(toast(&format!("Removed {name}")));
+                // A row has disappeared, so there is nothing to patch — the
+                // same reason `install` rebuilds rather than reconciling.
+                self.reload();
+            }
+            // The CLI's own wording first: a filter another window already
+            // removed comes back as `Failed to remove filter with ID: …:
+            // Filter not found`, which says more than we would.
+            Some(true) => {
+                if let Some(row) = self.rows.borrow().get(&id) {
+                    row.switch.set_sensitive(true);
+                }
+                self.toasts.add_toast(toast(&refused.unwrap_or_else(|| {
+                    format!("AdGuard reported {name} was removed, but it is still in the list")
+                })));
+            }
+            // The command may well have worked; we simply cannot say. Reload
+            // rather than claim either outcome, and let the page show what the
+            // database actually holds once it can be read.
+            None => {
+                self.toasts.add_toast(toast(&refused.unwrap_or_else(|| {
+                    format!("Could not re-read the catalogue to confirm {name} was removed")
+                })));
+                self.reload();
+            }
+        }
     }
 
     /// Fetch and subscribe to one list, then confirm it against the database.

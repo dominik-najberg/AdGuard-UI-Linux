@@ -317,6 +317,170 @@ fn a_custom_filter_can_be_switched_off_and_back_on() {
     assert!(sandbox.customs()[0].enabled, "and on again");
 }
 
+/// **The destructive one.** `remove` on a custom filter deletes the row.
+///
+/// Varied deliberately rather than asserted from one fixture, because this is
+/// the measurement a confirmation dialog is being built on and the last three
+/// cycles of this project were each lost to a sample that was too narrow:
+///
+/// * an *enabled* row and a *disabled* row, in case removal is only defined for
+///   one of them — it is not, both vanish;
+/// * two rows installed and one removed, so "the row is gone" is distinguished
+///   from "the table was cleared";
+/// * an id that never existed, which is refused rather than silently accepted;
+/// * and the same URL installed again afterwards, which is the only undo there
+///   is and had never been shown to work.
+#[test]
+#[ignore = "invokes the real adguard-cli"]
+fn removing_a_custom_filter_deletes_the_row() {
+    let Some(sandbox) = Sandbox::new("remove") else {
+        return;
+    };
+
+    // Two rows, so removing one proves a deletion and not a truncation.
+    let first = sandbox.list("first.txt", TITLED);
+    let second = sandbox.list(
+        "second.txt",
+        "! Title: Second Sandbox List\n||probe-three.example^\n",
+    );
+    sandbox.install(&first).expect("install the first");
+    sandbox.install(&second).expect("install the second");
+
+    let customs = sandbox.customs();
+    assert_eq!(customs.len(), 2, "expected two custom rows, got {customs:?}");
+    // `custom_filters` orders by `filter_id` ascending and custom ids *descend*
+    // from -10001, so index 0 is the row installed **last**. Naming these by
+    // position rather than by which file they came from is how the first draft
+    // of this test asserted the survivor against the wrong URL.
+    let (keep, drop) = (customs[0].id, customs[1].id);
+    let kept_url = customs[0].download_url.clone();
+    let dropped_url = customs[1].download_url.clone();
+    assert!(kept_url.ends_with("second.txt"), "newest first: {kept_url}");
+    assert!(dropped_url.ends_with("first.txt"), "oldest last: {dropped_url}");
+    eprintln!("installed -> keep {keep} ({kept_url}), drop {drop} ({dropped_url})");
+
+    // The row about to go is *enabled*; the disabled case is exercised below.
+    assert!(customs[1].enabled, "install leaves a row enabled");
+
+    sandbox
+        .cli
+        .filter_action(FilterSet::Http, FilterAction::Remove, drop)
+        .unwrap_or_else(|err| panic!("removing {drop} refused: {err}"));
+
+    let after = sandbox.customs();
+    eprintln!("after removing {drop} -> {after:?}");
+    assert_eq!(after.len(), 1, "exactly one row should be left, got {after:?}");
+    assert_eq!(after[0].id, keep, "the wrong row was removed");
+    assert_eq!(after[0].download_url, kept_url, "the survivor changed");
+    assert!(
+        !after.iter().any(|f| f.id == drop),
+        "the removed id is still present: {after:?}"
+    );
+
+    // A *disabled* custom row goes just as completely. Worth its own leg
+    // because `disable` and `remove` are the two halves of the asymmetry this
+    // whole design turns on, and "off" must not quietly mean "already gone".
+    sandbox
+        .cli
+        .filter_action(FilterSet::Http, FilterAction::Disable, keep)
+        .unwrap_or_else(|err| panic!("disabling {keep} refused: {err}"));
+    assert!(!sandbox.customs()[0].enabled, "the row should be off first");
+    sandbox
+        .cli
+        .filter_action(FilterSet::Http, FilterAction::Remove, keep)
+        .unwrap_or_else(|err| panic!("removing the disabled {keep} refused: {err}"));
+    assert!(
+        sandbox.customs().is_empty(),
+        "a disabled custom row should be removed too, got {:?}",
+        sandbox.customs()
+    );
+
+    // The only undo there is: install the same URL again. It works because
+    // deduplication is by URL and the row that held it is gone — but the new
+    // row gets a *fresh* id, since custom ids are never reused (contract §6).
+    sandbox.install(&first).expect("re-fetching the URL is the undo");
+    let restored = sandbox.customs();
+    assert_eq!(restored.len(), 1, "the re-install should be back, got {restored:?}");
+    assert_eq!(
+        restored[0].download_url, dropped_url,
+        "`first.txt` is the list that was re-installed"
+    );
+    assert!(
+        restored[0].id != keep && restored[0].id != drop,
+        "a re-installed row should get a fresh id, got {} after {keep}/{drop}",
+        restored[0].id
+    );
+    eprintln!("re-installed -> {} (was {drop})", restored[0].id);
+
+    // An id that never existed is refused, not silently accepted. This is the
+    // shape a stale UI row would send: the user presses remove on a filter
+    // another window already deleted.
+    let absent = -99_999;
+    let refusal = sandbox
+        .cli
+        .filter_action(FilterSet::Http, FilterAction::Remove, absent);
+    eprintln!("removing the absent {absent} -> {refusal:?}");
+    assert!(
+        refusal.is_err(),
+        "removing an id that does not exist should be refused, got {refusal:?}"
+    );
+    assert_eq!(
+        sandbox.customs().len(),
+        1,
+        "a refused removal must not touch the rows that do exist"
+    );
+}
+
+/// The other half of the asymmetry: `remove` on a **catalogue** filter leaves
+/// the row in place and only clears `is_installed`.
+///
+/// Contract §6 has stated this since before custom filters existed, but it was
+/// measured against the machine's own catalogue at the time. Pinned here, in a
+/// sandbox, because it is the claim that justifies the *whole* design — if
+/// `remove` were uniformly destructive there would be nothing special about a
+/// custom row and no reason for a confirmation only it gets.
+#[test]
+#[ignore = "invokes the real adguard-cli"]
+fn removing_a_catalogue_filter_only_uninstalls_it() {
+    let Some(sandbox) = Sandbox::new("catalogue-remove") else {
+        return;
+    };
+
+    // Any catalogue filter will do; 2 is AdGuard Base and is present in every
+    // seeded database. Read it back rather than assuming what `add` did.
+    let id = 2;
+    sandbox
+        .cli
+        .filter_action(FilterSet::Http, FilterAction::Add, id)
+        .unwrap_or_else(|err| panic!("adding {id} refused: {err}"));
+
+    let catalogue = Catalogue::open(&sandbox.db()).expect("open the sandbox catalogue");
+    let before = catalogue
+        .filters(&sandbox.locale)
+        .expect("read the catalogue")
+        .into_iter()
+        .find(|f| f.id == id)
+        .expect("filter 2 should exist in a seeded database");
+    eprintln!("before remove -> {before:?}");
+    assert!(before.installed, "add should have installed it");
+
+    sandbox
+        .cli
+        .filter_action(FilterSet::Http, FilterAction::Remove, id)
+        .unwrap_or_else(|err| panic!("removing {id} refused: {err}"));
+
+    let after = Catalogue::open(&sandbox.db())
+        .expect("reopen the sandbox catalogue")
+        .filters(&sandbox.locale)
+        .expect("re-read the catalogue")
+        .into_iter()
+        .find(|f| f.id == id);
+    eprintln!("after remove -> {after:?}");
+
+    let after = after.expect("a catalogue row must survive `remove` — this is the asymmetry");
+    assert!(!after.installed, "remove should clear is_installed, got {after:?}");
+}
+
 /// The safety assertion this suite owes the machine it runs on.
 ///
 /// Mirrors `config_sandbox::the_machine_config_was_not_touched`. A sandbox that

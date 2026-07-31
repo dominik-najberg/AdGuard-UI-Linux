@@ -831,6 +831,15 @@ pub enum FilterAction {
     Add,
     Enable,
     Disable,
+    /// `filters remove` — **and it does two different things.**
+    ///
+    /// Against a catalogue filter it only clears `is_installed` and the row
+    /// stays, which is why turning a switch off is [`Self::Disable`] everywhere
+    /// in this app and never this. Against a *custom* filter the row is deleted
+    /// from `filter` outright and there is no undo but re-fetching the URL
+    /// (contract §6). That asymmetry is the whole reason removal is a
+    /// confirmed action of its own rather than a quiet suffix button.
+    Remove,
 }
 
 impl FilterAction {
@@ -839,6 +848,7 @@ impl FilterAction {
             Self::Add => "add",
             Self::Enable => "enable",
             Self::Disable => "disable",
+            Self::Remove => "remove",
         }
     }
 
@@ -849,7 +859,17 @@ impl FilterAction {
             Self::Add => "added",
             Self::Enable => "enabled",
             Self::Disable => "disabled",
+            Self::Remove => "removed",
         }
+    }
+
+    /// Whether this action can destroy something the user cannot get back.
+    ///
+    /// True only for [`Self::Remove`], and only *because* of what it does to a
+    /// custom row — the caller still has to know which kind of filter it holds.
+    /// Kept here so the answer is beside the asymmetry it comes from.
+    pub fn is_destructive(self) -> bool {
+        matches!(self, Self::Remove)
     }
 }
 

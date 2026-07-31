@@ -581,6 +581,29 @@ An earlier revision of this section said content was *never* validated, generali
 
 **`filters remove` on a custom filter deletes the row outright.** For a catalogue filter, `remove` only clears `is_installed` and the row stays (§6 above). For a custom one the row is gone from `filter` entirely — `Filter [ID: -10004, Title: …] removed` — which makes it the one genuinely destructive filter operation and not a mirror of `install`. There is no undo but re-fetching the URL.
 
+### Removal, measured from both sides
+
+Pinned by `filters_sandbox::removing_a_custom_filter_deletes_the_row` and `…::removing_a_catalogue_filter_only_uninstalls_it`, because this asymmetry is what a confirmation dialog is built on and it had only ever been measured in one direction:
+
+| Case | Result |
+| --- | --- |
+| `remove` a custom row that is **enabled** | the row is gone from `filter` |
+| `remove` a custom row that is **disabled** | also gone — "off" does not already mean removed |
+| two custom rows, one removed | only that one goes; the other keeps its id and URL |
+| `remove` a **catalogue** filter | the row **survives**, with `is_installed=0` *and* `is_enabled=0` |
+| `remove -99999` (never existed) | refused: `Failed to remove filter with ID: -99999: Filter not found`, and nothing else is touched |
+| install the same URL again after removal | succeeds, with a **fresh id** |
+
+Three things worth taking from that table.
+
+The catalogue leg clears **both** flags. §6's own table above says `is_installed=0` and is silent about `is_enabled`; measured, a filter that was enabled comes back `enabled: false, installed: false`. Nothing in this UI depends on the difference — a row that is not installed renders off either way — but the table was incomplete rather than wrong, and an incomplete measurement is how the last three corrections in this document started.
+
+The absent-id refusal is the one a UI will actually hit: two windows open, or a stale page, and the user presses remove on a filter that is already gone. It arrives as `Error::Refused`, which the wrapper already maps, so the failure path needs no new handling — only wording that does not claim the filter is still there.
+
+**Ids are never reused, so removal is not undoable by id.** Re-installing the URL brings the list back as a *new* row: `-10001` removed and re-fetched came back as `-10003`. Anything holding an id across a removal — a pending write, a row widget, an undo affordance — is holding a dangling reference, which is the concrete reason this action is confirmed up front rather than offered as an undo afterwards.
+
+**And custom rows sort newest-first.** `Catalogue::custom_filters` orders by `filter_id` ascending while custom ids *descend* from `-10001`, so index 0 is the most recently installed list. That is stable, unlike the `display_number = 0` ordering warned about above, but it is the opposite of the order they were added in — worth knowing before indexing into that list in a test or a UI.
+
 **`proxy.yaml` is not touched.** Its `filters` list still reads `['flm://', 'user.txt']` after four installs; custom lists live only in the database, behind that `flm://` entry. So no `config list-add` is involved and nothing here needs the write path of [§5](#5-configuration-writes).
 
 ---
