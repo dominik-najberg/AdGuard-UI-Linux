@@ -69,12 +69,51 @@ struct Widgets {
     user_rules: adw::SwitchRow,
 }
 
+/// What each row of the settings half was last painted from.
+///
+/// One field per row the user can see, so `paint` can report how many of them
+/// actually moved rather than how many keys did — the mode row alone reads
+/// three settings, and an edit to any of them moves exactly one row.
+///
+/// It lives on the page rather than on [`Widgets`], which is replaced whenever
+/// the catalogue rebuilds. Resetting it there would make the first reconcile
+/// after any rebuild report all five rows as moved, including when the edit was
+/// to a key this page never shows.
+struct Painted {
+    mode: String,
+    upstream: String,
+    fallbacks: String,
+    bootstraps: String,
+    user_rules: String,
+}
+
+impl Painted {
+    /// How many of the five rows differ. Field by field rather than a whole-
+    /// struct comparison, because the answer is a count and not a yes/no.
+    fn moved_to(&self, next: &Self) -> usize {
+        [
+            self.mode != next.mode,
+            self.upstream != next.upstream,
+            self.fallbacks != next.fallbacks,
+            self.bootstraps != next.bootstraps,
+            self.user_rules != next.user_rules,
+        ]
+        .into_iter()
+        .filter(|differs| *differs)
+        .count()
+    }
+}
+
 pub struct DnsPage {
     cli: Cli,
     toasts: adw::ToastOverlay,
     /// The catalogue, which owns the page's actual widget.
     catalogue: RefCell<Option<Rc<FiltersPage>>>,
     widgets: RefCell<Option<Widgets>>,
+    /// `None` until the first paint. A page that has never rendered has nothing
+    /// the user could have been looking at, so its first paint moves no rows —
+    /// the same rule the other pages state as "no rows yet returns zero".
+    painted: RefCell<Option<Painted>>,
     /// The reading every decision on this page is made against. `config set`
     /// and `list-add` both report success for changes they did not make, so the
     /// file is the only witness — and for the list commands it is also the only
@@ -94,6 +133,7 @@ impl DnsPage {
             toasts: toasts.clone(),
             catalogue: RefCell::new(None),
             widgets: RefCell::new(None),
+            painted: RefCell::new(None),
             last: RefCell::new(None),
             painting: Cell::new(false),
             pending: Cell::new(false),
@@ -161,12 +201,20 @@ impl DnsPage {
     /// place rather than rebuilding, for the reason the Advanced page does:
     /// a rebuild would discard a half-typed entry. A page that has no widgets
     /// yet has nothing to patch, so it reloads instead and heals.
-    pub fn reconcile(self: &Rc<Self>, config: &Config) {
+    ///
+    /// Returns how many rows the user could have been looking at actually
+    /// moved, which is what [`crate::watch`] gates its toast on. A page with no
+    /// widgets yet returns zero even though it reloads: there was nothing on
+    /// screen to change.
+    pub fn reconcile(self: &Rc<Self>, config: &Config) -> usize {
         *self.last.borrow_mut() = Some(config.clone());
         if self.widgets.borrow().is_some() {
-            self.paint(config);
-        } else if let Some(catalogue) = self.catalogue.borrow().as_ref() {
-            catalogue.reload();
+            self.paint(config)
+        } else {
+            if let Some(catalogue) = self.catalogue.borrow().as_ref() {
+                catalogue.reload();
+            }
+            0
         }
     }
 
@@ -261,7 +309,11 @@ impl DnsPage {
         // finished, so paint from whatever reading is current — and refresh if
         // there is none yet.
         match self.last.borrow().as_ref() {
-            Some(config) => self.paint(config),
+            // The count is not interesting here — this is the first paint of a
+            // freshly built prelude, and `paint` reports zero for it anyway.
+            Some(config) => {
+                self.paint(config);
+            }
             None => self.refresh_config(),
         }
 
@@ -333,16 +385,48 @@ impl DnsPage {
     // ---- painting -------------------------------------------------------
 
     /// Render every row from one reading of the file.
-    fn paint(self: &Rc<Self>, config: &Config) {
+    ///
+    /// Returns the number of rows that actually moved. The rows are still
+    /// written unconditionally — the count is taken from a snapshot beside
+    /// them, not by skipping work — because this page's writes go out without a
+    /// per-row guard and a repaint is what corrects a `config set` the CLI
+    /// accepted without acting on.
+    ///
+    /// A write of our own in flight returns zero without painting, which is
+    /// what stops the app announcing its own change: by the time the monitor
+    /// looks, `proxy.yaml` really has moved, and the only reason that is not
+    /// news is that we moved it.
+    fn paint(self: &Rc<Self>, config: &Config) -> usize {
         let widgets = self.widgets.borrow();
         let Some(widgets) = widgets.as_ref() else {
-            return;
+            return 0;
         };
         // A write in flight owns the rows until it settles; a stale snapshot
         // would otherwise revert the value the user just chose.
         if self.pending.get() {
-            return;
+            return 0;
         }
+
+        // One entry per row, taken before anything is written, and covering
+        // every setting that row displays rather than only the one it writes:
+        // the mode row's subtitle reads `dns_filtering.enabled` too, and moves
+        // when that does.
+        let fresh = Painted {
+            mode: format!(
+                "{:?} filtering={:?}",
+                config.dns_listen_port(),
+                config.bool_at(key::DNS_FILTERING)
+            ),
+            upstream: format!("{:?}", config.str_at(key::DNS_UPSTREAM)),
+            fallbacks: format!("{:?}", config.str_at(key::DNS_FALLBACKS)),
+            bootstraps: format!("{:?}", config.str_at(key::DNS_BOOTSTRAPS)),
+            user_rules: format!("{:?}", config.lists(key::DNS_FILTERS, DNS_USER_RULES_ENTRY)),
+        };
+        let moved = match self.painted.borrow().as_ref() {
+            Some(before) => before.moved_to(&fresh),
+            None => 0,
+        };
+        *self.painted.borrow_mut() = Some(fresh);
 
         self.painting.set(true);
 
@@ -411,6 +495,7 @@ impl DnsPage {
         }
 
         self.painting.set(false);
+        moved
     }
 
     /// Say what the chosen state actually does, including when it does nothing.

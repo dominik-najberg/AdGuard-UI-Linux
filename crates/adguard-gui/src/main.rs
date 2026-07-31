@@ -577,7 +577,7 @@ fn main_view(cli: &Cli) -> MainView {
 
     // After the pages are built, so priming the snapshot cannot race the first
     // render, and so a repaint always has rows to patch rather than a spinner.
-    let watch = watch::install(&status, &protection, &[advanced, stealth], &dns);
+    let watch = watch::install(&status, &protection, &[advanced, stealth], &dns, &toasts);
 
     MainView {
         root: split,

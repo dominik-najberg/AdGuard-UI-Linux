@@ -15,20 +15,38 @@
 //! answer, not the event, is what drives a repaint. The filtering lives in
 //! `adguard-core` because it is the part worth unit-testing, and this module is
 //! only the GTK plumbing around it.
+//!
+//! **A content change is still not news.** The file moving is not evidence that
+//! anything the user can see moved, and it is not evidence the change came from
+//! anywhere in particular: `Watch::prime` runs once at install and nothing
+//! re-primes after the app's own `config set`, so a switch flipped on the
+//! Protection page produces a perfectly genuine content change here. Re-priming
+//! after each write is not the fix — our write and the re-prime are not atomic,
+//! and losing that race either announces a change that was ours or misses one
+//! that was not (`architecture.md` §3).
+//!
+//! What is reportable is narrower and needs no provenance: **a row the user can
+//! see moved**. Every `reconcile` below returns how many of its rows differed,
+//! and only a non-zero total raises a toast. Our own writes then suppress
+//! themselves for free — the page that issued one has already rendered it, and
+//! its row is skipped while the write is in flight — and an edit to a key no
+//! page displays stays silent, which is right, because nothing on screen
+//! changed.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use adguard_core::{Config, Watch};
+use adw::prelude::*;
 use gtk::gio;
-use gtk::prelude::*;
 use gtk4 as gtk;
+use libadwaita as adw;
 
 use crate::advanced::AdvancedPage;
 use crate::dns::DnsPage;
 use crate::protection::ProtectionPage;
 use crate::status::StatusPage;
-use crate::worker;
+use crate::{toast, worker};
 
 /// A live subscription to `proxy.yaml`.
 ///
@@ -59,6 +77,11 @@ struct State {
     /// Its settings half renders from `proxy.yaml` too; its catalogue half
     /// does not, and is left alone by this.
     dns: Rc<DnsPage>,
+    /// Where the one toast goes. The window's overlay, so it appears over
+    /// whichever page is showing — including a page that is not the one whose
+    /// row moved, which is the common case: the user is looking at Status while
+    /// a terminal edits a Protection key.
+    toasts: adw::ToastOverlay,
 }
 
 /// Start watching, returning `None` if the file cannot be located or the
@@ -71,6 +94,7 @@ pub fn install(
     protection: &Rc<ProtectionPage>,
     tables: &[Rc<AdvancedPage>],
     dns: &Rc<DnsPage>,
+    toasts: &adw::ToastOverlay,
 ) -> Option<ConfigWatch> {
     let mut watch = Watch::on_config()?;
     let file = gio::File::for_path(watch.path());
@@ -96,6 +120,7 @@ pub fn install(
         protection: protection.clone(),
         tables: tables.to_vec(),
         dns: dns.clone(),
+        toasts: toasts.clone(),
     });
 
     monitor.connect_changed({
@@ -141,17 +166,42 @@ fn look(state: &Rc<State>) {
             state.busy.set(false);
 
             if let Some(config) = changed {
+                // Repainted but never counted — its one figure is derived from
+                // the six keys Protection owns, so it moves for our own writes
+                // too and has no pending flag to tell them apart. See
+                // `StatusPage::reconcile`.
+                state.status.reconcile(&config);
+
+                let mut moved = state.protection.reconcile(&config);
+                for page in &state.tables {
+                    moved += page.reconcile(&config);
+                }
+                moved += state.dns.reconcile(&config);
+
                 // The only headless evidence that the churn filter works: this
                 // line appears for a real edit and not for the app's own
                 // traffic. It is also a permanent diagnostic for the next
                 // person who wonders whether the monitor is doing anything.
-                eprintln!("adguard-ui: proxy.yaml changed outside the app, reconciling");
-                state.status.reconcile(&config);
-                state.protection.reconcile(&config);
-                for page in &state.tables {
-                    page.reconcile(&config);
+                //
+                // It used to say the change came from "outside the app", which
+                // it has no way to know — see this module's header. What it can
+                // say is what it did: the file moved, and this many rows moved
+                // with it. Zero is the interesting reading, not a boring one:
+                // it is what the app's own writes and the 2 s status poll both
+                // look like.
+                eprintln!("adguard-ui: proxy.yaml changed, {moved} displayed row(s) differed");
+
+                // One toast for the whole reading, not one per page. The count
+                // is only a gate: a single key can legitimately move rows on
+                // two pages — `dns_filtering.enabled` is shown on Protection
+                // and read by the DNS page's mode row — so quoting the number
+                // back at the user would be arithmetic about widgets, not about
+                // settings.
+                if moved > 0 {
+                    state
+                        .toasts
+                        .add_toast(toast("Settings reloaded — proxy.yaml changed"));
                 }
-                state.dns.reconcile(&config);
             }
 
             // Something arrived mid-read; the file may have moved again since.

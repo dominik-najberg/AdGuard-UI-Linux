@@ -37,6 +37,16 @@ struct Row {
     /// mid-flight. Rows with a pending write are left alone; their own
     /// `settle` renders them.
     pending: Cell<bool>,
+    /// Everything this row displays, as it was last painted — `None` before the
+    /// first paint.
+    ///
+    /// The Advanced page has carried one of these since it was written, to skip
+    /// redundant widget writes. Here it earns its place for the other reason:
+    /// `apply` reports how many rows actually moved, and the only way to answer
+    /// that is to remember what was on screen. It covers the caveat and the
+    /// subtitle as well as the switch, because the DNS filtering row can change
+    /// visibly without its own key moving at all.
+    painted: RefCell<Option<String>>,
 }
 
 pub struct ProtectionPage {
@@ -125,12 +135,18 @@ impl ProtectionPage {
     /// The one case that does need a rebuild is a page showing a spinner or an
     /// error, which has no rows to patch — so an unreadable config that becomes
     /// readable heals itself rather than staying stuck on "unavailable".
-    pub fn reconcile(self: &Rc<Self>, config: &Config) {
+    ///
+    /// Returns how many rows the user could have been looking at actually
+    /// moved, which is what [`crate::watch`] gates its toast on. A page with no
+    /// rows yet returns zero even though it reloads: there was nothing on
+    /// screen to change.
+    pub fn reconcile(self: &Rc<Self>, config: &Config) -> usize {
         let unbuilt = self.rows.borrow().is_empty();
         if unbuilt {
             self.reload();
+            0
         } else {
-            self.apply(config);
+            self.apply(config)
         }
     }
 
@@ -187,6 +203,7 @@ impl ProtectionPage {
             switch: switch.clone(),
             caveat,
             pending: Cell::new(false),
+            painted: RefCell::new(None),
         });
 
         switch
@@ -198,12 +215,19 @@ impl ProtectionPage {
     /// `config set` can touch more than the key it was given (setting
     /// `listen_address` echoes `listen_auth` back too), so the cheapest way to
     /// stay truthful is to re-render everything from the file we just read.
-    fn apply(&self, config: &Config) {
+    ///
+    /// Returns the number of rows that actually moved. A row with a write in
+    /// flight is skipped and so never counts, which is what makes the app's own
+    /// writes stop announcing themselves: by the time the file monitor looks,
+    /// the file really has changed, and the only reason that is not news is
+    /// that we are the ones who changed it.
+    fn apply(&self, config: &Config) -> usize {
         if let Some(observer) = self.observer.borrow().as_ref() {
             observer(config);
         }
 
         let dns_is_inert = config.dns_filtering_is_inert();
+        let mut moved = 0;
 
         for row in self.rows.borrow().iter() {
             // Someone else's snapshot must not overwrite a row that is still
@@ -212,7 +236,19 @@ impl ProtectionPage {
                 continue;
             }
 
-            match config.toggle(row.toggle) {
+            // Everything this row displays. `dns_is_inert` is folded in only
+            // for the row it can reach, so a `dns_filtering.listen_port` edit
+            // moves that one row rather than appearing to move all six.
+            let state = config.toggle(row.toggle);
+            let inert = state == Some(true) && dns_is_inert && row.toggle == Toggle::DnsFiltering;
+            let snapshot = format!("{state:?} inert={inert}");
+            if row.painted.borrow().as_deref() == Some(snapshot.as_str()) {
+                continue;
+            }
+            row.painted.replace(Some(snapshot));
+            moved += 1;
+
+            match state {
                 Some(on) => {
                     row.switch.set_sensitive(true);
                     self.set_active(&row.switch, on);
@@ -221,8 +257,8 @@ impl ProtectionPage {
                     // proxy mode nothing listens for DNS unless
                     // `dns_filtering.listen_port` names a port. Only worth
                     // saying while the switch is on — that is the state that
-                    // promises protection it is not delivering.
-                    let inert = on && dns_is_inert && row.toggle == Toggle::DnsFiltering;
+                    // promises protection it is not delivering. Computed above,
+                    // because the snapshot has to carry it too.
                     row.caveat.set_visible(inert);
                     row.switch.set_subtitle(if inert {
                         "No effect in manual proxy mode until dns_filtering.listen_port \
@@ -244,6 +280,8 @@ impl ProtectionPage {
                 }
             }
         }
+
+        moved
     }
 
     /// Send one switch flip to the CLI, then confirm it against the file.
@@ -286,6 +324,13 @@ impl ProtectionPage {
         // *does* render from the snapshot it was verified against.
         if let Some(row) = self.rows.borrow().iter().find(|row| row.toggle == toggle) {
             row.pending.set(false);
+            // And force it to repaint even if the file did not move, which is
+            // the case that matters: the click already flipped the widget, so a
+            // write the CLI accepted without acting on leaves the switch showing
+            // a value that never landed and a snapshot that agrees with the
+            // file. The Advanced page carries the same line, for the same
+            // reason — see `AdvancedPage::repaint`.
+            row.painted.replace(None);
             // If the file became unreadable between the write and the re-read
             // there is nothing to render from, so at least leave the switch
             // usable rather than stranding it insensitive.

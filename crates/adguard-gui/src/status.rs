@@ -524,6 +524,22 @@ impl StatusPage {
     /// Takes the config it was given rather than reading the file again: the
     /// watch has just read it, and the two must not be able to disagree. The
     /// filter counts are untouched, since `proxy.yaml` says nothing about them.
+    ///
+    /// **This is the one reconcile that reports no count**, and the exception is
+    /// deliberate. Every other page gates its count on a per-row `pending` flag,
+    /// which is what makes the app's own writes silent: the page that issued the
+    /// write is holding the row, so the row does not count as having moved.
+    ///
+    /// This figure has no such flag and could not have one. It is derived from
+    /// the six `Toggle::ALL` keys the *Protection* page writes, so it moves
+    /// whenever any of them does — measured: flipping ad blocking in the app
+    /// left Protection's own row correctly silent and this figure reporting a
+    /// change, which raised a toast announcing the user's own click back at
+    /// them. Counting it defeats the entire point of counting.
+    ///
+    /// Nothing is lost by leaving it out. `module_count` reads exactly the keys
+    /// Protection displays, so this figure cannot move without a Protection row
+    /// moving too — there is no edit that would go unreported because of this.
     pub fn reconcile(&self, config: &Config) {
         self.set_modules(Some(module_count(config)));
     }

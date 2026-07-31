@@ -186,12 +186,18 @@ impl AdvancedPage {
     /// The one case that does need a rebuild is a page showing a spinner or an
     /// error, which has no rows to patch — so an unreadable config that becomes
     /// readable heals itself rather than staying stuck on "unavailable".
-    pub fn reconcile(self: &Rc<Self>, config: &Config) {
+    ///
+    /// Returns how many rows the user could have been looking at actually
+    /// moved, which is what [`crate::watch`] gates its toast on. A page with no
+    /// rows yet returns zero even though it reloads: there was nothing on
+    /// screen to change.
+    pub fn reconcile(self: &Rc<Self>, config: &Config) -> usize {
         let unbuilt = self.rows.borrow().is_empty();
         if unbuilt {
             self.reload();
+            0
         } else {
-            self.apply(config);
+            self.apply(config)
         }
     }
 
@@ -360,14 +366,23 @@ impl AdvancedPage {
     /// can touch more than the key it was given — setting `listen_address`
     /// echoes `listen_auth` back too — so re-rendering everything from the file
     /// we just read is the cheapest way to stay truthful.
-    fn apply(&self, config: &Config) {
+    ///
+    /// Returns the number of rows that actually moved. A row with a write in
+    /// flight is skipped and so never counts, which is what makes the app's own
+    /// writes stop announcing themselves: the file has genuinely changed by the
+    /// time the monitor looks, and the only reason that is not news is that we
+    /// are the ones who changed it.
+    fn apply(&self, config: &Config) -> usize {
+        let mut moved = 0;
         for row in self.rows.borrow().iter() {
             // Someone else's snapshot must not overwrite a row still waiting on
             // its own write.
             if row.pending.get() {
                 continue;
             }
-            self.render(row, config);
+            if self.render(row, config) {
+                moved += 1;
+            }
         }
 
         // The credential requirement, stated before the user meets it the hard
@@ -389,6 +404,7 @@ impl AdvancedPage {
         }
 
         self.last.replace(Some(config.clone()));
+        moved
     }
 
     /// Force the next [`Self::render`] of this row to repaint, even if the file
@@ -403,20 +419,32 @@ impl AdvancedPage {
         row.painted.replace(None);
     }
 
-    fn render(&self, row: &Rc<Row>, config: &Config) {
+    /// Returns whether the row actually moved — false when the snapshot below
+    /// matches what is already on screen and nothing was touched. That answer is
+    /// what `apply` counts, so it has to cover **everything the row displays**,
+    /// not just the setting it writes.
+    fn render(&self, row: &Rc<Row>, config: &Config) -> bool {
         let setting = row.setting;
 
         // What the file says about this one setting, in a form that distinguishes
-        // absent from empty. Every branch below depends only on this key, so an
-        // unchanged value means an unchanged row.
-        let snapshot = match setting.kind {
+        // absent from empty — plus, for the two settings that have one, the
+        // dependency `mark_unmet_dependency` reads. That second half is not
+        // decoration: `https_filtering.encrypted_client_hello` renders a caveat
+        // that depends on `dns_filtering.enabled`, so keying the snapshot on the
+        // row's own value alone left the caveat stale when the *dependency* was
+        // the thing that moved, and would now also have the row reporting that
+        // nothing changed while its subtitle did.
+        let mut snapshot = match setting.kind {
             Kind::Switch => format!("{:?}", config.bool_at(setting.key)),
             Kind::Number { .. } => format!("{:?}", config.int_at(setting.key)),
             Kind::Text { .. } => format!("{:?}", config.str_at(setting.key)),
             Kind::Choice { options } => format!("{:?}", config.choice_at(setting.key, options)),
         };
+        if let Some(required) = setting.requires() {
+            snapshot.push_str(&format!(" requires {:?}", config.bool_at(required)));
+        }
         if row.painted.borrow().as_deref() == Some(snapshot.as_str()) {
-            return;
+            return false;
         }
         row.painted.replace(Some(snapshot));
 
@@ -520,6 +548,7 @@ impl AdvancedPage {
         }
 
         self.mark_unmet_dependency(row, config);
+        true
     }
 
     /// Flag a setting that reads fine but currently does nothing.
