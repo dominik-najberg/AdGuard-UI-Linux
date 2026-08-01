@@ -1,28 +1,50 @@
 # Handoff
 
-> **Where the night of 31 July 2026 stopped.** All three items of
-> `overnight-plan.md` §2 are **done, pushed, and verified headlessly** — the
-> reconcile toast (§2.1), auto mode (§2.2), and custom filter removal (§2.3).
-> **That completes v1 as `architecture.md` §7 scopes it.** The real
-> `proxy.yaml` still hashes to `c4b58ce8…`, unchanged across all three commits.
+> **Where the session of 1 August 2026 stopped.** Both items the previous note
+> called ready are **done, committed, and verified**: **certificate-trust
+> detection** (§3 gap 4) and **packaging** — a `.deb` and a tarball, behind
+> `make package`. The real `proxy.yaml` still hashes to `c4b58ce8…`, unchanged
+> across both commits, and nothing was installed into the system trust store or
+> anywhere else.
 >
-> **What is next is not more v1.** Two things are open and neither is an
-> agent's to take:
+> **One thing is left open, and it is still not an agent's to take:** the
+> activation success leg (§3 gap 5). It needs a real account and spends a
+> device slot.
 >
-> 1. **The activation success leg** (§3 gap 5). Unchanged, and still the
->    owner's call — it needs a real account and spends a device slot.
-> 2. **CA trust detection** (§3 gap 4). The same detect-then-instruct shape as
->    auto mode, and now that auto mode exists there is a pattern to copy:
->    `helper::RootHelper` is the model, `AdvancedPage::paint_helper` is the
->    rendering, and the focus re-check is already wired. This is the obvious
->    next piece of work and it needs no decision from anyone.
+> Five things from this session worth carrying forward:
 >
-> Three things from tonight worth carrying forward:
+> - **`configure` does not generate a CA when `adguard.conf` is present — it
+>   reproduces the existing one, byte for byte** (contract §8). So that one file
+>   carries the CA's private key as well as the licence key, and the sandbox
+>   recipe in `building.md` §3 copies rather more than it used to admit. It also
+>   means a first-run sandbox on this machine inherits a certificate the system
+>   already trusts, which is why the assistant's certificate rows are correctly
+>   *invisible* there — that read as a bug for a while and was not one.
+> - **The system trust bundle carries no names at all.** `grep AdGuard
+>   /etc/ssl/certs/ca-certificates.crt` returns nothing on a machine where the
+>   certificate *is* trusted. Membership is decided on the certificate's own
+>   base64 body, and anything that looks up a trust store by name is wrong.
+> - **AdGuard's installer checks the anchor path, not its contents**, so a
+>   regenerated CA leaves a file of the right name holding the wrong certificate
+>   that re-running the installer reports success over. That state is detected
+>   and named separately, and it is why the check compares bytes.
+> - **A command this app shows is a command it vouches for.** The certificate
+>   path comes from a setting, so `trust::quotable` refuses any path that would
+>   break out of AdGuard's quoting rather than handing the user a line that does
+>   something other than what the row says (`architecture.md` §6).
+> - **`$DISPLAY` leaks into a headless harness and nothing tells you.** The
+>   window opens on the real desktop through Xwayland, the AT-SPI walk passes
+>   because the accessibility bus does not care which X server drew anything,
+>   and only the frame grab — black, with an X cursor — gives it away.
+>   `building.md` §3 now says so.
+>
+> Three from the night before, still true:
 >
 > - The Status page's module figure is **repainted but not counted** by the
 >   reconcile, because it is derived from the keys Protection owns and so moves
->   for the app's own writes (`architecture.md` §3). A later page that renders a
->   figure derived from another page's keys wants the same treatment.
+>   for the app's own writes (`architecture.md` §3). The certificate rows are
+>   now the second thing painted under that rule, for a different reason: they
+>   do not come from `proxy.yaml` at all.
 > - `config set proxy_mode auto` **succeeds with AdGuard's root helper unmet**
 >   (contract §8), which is why the gate lives in this app and why the unmet
 >   state is rendered rather than merely prevented.
@@ -40,7 +62,7 @@ That subsection also carries the correction worth reading before trusting anythi
 
 ## 1. Where things stand
 
-**159 tests pass by default** and 44 more are `#[ignore]`d.
+**176 tests pass by default** and 44 more are `#[ignore]`d.
 
 | Page | State |
 | --- | --- |
@@ -60,6 +82,8 @@ That subsection also carries the correction worth reading before trusting anythi
 | Custom filter removal | Done. A trash button on custom rows only, behind an `AdwAlertDialog` that names the URL and offers switching off instead; verified by the row being gone from the database. `architecture.md` §5. |
 | Auto mode | Done. A `proxy_mode` row on Advanced, AdGuard's three-property helper check beside it, its `sudo` command with a copy button, and a re-check on window focus. No privileged component of ours, `architecture.md` §6. |
 | Reconcile toast | Done. One toast per reading, gated on `reconcile`'s count of rows that actually moved; the Status module figure is repainted but not counted, `architecture.md` §3. |
+| Certificate trust | Done. Three facts read from three files, under the Protection switches and in the first-run assistant, with AdGuard's own `install_cert.sh` command and a copy button. Four unmet states, all four rendered headlessly; hidden when trusted or when HTTPS filtering is off. `architecture.md` §6, contract §8. |
+| Packaging | Done. `make deb`, `make tarball`, `make package`. Neither needs root; `Depends:` is derived by `dpkg-shlibdeps` rather than written down. `building.md` §5. |
 
 Userscripts are **out of v1** — `architecture.md` §7 has the reasoning.
 
@@ -102,7 +126,14 @@ Two of these overturned a recommendation in `overnight-plan.md` §5, both becaus
 
    What is **not** verified: the `connect_is_active_notify` line itself. There is no `xdotool` or `wmctrl` here to take focus from an Xvfb window and give it back. The half underneath it is verified — repointing the helper mid-session and provoking a repaint takes the group off the page — so what is untested is the trigger, not the re-check.
 3. ~~**Reconcile toast**~~ — done, `architecture.md` §3. Left here for the one thing it found: the suppression of our own writes comes from the per-row `pending` flag, not from counting, so any figure rendered *outside* the page that writes it has no such flag and will announce the user's own click back at them. The Status module count is that figure, and it is now repainted without being counted. The stderr line no longer claims the change came from "outside the app"; it reports the count instead, which is a fact it has.
-4. **The certificate is seeded but not trusted.** `configure` turns HTTPS filtering on and silently skips its own *"Do you want to install the certificate on the system?"* prompt, because that one needs a password and there is no TTY (contract §7). So every install this app sets up ends with HTTPS filtering on and the CA outside the system trust store — filtering that will fail on the first HTTPS site until the user installs it. The assistant's HTTPS row says the certificate is needed, which is honest but weaker than it should be: nothing yet *detects* whether the CA is trusted, and §6 rules out installing it for the user, so the shape is the auto-mode one — detect, then show AdGuard's own instructions. Worth doing alongside gap 2, since they are the same kind of work.
+4. ~~**The certificate is seeded but not trusted.**~~ — done, `architecture.md` §6. Detect, then show AdGuard's own `install_cert.sh`; nothing here installs anything. Four things it turned up are worth keeping:
+
+   - **The trusted bundle has no names in it.** A `grep` for the certificate's name returns nothing whether or not it is trusted, so membership is decided on the base64 body. Measured against a machine where it *is* installed.
+   - **The installer's idempotence check is on the path, not the contents** (`[ ! -f "${SYSTEM_CERT_PATH}" ]`), so a regenerated CA leaves the old one in place and re-running reports success. That is a state its own tooling will not repair, and the reason the check compares bytes rather than asking whether a file exists.
+   - **`configure` reproduces the CA from `adguard.conf` rather than generating one** — byte-identical, weeks-old dates. That file carries the private key of a CA this system trusts, which makes `building.md` §3's "delete the sandbox afterwards" rather more than housekeeping.
+   - **The met branch is this machine's real state**, the mirror of the root helper, so every *unmet* branch needed the paths to be parameters. `$SYSTEM_CERT_DIR` is AdGuard's own variable; `$ADGUARD_CA_BUNDLE` and `$ADGUARD_CERT_INSTALLER` are ours and exist only so those branches can be reached without touching the real trust store.
+
+   What is **not** verified, exactly as with the helper: the `connect_is_active_notify` trigger itself. There is still no `xdotool` here to take focus from an Xvfb window and give it back. The re-check underneath it is verified — the rows repaint from a check pointed elsewhere — so what is untested is the trigger, not the re-check.
 5. **The activation success leg is a claim, not a measurement.** Everything up to the browser log-in is proven, including against a real unlicensed install: `activate` hands back a link, the page shows it, *finish activation* re-runs `activate`, reads `license`, and says "not activated yet" without pretending otherwise. What nobody has watched is the leg after a genuine log-in — it needs a real account, and completing an activation spends a device slot. **This is the owner's call, not an agent's.** Two things go with it: what `activate` prints against an install that is *already* licensed is unmeasured for the same reason, and the "AdGuard is activated" wording has never been seen on screen.
 
 ---
@@ -155,6 +186,8 @@ The same applies to an AT-SPI walk, where the key can reach a dump through the S
 **A command's echo is not its effect, even when the echo looks like the file.** `config list-remove` of a list's last element prints `filters:` with nothing after it. The file gets `filters: []`. Those read the same to a human and differently to a YAML parser — null versus an empty sequence — and the difference was written up in contract §5, and into two doc comments and a test name, before anyone looked at the bytes. The rule this project already had for `config set` covers it exactly: **the confirmation is never the evidence, re-read the file.** It just had not occurred to anyone that a command whose output *is* YAML-shaped needed the same suspicion.
 
 **An edit that changed nothing looks exactly like an event that was dropped.** New, and it cost most of an hour on the reconcile toast. The harness proved the *negative* cases — a key no page displays produces no toast — by `sed -i`-ing the sandbox `proxy.yaml` and watching for silence. Three of those seds matched nothing, because a previous run had already set those keys to the values being written, so the file never moved, the monitor was right to say nothing, and the silence read as a broken watch. The file monitor was fine the whole time. **Hash the file either side of the edit and refuse to draw any conclusion from a hash that did not move** — silence only means something once the input is known to have changed. It is the same failure as the one-fixture measurement above, inverted: there the sample was too narrow to support a claim, here it was too stale to support one.
+
+**A leaked `$DISPLAY` fails in the one direction a probe cannot see.** New, and it cost a frame that read as a window which never opened. A GNOME session exports `DISPLAY=:0`; a harness that starts `Xvfb :99` but does not export `DISPLAY=:99` into the app's own environment hands it the *real* display, so the window opens on the desktop through Xwayland while `ffmpeg -i :99` grabs an empty screen. Every AT-SPI assertion still passes, because the accessibility bus is on the session bus and does not care which X server drew anything — so the walk vouches for a run that was never headless at all. `env -u DISPLAY -u WAYLAND_DISPLAY` on the way in, and `export DISPLAY=:99` inside.
 
 **Two things about the headless recipe that the recipe does not say.** `xvfb-run` keeps its `MIT-MAGIC-COOKIE` in a temp directory only its own child can read, so an `ffmpeg -f x11grab -i :99` started from outside fails with `Invalid MIT-MAGIC-COOKIE-1 key` and captures nothing. And the accessibility bus is advertised on the *session* bus, so an AT-SPI probe run outside the `dbus-run-session` never finds the app at all — it fails as "the app never appeared in the tree", which reads like a window that did not open. Start `Xvfb :99` directly and run both the app and the probe inside one `dbus-run-session`; the property the recipe exists for — a private bus, so the new process is unavoidably primary — is preserved either way.
 

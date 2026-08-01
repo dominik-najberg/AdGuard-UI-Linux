@@ -147,13 +147,20 @@ impl CertificateView {
                 self.command.set_subtitle(&remedy.command);
                 self.group.set_description(Some(remedy.description));
             }
-            // No installer to name. The state is still worth showing — it is
-            // the reason HTTPS pages will fail — but a command would be a
-            // guess, and the one thing worse than no instruction is an
-            // instruction that names a file this machine does not have.
+            // No command to show. The state is still worth showing — it is the
+            // reason HTTPS pages will fail — but the two reasons are not the
+            // same fact and the group must not assert the wrong one: an
+            // installer that is missing, or a path that cannot be put in a
+            // shell command without changing what it would do.
             None => {
                 self.command.set_visible(false);
-                self.group.set_description(Some(NO_INSTALLER));
+                let unshowable = !trust::quotable(&trust.certificate)
+                    || self
+                        .installer
+                        .as_ref()
+                        .is_some_and(|path| !trust::quotable(path));
+                self.group
+                    .set_description(Some(if unshowable { UNSHOWABLE } else { NO_INSTALLER }));
             }
         }
     }
@@ -228,7 +235,7 @@ impl CertificateView {
             // does not make one. AdGuard's own help for this is `cert`
             // ("Generate a certificate for HTTPS filtering"), which generates
             // and then offers to install in the same run.
-            let cli = adguard_core::paths::cli_binary()?;
+            let cli = adguard_core::paths::cli_binary().filter(|path| trust::quotable(path))?;
             return Some(Remedy {
                 command: format!("\"{}\" cert", cli.display()),
                 description: GENERATE,
@@ -236,13 +243,15 @@ impl CertificateView {
         }
 
         let installer = self.installer.as_ref().filter(|path| path.is_file())?;
-        let install = trust::install_command(installer, &trust.certificate);
+        let install = trust::install_command(installer, &trust.certificate)?;
         match (trust.stale, &trust.anchor) {
             // The one state AdGuard's installer cannot repair: it tests whether
             // the anchor path exists and stops if it does, so the old
             // certificate has to go first. One line, because two rows would
-            // leave the user holding half a fix.
-            (true, Some(anchor)) => Some(Remedy {
+            // leave the user holding half a fix — and the `rm` gets the same
+            // quoting check as everything else on the line, since this is the
+            // one command here that destroys something.
+            (true, Some(anchor)) => trust::quotable(anchor).then(|| Remedy {
                 command: format!("sudo rm \"{}\" && {install}", anchor.display()),
                 description: REPLACE,
             }),
@@ -298,3 +307,18 @@ const NO_INSTALLER: &str = "Filtered connections are signed by a certificate thi
                             trust. AdGuard's own installer, install_cert.sh, is not beside the \
                             adguard-cli binary on this machine, so there is no command to show \
                             you — reinstalling AdGuard CLI restores it.";
+
+/// The fix exists, but writing it down would be unsafe.
+///
+/// Never seen on an ordinary install: the seeded certificate name is `AdGuard
+/// CLI CA` and even spaces, brackets and accents are fine. It takes a name
+/// deliberately built to break out of AdGuard's quoting, which `config set`
+/// will accept like any other string — and the row this application offers to
+/// the clipboard is one a user may well paste behind a `sudo`.
+const UNSHOWABLE: &str = "Filtered connections are signed by a certificate this machine has to \
+                          trust, and the installer for it is here — but this certificate's file \
+                          name contains characters that cannot be written into a shell command \
+                          safely, such as a quotation mark, a backtick, a dollar sign or a line \
+                          break. Rather than show you a command that might not do what it says, \
+                          this application shows none. The name comes from \
+                          https_filtering.root_certificate_name.";

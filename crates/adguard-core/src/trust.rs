@@ -276,12 +276,45 @@ impl CaTrust {
 /// itself — `sudo_command='sudo'` when not already root — so this application
 /// neither asks for a password nor holds one, which is the same rule the root
 /// helper follows (`architecture.md` §6).
-pub fn install_command(installer: &Path, certificate: &Path) -> String {
-    format!(
-        "\"{}\" -c \"{}\"",
-        installer.display(),
-        certificate.display()
-    )
+///
+/// `None` when either path could not be put inside those quotes without
+/// changing what a shell would do with the line; see [`quotable`].
+pub fn install_command(installer: &Path, certificate: &Path) -> Option<String> {
+    (quotable(installer) && quotable(certificate)).then(|| {
+        format!(
+            "\"{}\" -c \"{}\"",
+            installer.display(),
+            certificate.display()
+        )
+    })
+}
+
+/// Whether a path survives being put inside a double-quoted shell word.
+///
+/// **This application never runs these commands, which is exactly why this
+/// matters.** It hands the user a line, tells them it is AdGuard's, and the
+/// user pastes it into a shell — sometimes behind a `sudo`. The certificate's
+/// path is not a constant: it is named by
+/// `https_filtering.root_certificate_name`, an ordinary setting that `config
+/// set` will write any string to. A name carrying `"` or `` ` `` or `$` would
+/// close AdGuard's quoting and let the rest of it run as its own command, in a
+/// line this application has just vouched for.
+///
+/// Double quotes rather than single ones because the format string is
+/// AdGuard's own (contract §8), and re-quoting would mean showing a command
+/// that is no longer the one upstream documents. So the rule is to refuse the
+/// paths that cannot be shown safely rather than to rewrite them: the row falls
+/// back to naming the state without a command, exactly as it does when the
+/// installer is missing. A certificate is still detected, and still reported —
+/// what is withheld is only the instruction.
+///
+/// Backslash is on the list because it escapes the closing quote, and the two
+/// newline characters because a clipboard paste of a line containing one
+/// submits it.
+pub fn quotable(path: &Path) -> bool {
+    !path
+        .to_string_lossy()
+        .contains(['"', '`', '$', '\\', '\n', '\r'])
 }
 
 /// The command that rebuilds the bundle from the anchor directory.
@@ -653,9 +686,60 @@ mod tests {
             Path::new("/home/someone/.local/share/adguard-cli/AdGuard CLI CA.pem"),
         );
         assert_eq!(
-            command,
-            "\"/home/someone/.local/opt/adguard-cli/install_cert.sh\" \
-             -c \"/home/someone/.local/share/adguard-cli/AdGuard CLI CA.pem\""
+            command.as_deref(),
+            Some(
+                "\"/home/someone/.local/opt/adguard-cli/install_cert.sh\" \
+                 -c \"/home/someone/.local/share/adguard-cli/AdGuard CLI CA.pem\""
+            )
+        );
+    }
+
+    /// A certificate name that would break out of AdGuard's quoting yields no
+    /// command at all.
+    ///
+    /// `config set https_filtering.root_certificate_name` takes any string, and
+    /// the row that would carry the result is one the user is invited to paste
+    /// into a shell behind a `sudo`. Refused rather than re-quoted: the command
+    /// is upstream's, and a version of it that is not upstream's would be a
+    /// different claim than the one the row makes.
+    #[test]
+    fn a_certificate_name_that_escapes_the_quoting_yields_no_command() {
+        let installer = Path::new("/opt/adguard-cli/install_cert.sh");
+        let hostile = [
+            "/data/x\" ; rm -rf ~ ; echo \".pem",
+            "/data/$(id).pem",
+            "/data/`id`.pem",
+            "/data/x\\\".pem",
+            "/data/one\nsudo rm -rf ~\n.pem",
+        ];
+        for name in hostile {
+            assert!(!quotable(Path::new(name)), "{name}");
+            assert_eq!(install_command(installer, Path::new(name)), None, "{name}");
+        }
+
+        // Spaces, brackets, apostrophes and non-ASCII stay perfectly shippable
+        // — the check must not refuse an ordinary name to feel safe.
+        for name in [
+            "/data/AdGuard CLI CA.pem",
+            "/data/AdGuard (work).pem",
+            "/data/Zertifikat für AdGuard.pem",
+            "/data/it's mine.pem",
+        ] {
+            assert!(quotable(Path::new(name)), "{name}");
+            assert!(install_command(installer, Path::new(name)).is_some(), "{name}");
+        }
+    }
+
+    /// The installer's own path is checked too. It is ours to locate, but it is
+    /// found by joining onto `$ADGUARD_CLI`, which is an environment variable.
+    #[test]
+    fn an_unquotable_installer_path_yields_no_command_either() {
+        assert_eq!(
+            install_command(
+                Path::new("/opt/`id`/install_cert.sh"),
+                Path::new("/data/AdGuard CLI CA.pem")
+            ),
+            None
         );
     }
 

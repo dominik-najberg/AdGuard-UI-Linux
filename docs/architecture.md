@@ -228,6 +228,8 @@ Four unmet states rather than one, because the fixes differ: no certificate at a
 
 **What the check cannot see, the wording admits.** Firefox and Chrome keep their own NSS databases and read nothing from the system store; the installer covers them and this check does not. So the rows say the machine trusts the certificate, never that every browser on it does.
 
+**A command this app will not run is still a command this app vouches for**, and that turns out to be the sharper end of showing rather than doing. The certificate's path is not a constant — it is named by `https_filtering.root_certificate_name`, an ordinary setting `config set` will write any string to — so a name carrying a `"`, a backtick, a `$` or a newline would close AdGuard's own quoting and leave the rest of it running as a second command, in a line the user has been told is AdGuard's and may well paste behind a `sudo`. `trust::quotable` refuses those paths and the row shows the state with no command at all, saying which of the two reasons applies. Re-quoting them with `'…'` was the alternative and is worse: the command would no longer be the one upstream documents, which is the entire basis for showing it.
+
 `data/io.github.dominik-najberg.AdGuardUI.policy` was deleted with the auto-mode work. It declared three polkit actions against `/usr/libexec/adguard-ui-helper`, a binary that was never written and now never will be, and its own header still asserted that AdGuard "ships no polkit policy … so there is nothing to reuse" — the conclusion contract §8 retracted. Nothing installed it; `building.md` §4 says so and now says how to remove it if an older checkout did.
 
 ---
