@@ -14,7 +14,7 @@ Four other surfaces exist. None should be used.
 | --- | --- |
 | `agcli.socket` (unix socket in the data dir) | Undocumented internal control channel between the CLI and its daemon. No stability guarantee; format not published. Disappears entirely when the proxy is stopped. |
 | `AGLocalApiServer` — a WebSocket server inside the daemon | Confirmed present (`AGLocalApiServer.cpp`, `AGWebSocketHandler`, `connectToLocalApiServer` in the binary). But it is wired to userscript/content processing (`AGPFProcessingUnit`), not general control. Its port key `local_api_server_port` is not even present in the config (`config get local_api_server_port` → `not found`). Internal. |
-| `adguard_cli_nm` (Native Messaging host) | Locked to specific browser extension IDs via the manifests that name it — five `chrome-extension://` origins, two Firefox `allowed_extensions` — and the browser vouches for the caller. Impersonating a browser extension is fragile and rude. **Its absence is worth reporting, and is:** `install-browser-integration` is a separate step that unpacking the CLI does not perform, so on a stock install the extension reports that it cannot detect `adguard-cli` while AdGuard runs and filters perfectly. That check is `crates/adguard-core/src/browser.rs`, which reads the manifests without ever speaking the protocol. |
+| `adguard_cli_nm` (Native Messaging host) | Locked to specific browser extension IDs via the manifests that name it — five `chrome-extension://` origins, two Firefox `allowed_extensions` — and the browser vouches for the caller. Impersonating a browser extension is fragile and rude. **Its absence is worth reporting, and is:** `install-browser-integration` is a separate step that unpacking the CLI does not perform, so on a stock install the extension reports that it cannot detect `adguard-cli` while AdGuard runs and filters perfectly. That check is `crates/adguard-core/src/browser.rs`, which reads the manifests without ever speaking the protocol — see [§12](#12-browser-integration-is-a-separate-step-and-quietly-conditional). |
 | Writing `proxy.yaml` directly | See [§5](#5-configuration-writes) — it would destroy the file's comments. |
 
 **Decision: shell out to the `adguard-cli` binary for all writes; read state from `proxy.yaml` and the filter SQLite DBs.**
@@ -957,3 +957,67 @@ Two guards make that safe, both in `orphan.rs`:
 
 - **Signal nothing newer than the attempt.** A start forks a daemon that looks identical to the wedged one, so the caller lists daemons *before* running `start` and only ever signals from that list.
 - **Signal nothing that has been recycled.** A pid is unique only among live processes, and the two reads are separated by a command that can take a minute, so the start time from `/proc/<pid>/stat` field 22 is carried alongside the pid and re-checked. A zombie counts as gone: it keeps an unchanged start time, and waiting for one to exit again would wait forever.
+
+---
+
+## 12. Browser integration is a separate step, and quietly conditional
+
+Measured on 2026-08-01, CLI v1.4.13, against AdGuard Browser Assistant 1.4.8 (`fbohpolgemkbfphodcfgnpjcmedcjhpn`).
+
+The extension does **not** look for `adguard-cli` on `$PATH`, or for the proxy on its ports. It asks the browser for a native-messaging host, and the browser resolves that name out of a manifest on disk. From the extension's `background.js`:
+
+```js
+const HOST_TYPES = { browserExtensionHost: 'com.adguard.browser_extension_host.nm' };
+this.port = browser_polyfill_default().runtime.connectNative(HOST_TYPES.browserExtensionHost);
+```
+
+With no manifest, `connectNative` fails at once and the extension reports that it **cannot detect `adguard-cli` in the system** — on a machine where AdGuard may be installed, running and filtering perfectly. The message names the wrong thing, which is what makes this worth a check of our own rather than a note in a README.
+
+`adguard-cli install-browser-integration` writes those manifests; `-u`/`--uninstall` removes them. **Unpacking the CLI does not run it**, so a stock install is in the unmet state.
+
+### The six locations are fixed, and in the binary
+
+They are the only native-messaging paths in the CLI's strings:
+
+```
+.config/BraveSoftware/Brave-Browser/NativeMessagingHosts
+.config/chromium/NativeMessagingHosts
+.config/google-chrome/NativeMessagingHosts
+.config/microsoft-edge/NativeMessagingHosts
+.config/vivaldi/NativeMessagingHosts
+.mozilla/native-messaging-hosts
+```
+
+Relative to `$HOME`, and `.config` is hard-coded — `$XDG_CONFIG_HOME` is not consulted. A check that honoured XDG would be looking somewhere the manifest never lands.
+
+Each manifest names the host binary and the extensions allowed to reach it — `allowed_origins` for the Chromium family, `allowed_extensions` for Firefox:
+
+```json
+{
+  "allowed_origins": [ "chrome-extension://fbohpolgemkbfphodcfgnpjcmedcjhpn/", … ],
+  "name": "com.adguard.browser_extension_host.nm",
+  "path": "/home/you/.local/opt/adguard-cli/adguard_cli_nm",
+  "type": "stdio"
+}
+```
+
+### It reports success even when it writes nothing
+
+This is the measurement that matters, and it is not visible from the command's output. Against a sandbox `$HOME`:
+
+| `$HOME` contains | Manifests written | Exit | stdout |
+| --- | --- | --- | --- |
+| nothing | **none** | 0 | `Native Messaging manifests installed successfully. You can now use AdGuard Browser Assistant extension` |
+| `.config/chromium` | chromium only | 0 | *same* |
+| `.mozilla` alone | **none** | 0 | *same* |
+| `.mozilla/firefox` | Firefox | 0 | *same* |
+
+So the installer writes only where it already sees a browser, and says the same reassuring sentence either way. Firefox is gated on its **profile** directory, not on `.mozilla`.
+
+**The consequence is an ordering trap with no diagnostic anywhere.** Install a browser *after* running the command and it gets no manifest; the command has already reported success, the CLI will never mention it again, and the extension blames `adguard-cli`. Nothing in AdGuard's tooling closes that loop, which is why the app's check is re-read on window focus rather than performed once (`architecture.md` §6).
+
+### What we do with it
+
+Read the manifests; never speak the protocol. `adguard_cli_nm` is a stdio native-messaging host whose manifests name the extension IDs permitted to reach it, so the browser vouches for the caller — impersonating one of those extensions is both fragile and rude ([§1](#1-rejected-integration-points)).
+
+`browser.rs` compares each manifest's `path` against the `adguard_cli_nm` beside the **resolved** `adguard-cli` binary, rather than merely testing that the file exists. A manifest left by an AdGuard reinstalled under a different prefix can name a host that still exists — the old one — and an existence check would call that healthy while the extension talked to a stale binary.
