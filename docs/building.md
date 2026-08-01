@@ -338,19 +338,38 @@ sudo rm -f /usr/share/polkit-1/actions/io.github.dominik-najberg.AdGuardUI.polic
 
 ## 5. Packaging
 
-Assessed for this machine specifically:
+Both recommended routes are built. Neither needs root, and neither installs anything:
+
+```bash
+make package
+```
+
+That leaves `target/package/adguard-ui_0.1.0_amd64.deb` (2.4 MB) and `adguard-ui-0.1.0-x86_64.tar.gz` (2.4 MB). `make deb` and `make tarball` build one each; the work is in `packaging/deb.sh` and `packaging/tarball.sh`, which carry the reasoning per step.
+
+The routes were assessed for this machine before either was written:
 
 | Route | Status here | Notes |
 | --- | --- | --- |
-| **Tarball + `.desktop`** | Ready | Least friction; matches existing habit for personal tools. |
-| **`.deb`** | `dpkg-dev` 1.23.7 present; `debhelper` **not** installed | `dpkg-deb -b` on a hand-built tree works today. `sudo apt install debhelper devscripts` for a proper `debian/` setup. |
-| **Flatpak** | **Not installed at all** | Needs `flatpak` + `flatpak-builder` + the `org.gnome.Platform//50` runtime/SDK (~1–2 GB download). The most "correct" GNOME distribution route, but greenfield here. |
+| **Tarball + `.desktop`** | **Built** — `packaging/tarball.sh` | Payload plus an `install.sh` that puts it under `~/.local`, which is §4 as a script. `PREFIX=` moves it, `--autostart` adds the login entry, `--list` names the files it would write without writing any. |
+| **`.deb`** | **Built** — `packaging/deb.sh` | `dpkg-deb -b` on a hand-assembled tree; `dpkg-dev` 1.23.7 supplies `dpkg-shlibdeps`, and `debhelper` is still not installed and still not needed. |
+| **Flatpak** | Not installed at all | Needs `flatpak` + `flatpak-builder` + the `org.gnome.Platform//50` runtime/SDK (~1–2 GB download). The most "correct" GNOME distribution route, but greenfield here — and see the confinement note below. |
 | **Snap** | `snapd` 2.76.1 running; `snapcraft` **not** installed | Strict confinement would fight reaching `~/.local/bin/adguard-cli` and its data directory — which is the whole application. Not recommended. |
 | **AppImage** | No tooling | Possible; nothing in the app resists it. |
 
-Recommendation: **tarball for personal use, `.deb` for release.** The constraint is not privilege — there is none to preserve — but reach: this GUI is a front-end to a binary and a data directory under `$HOME`, and confinement is what breaks that.
+The constraint is not privilege — there is none to preserve — but reach: this GUI is a front-end to a binary and a data directory under `$HOME`, and confinement is what breaks that. It is now a little more than a data directory, too: the certificate check reads `/usr/local/share/ca-certificates` and `/etc/ssl/certs` (§6 of `architecture.md`), which a sandboxed build would also have to be granted or would silently report every install as untrusted.
 
-Note that a packaged GUI still depends on `adguard-cli` being installed separately — declare it, and fail with a clear message rather than a crash when the binary is absent (see `adguard-core::paths`).
+Six things the two scripts do that are worth knowing before changing them:
+
+- **`Depends:` is derived, never written down.** `dpkg-shlibdeps` reads the binary's nine `DT_NEEDED` entries and each providing package's `.symbols` file, which gives the symbol-level minimum: `libc6 (>= 2.39)`, where copying this machine's *installed* version would have said 2.43 and refused to install on four years of perfectly capable systems. It wants a `debian/control` relative to the working directory and reads only the package name out of it, so it gets a two-line stub in a scratch directory; `-O` makes it print to stdout instead of writing a `debian/substvars` nobody asked for. The written fallback list is there for a machine without `dpkg-dev` and is deliberately looser.
+- **No `libsqlite3-0`.** `rusqlite` is built with `bundled`, so SQLite is compiled in — confirmed from the `ldd` output, which names no sqlite at all.
+- **`fakeroot`, not `sudo`.** `dpkg-deb` records each file's uid and gid verbatim, so a tree built as you would install every path in `/usr` owned by you. `fakeroot` intercepts the `chown` and the `stat` so the archive records `0/0` with nothing on disk ever changing hands.
+- **The binary is stripped in the packaging step, not by a `[profile.release]`.** 9.3 MB to 7.0 MB, all of it Rust symbol names — worth removing from a package and worth keeping in a `cargo build`, where a backtrace is the point.
+- **No maintainer scripts.** dpkg's own file triggers already refresh both caches this package touches, `hicolor-icon-theme` on `/usr/share/icons/hicolor` and `desktop-file-utils` on `/usr/share/applications`. A `postinst` calling `gtk-update-icon-cache` would be duplicating dpkg's work. The `.deb` therefore has no `preinst`/`postinst`/`prerm`/`postrm` at all.
+- **The autostart entry ships as an example, not a launcher.** `/usr/share/doc/adguard-ui/examples/autostart/`. Installed among the applications it would appear in the app grid as a second, windowless entry (§4); installed into `/etc/xdg/autostart` it would start the tray at login for *every* user of the machine, which is a decision for whoever runs the package and not for whoever built it.
+
+**There is no `Depends: adguard-cli`, and there cannot be.** No such apt package exists — AdGuard CLI is a third-party install under `$HOME`, and `dpkg` resolves dependencies only against installed packages, so naming it would make the `.deb` uninstallable on every machine. The requirement is declared where a user will actually meet it: in the package description, in the tarball's README, and at runtime, where `paths::cli_binary` returns `None` and `main.rs`'s `missing_cli_view` renders an explanation instead of crashing — which is what "fail with a clear message" meant, and it was already true before there was anything to package.
+
+Two things the packaging does **not** do, on purpose. It ships no `LICENSE` file, because the repository has none — `Cargo.toml` declares `GPL-3.0-or-later` and the `.deb`'s `copyright` points at `/usr/share/common-licenses/GPL-3`, which is correct for Debian and Ubuntu and is not a substitute for adding the text to the repository. And it writes no `changelog.Debian.gz`: Debian policy wants one for an archive upload, and this package is not built for an archive.
 
 ---
 
@@ -392,6 +411,9 @@ cp ~/.local/share/adguard-cli/proxy.yaml ~/proxy.yaml.orig
 | [`cli-contract.md`](cli-contract.md) | **Measured** CLI behaviour as an automation target; read before writing wrapper code |
 | [`architecture.md`](architecture.md) | Design of the GUI: crates, data flow, UI structure, privilege model |
 | [`handoff.md`](handoff.md) | Current state, the next step, and the traps worth knowing before touching anything |
-| `building.md` | This file |
+| `building.md` | This file — prerequisites, running, tests, install, packaging |
+| `overnight-plan.md` | Operational, and dated. History once its night is over |
 
-Keep all five in `docs/`, versioned with the code, so a change to CLI-handling behaviour and its documentation land in the same commit. When bumping the supported `adguard-cli` version, re-verify `cli-contract.md` — every claim in it is a measurement that a new release could invalidate.
+The scripts under `packaging/` are the sixth piece of documentation, and are written to be read: each step says why it is that shape, and §5 above says what the two of them are for.
+
+Keep the five in `docs/`, versioned with the code, so a change to CLI-handling behaviour and its documentation land in the same commit. When bumping the supported `adguard-cli` version, re-verify `cli-contract.md` — every claim in it is a measurement that a new release could invalidate.
