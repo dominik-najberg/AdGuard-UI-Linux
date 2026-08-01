@@ -265,6 +265,12 @@ The third application of this section's pattern, and the first where the reason 
 
 The command is guarded the same way the certificate's is: `trust::quotable` refuses a CLI path that cannot be written into a shell line safely, and the row then shows the state with no command. One further branch has no counterpart above — if `adguard_cli_nm` is missing from beside the binary, the command is withheld even though it would succeed. Running it then would write six manifests pointing at a program that is not there, replacing a browser that cannot find AdGuard with one that launches nothing: a worse state, harder to diagnose, and one that looks like the fix worked.
 
+### The re-check the three of them share
+
+All three read themselves again from **one** `connect_is_active_notify` closure in `main.rs`, on `is-active` rather than on a widget focus event: the check is about the window as a whole, and the row the user needs to see is rarely the one holding the keyboard focus. The closure guards on regaining focus, so losing it costs nothing, and the whole re-read is one `stat`, three small file reads and at most six more — cheap enough for the main loop, which is why none of it is cached. A cache would be wrong at exactly the moment the re-check exists for.
+
+**That line is verified, as of 1 August 2026,** and for a while it was the one thing here nothing had ever exercised — the notes excusing it said focus needs `xdotool`, which is not installed. It does not: there is no window manager on an Xvfb display for `xdotool` to talk to, and `XSetInputFocus` is a single X call (`building.md` §3). Driven through the browser check, whose input is entirely files under `$ADGUARD_BROWSER_HOME`, the group leaves the page when a manifest appears and comes back when a browser does — with an intervening phase, after the write and before the focus round trip, whose page walk must be byte-identical to the one before it. Without that phase a passing run would be equally consistent with one of this application's three polls having noticed.
+
 ---
 
 ## 7. v1 scope
