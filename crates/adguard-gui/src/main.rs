@@ -612,9 +612,10 @@ fn main_view(cli: &Cli) -> MainView {
 ///
 /// `is-active` rather than a focus event on the widget: the check is about the
 /// window as a whole, and the row the user needs to see may not be the one with
-/// the keyboard focus. It fires on losing focus too, which costs one `stat` and
-/// three small reads — both checks are re-read rather than cached, and both are
-/// cheap enough to do on the main loop for that reason.
+/// the keyboard focus. It notifies on *losing* focus too, which the guard below
+/// makes free — the cost is one `stat` and three small reads, and it is paid
+/// only on the way back in. Both checks are re-read rather than cached, and
+/// both are cheap enough for the main loop for that reason.
 fn connect_focus_rechecks(window: &adw::ApplicationWindow, view: &MainView) {
     let advanced = view.advanced.clone();
     let protection = view.protection.clone();

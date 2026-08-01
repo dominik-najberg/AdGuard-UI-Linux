@@ -91,8 +91,8 @@ EOF
 # Derived, not written down. `dpkg-shlibdeps` reads the binary's DT_NEEDED set
 # and each providing package's `.symbols` file, which gives the *symbol-level*
 # minimum — `libc6 (>= 2.39)` for this binary, where copying the build machine's
-# installed version would have said 2.43 and refused to install on four years of
-# perfectly capable systems.
+# installed version would have said 2.43 and refused to install on glibc 2.39
+# through 2.42 — Ubuntu 24.04 through 25.10, two years of capable systems.
 #
 # It insists on a `debian/control` relative to the working directory and reads
 # nothing but the package name out of it, so it gets a two-line stub. `-O`
@@ -107,16 +107,34 @@ if command -v dpkg-shlibdeps >/dev/null; then
     # package that ships shlibs data, and the flag's only effect would be to
     # turn a genuinely undeclarable dependency into a silent omission. It warns
     # about the usr-merge diversion of ld-linux either way; that one is noise.
-    DEPENDS="$(cd "$STUB" && dpkg-shlibdeps -O "$TREE/usr/bin/$NAME" \
-        | sed -n 's/^shlibs:Depends=//p')"
+    #
+    # `|| true`, and it is not decoration. `set -e` aborts the script when a
+    # command substitution in an assignment fails, so without it a
+    # `dpkg-shlibdeps` that *errors* — a DT_NEEDED provider shipping no shlibs
+    # data, which is what a locally built libadwaita or a derivative
+    # distribution looks like — would kill the build outright instead of
+    # reaching the fallback written directly beneath it for exactly that case.
+    # Measured: the failure exits 1 with "no dependency information found".
+    DEPENDS="$( (cd "$STUB" && dpkg-shlibdeps -O "$TREE/usr/bin/$NAME") \
+        | sed -n 's/^shlibs:Depends=//p' || true)"
     rm -rf "$STUB"
 fi
 if [ -z "$DEPENDS" ]; then
-    # dpkg-dev absent, or the .symbols files were not there to read. The shlibs
-    # fallback for the same DT_NEEDED set, which over-constrains libc but is
-    # never wrong in the direction that matters.
+    # dpkg-dev absent, or a library whose package ships no dependency data.
+    #
+    # The versions here are the ones `dpkg-shlibdeps` derived on the reference
+    # machine, copied rather than invented — a *bare* package list would be the
+    # dangerous kind of fallback, because `libc6` with no predicate installs
+    # happily on a system too old to run the binary and fails at exec with
+    # "version `GLIBC_2.39' not found". Wrong in the loose direction is the one
+    # direction a dependency must never be wrong.
+    #
+    # It is a snapshot, so it ages: re-derive it after a toolchain bump rather
+    # than trusting it, which is why the derived path is the one that runs.
     echo "deb.sh: dpkg-shlibdeps unavailable — falling back to a written list" >&2
-    DEPENDS="libadwaita-1-0, libgtk-4-1, libglib2.0-0t64 | libglib2.0-0, libc6, libgcc-s1"
+    DEPENDS="libadwaita-1-0 (>= 1.6~beta), libc6 (>= 2.39), libgcc-s1 (>= 4.2)"
+    DEPENDS="$DEPENDS, libglib2.0-0t64 (>= 2.54.0) | libglib2.0-0 (>= 2.54.0)"
+    DEPENDS="$DEPENDS, libgtk-4-1 (>= 4.9.3)"
 fi
 
 # --- control ---------------------------------------------------------------
@@ -155,9 +173,14 @@ EOF
 
 # --- build -----------------------------------------------------------------
 #
-# `chown` inside fakeroot, so data.tar records 0/0 for every path. Without it
-# every file in /usr would be installed owned by whoever built the package.
-fakeroot bash -c "chown -R root:root '$TREE' && dpkg-deb --build --root-owner-group '$TREE' '$OUT'" >/dev/null
+# **No `fakeroot`**, and that is worth a line because it is the conventional
+# answer here. `dpkg-deb` records each path's uid and gid verbatim, so a tree
+# built as an ordinary user would install every file in /usr owned by that user
+# — the problem `fakeroot` is normally wrapped around a `chown -R root:root` to
+# solve. `--root-owner-group` (dpkg 1.19+) does the whole of it by forcing 0/0
+# into the archive, so the wrapper would be a hard build dependency for a step
+# with no effect. Measured both ways: identical `root/root` on every path.
+dpkg-deb --build --root-owner-group "$TREE" "$OUT" >/dev/null
 
 DEB="$OUT/${NAME}_${VERSION}_${ARCH}.deb"
 rm -rf "$TREE"

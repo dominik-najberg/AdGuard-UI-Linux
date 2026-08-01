@@ -149,6 +149,11 @@ impl ProtectionPage {
     /// For the initial load and the explicit refresh — the latter is how an
     /// edit made in a terminal, or by `adguard-cli configure`, reaches the UI.
     pub fn reload(self: &Rc<Self>) {
+        // Dropped before the spinner goes up, not merely rebuilt afterwards.
+        // If the reload ends in `error_view` there is no `build` to clear it,
+        // and the old group would go on being repainted on every window focus —
+        // a widget nobody can see, costing three file reads a time.
+        self.certificate.replace(None);
         self.bin.set_child(Some(&loading_view()));
 
         let this = self.clone();

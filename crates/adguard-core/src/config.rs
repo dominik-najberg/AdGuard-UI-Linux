@@ -423,11 +423,18 @@ pub mod key {
     pub const HTTPS_ECH: &str = "https_filtering.encrypted_client_hello";
     pub const FILTER_SECURE_DNS_MODE: &str = "https_filtering.filter_secure_dns_mode";
 
-    /// Read, never written. It names the CA on disk as well as the certificate,
-    /// so writing it would leave the trust check looking for a file that only a
-    /// regeneration will ever produce — and `configure` is the only thing that
-    /// generates one. The first-run assistant leaves it alone for the same
-    /// reason (`model::SETUP`).
+    /// Read, never written — and **no longer the cosmetic key `model::SETUP`
+    /// calls it**. It names the CA *file* as well as the certificate, so
+    /// changing it points [`crate::trust`] at a path nothing will ever create:
+    /// only `configure` generates a certificate, and it will not run a second
+    /// time against a configured directory. `config set
+    /// https_filtering.root_certificate_name Foo` therefore turns a trusted
+    /// install into one the Protection page reports as having no certificate at
+    /// all, which is true of the name it was given and not of the machine.
+    ///
+    /// The assistant still does not ask about it, which is now the *stronger*
+    /// decision rather than the incidental one — see the table in
+    /// `model::SETUP`, which this discovery amended.
     pub const ROOT_CERTIFICATE_NAME: &str = "https_filtering.root_certificate_name";
 
     // --- the Advanced page ---

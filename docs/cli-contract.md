@@ -766,7 +766,7 @@ $ ls -la ~/.local/opt/adguard-cli/{install_cert.sh,certutil}
 -rwxr-xr-x 1 potworny potworny 4865856 May 27 15:21 certutil
 ```
 
-**It elevates itself**, which is why nothing here needs to: `sudo_command='sudo'` when `$EUID` is not 0, and every privileged line runs through that variable. It also does the browser stores with the `certutil` beside it — Firefox profiles from `profiles.ini`, Chrome and Chromium from `~/.pki/nssdb` — which the GUI's check cannot see and must therefore not imply.
+**It elevates itself**, which is why nothing here needs to: `sudo_command='sudo'` when `$EUID` is not 0, and every privileged line runs through that variable. It also does the browser stores with `certutil` — Firefox profiles from `profiles.ini`, Chrome and Chromium from `~/.pki/nssdb` — which the GUI's check cannot see and must therefore not imply. Note *which* `certutil`: `CERTUTIL=$(command -v certutil || true)` first, and only `$SCRIPT_DIR/certutil` when that finds nothing. The copy shipped beside the binary is the fallback, not the default, and it is the branch this machine takes because `libnss3-tools` is not installed here.
 
 Four facts from the script and from `update-ca-certificates` decide the shape of the check:
 
@@ -775,17 +775,20 @@ Four facts from the script and from `update-ca-certificates` decide the shape of
 | The anchor directory is the first of `/usr/local/share/ca-certificates`, `/usr/share/pki/trust/anchors`, `/etc/pki/ca-trust/source/anchors`, `/etc/ca-certificates/trust-source/anchors` that exists, and `$SYSTEM_CERT_DIR` overrides the search | The check reads the same list in the same order and honours the same variable, or it reports on a different place from the one the command writes to. Only the first exists on Ubuntu |
 | The installed copy is `<certificate name>.crt` — `CERT_NAME=$(basename "${CERT_PATH}" .pem)`, then `${SYSTEM_CERT_DIR}/${CERT_NAME}.crt` | Look for `.crt`, not the `.pem` the file is called everywhere else. `update-ca-certificates` scans `find -L "$LOCALCERTSDIR" -type f -name '*.crt'` and ignores anything else in silence |
 | The script's idempotence check is `if [ ! -f "${SYSTEM_CERT_PATH}" ]`, else `echo "Certificate already exists in system trust store."` | It tests the **path**, not the contents. A CA that was regenerated after being installed leaves a file of the right name holding the wrong certificate, and re-running the installer reports success without replacing it. The check compares bytes and reports that state separately, because it is the one AdGuard's own tooling will not repair |
-| `update-ca-certificates` appends whole PEM bodies to `/etc/ssl/certs/ca-certificates.crt` and symlinks `$(basename … .crt \| sed -e 's/ /_/g' -e 's/[()]/=/g' -e 's/,/_/g').pem` beside it | The bundle carries **no names at all**. `grep -c AdGuard /etc/ssl/certs/ca-certificates.crt` returns `0` on a machine where the certificate *is* trusted — measured here. Membership has to be decided on the certificate's own base64 body |
+| `update-ca-certificates` appends each anchor **file** to `/etc/ssl/certs/ca-certificates.crt` — `sed -e '$a\' "$CERT" >> "$TEMPBUNDLE"`, every byte of it — and symlinks `$(basename … .crt \| sed -e 's/ /_/g' -e 's/[()]/=/g' -e 's/,/_/g').pem` beside it | The bundle carries **no names at all**, because the files that went into it carry none: `grep -c AdGuard /etc/ssl/certs/ca-certificates.crt` returns `0` on a machine where the certificate *is* trusted — measured here. It is a property of the anchors rather than of the bundler, so an anchor written by `openssl x509 -text` would put a subject line in there; membership therefore has to be decided on the certificate's own base64 body either way |
 
 The reading this machine gives, which is the fully-installed one:
 
 ```console
-$ ls -la /usr/local/share/ca-certificates/ /etc/ssl/certs/AdGuard_CLI_CA.pem
--rw-r--r-- 1 root root 1143 Jul 12 08:47 'AdGuard CLI CA.crt'
-lrwxrwxrwx 1 root root   51 Jul 12 08:47 /etc/ssl/certs/AdGuard_CLI_CA.pem -> '/usr/local/share/ca-certificates/AdGuard CLI CA.crt'
+$ ls -la '/usr/local/share/ca-certificates/AdGuard CLI CA.crt'
+-rw-r--r-- 1 root root 1143 Jul 12 08:47 '/usr/local/share/ca-certificates/AdGuard CLI CA.crt'
+$ ls -la /etc/ssl/certs/AdGuard_CLI_CA.pem
+lrwxrwxrwx 1 root root 51 Jul 12 08:47 /etc/ssl/certs/AdGuard_CLI_CA.pem -> '/usr/local/share/ca-certificates/AdGuard CLI CA.crt'
 $ grep -c AdGuard /etc/ssl/certs/ca-certificates.crt
 0
 ```
+
+(The anchor directory holds other certificates too — this machine has a second, unrelated one — so the commands above name the one file rather than listing the directory.)
 
 **Generation is not measured, deliberately.** `adguard-cli cert` — *"Generate a certificate for HTTPS filtering"* — is the command for a data directory with no CA, and the GUI shows it, but nobody has run it: it offers to install into the **system** trust store, which is a machine-wide change no test here is entitled to make, and it is unmeasured whether it reuses or replaces an existing CA. The UI therefore only ever *names* it, in AdGuard's own words, and never claims what it will do to a certificate that already exists.
 

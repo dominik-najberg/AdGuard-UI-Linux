@@ -133,11 +133,18 @@ pub struct CaTrust {
     pub anchor: Option<PathBuf>,
     /// A file at [`Self::anchor`] holds this same certificate.
     pub anchored: bool,
-    /// A file at [`Self::anchor`] holds a **different** certificate.
+    /// A file at [`Self::anchor`] does **not** hold this certificate.
     ///
     /// Mutually exclusive with [`Self::anchored`]; both false means nothing is
-    /// there. This is the state AdGuard's own installer cannot fix, because it
-    /// tests for the path and not for the contents — see the module docs.
+    /// at the path. This is the state AdGuard's own installer cannot fix,
+    /// because it tests for the path and not for the contents — see the module
+    /// docs.
+    ///
+    /// It covers a file holding a *different* certificate and a file holding no
+    /// certificate at all, which are the same fact as far as the installer is
+    /// concerned: both are a file, both stop it, and neither is what the trust
+    /// store needs. A zero-length anchor from an interrupted copy is the second
+    /// kind, and it looks identical to the first from the outside.
     pub stale: bool,
     /// The trusted bundle this machine keeps, if one of the known ones exists.
     pub bundle: Option<PathBuf>,
@@ -172,15 +179,24 @@ impl CaTrust {
         let ours = bodies(&read(&certificate)).into_iter().next();
 
         let anchor = anchor_dir.map(|dir| dir.join(anchor_name(&certificate)));
+        // **Anything at the anchor path that is not this certificate is stale**,
+        // including a file that holds no certificate at all — a zero-length one
+        // from an interrupted copy, a DER `.crt`, or one this user cannot read.
+        // The distinction is not ours to draw: `install_cert.sh` tests
+        // `[ ! -f "${SYSTEM_CERT_PATH}" ]` and stops if *anything* is there, so
+        // every one of those blocks the install exactly as an old certificate
+        // does. An earlier revision folded them into "nothing is there", which
+        // pointed the user at a command that would have printed "Certificate
+        // already exists in system trust store" and changed nothing.
+        //
+        // Membership, not equality: an anchor file may hold more than one
+        // certificate, and judging it by whichever happens to be first would
+        // report a file that does contain the CA as holding a different one.
         let (anchored, stale) = match (&ours, &anchor) {
-            (Some(ours), Some(path)) => match bodies(&read(path)).first() {
-                Some(theirs) => (theirs == ours, theirs != ours),
-                // Nothing at the path, or a file that is not a certificate.
-                // The second reads as absent rather than stale: the installer
-                // would overwrite neither, and "a different certificate is
-                // installed" would be a claim this check has not established.
-                None => (false, false),
-            },
+            (Some(ours), Some(path)) if path.exists() => {
+                let holds = contains(&read(path), ours);
+                (holds, !holds)
+            }
             _ => (false, false),
         };
 
@@ -230,7 +246,8 @@ impl CaTrust {
     /// **That qualifier is the whole of it, and the UI has to carry it too.**
     /// Firefox and Chrome keep their own NSS databases and consult the system
     /// store for nothing; `install_cert.sh` adds the certificate to both — with
-    /// the `certutil` AdGuard ships beside it — and this check sees neither.
+    /// `certutil`, the system's or the copy AdGuard ships beside it — and this
+    /// check sees neither.
     /// So a `true` here means the machine trusts the CA, never that every
     /// browser on it does.
     ///
@@ -249,6 +266,14 @@ impl CaTrust {
     /// command that cannot work. [`crate::RootHelper::unmet`] lists all of its
     /// three because those are independent properties of one file.
     pub fn unmet(&self) -> Vec<&'static str> {
+        // The bundle is what decides, so it decides here too. Without this,
+        // a certificate that reached the bundle by some route that left no
+        // anchor behind — a distribution that installs one differently, a
+        // hand-added entry — would read as trusted and *also* report a missing
+        // step, and the two are answers to the same question.
+        if self.is_trusted() {
+            return Vec::new();
+        }
         if !self.generated {
             vec!["no certificate has been generated"]
         } else if self.stale {
@@ -311,10 +336,18 @@ pub fn install_command(installer: &Path, certificate: &Path) -> Option<String> {
 /// Backslash is on the list because it escapes the closing quote, and the two
 /// newline characters because a clipboard paste of a line containing one
 /// submits it.
+///
+/// `!` is on it for a reason worth stating, because it is inert in every
+/// context but the one that matters here. Inside double quotes it is an
+/// ordinary character to a script — and to an *interactive* bash or zsh it is
+/// history expansion, which is precisely where a copied command is pasted.
+/// Measured: with a previous command in the history, `echo "/data/AdGuard!! CA"`
+/// at an interactive prompt prints that command's text in the middle of the
+/// path.
 pub fn quotable(path: &Path) -> bool {
     !path
         .to_string_lossy()
-        .contains(['"', '`', '$', '\\', '\n', '\r'])
+        .contains(['"', '`', '$', '\\', '!', '\n', '\r'])
 }
 
 /// The command that rebuilds the bundle from the anchor directory.
@@ -323,25 +356,52 @@ pub fn quotable(path: &Path) -> bool {
 /// picks whichever this machine actually has rather than guessing from the
 /// anchor directory: a distribution may ship either, and an instruction naming
 /// a command that is not installed is worse than no instruction.
+///
+/// **`$PATH` is not enough to look in, and that is the whole difficulty.** Both
+/// commands live in `/usr/sbin` on Debian and Ubuntu, which a desktop session
+/// frequently leaves out of a GUI process's `$PATH` — so a search of `$PATH`
+/// alone would miss the command that is right there, on the one distribution
+/// the anchor list puts first. The sbin directories are therefore searched
+/// explicitly. The final fallback keeps the promise above only in the sense
+/// that it names the command this machine's own trust store is rebuilt with;
+/// [`refresh_command_found`] is what a caller should ask if it needs to know
+/// whether the program is really there.
 pub fn refresh_command() -> String {
-    let found = REFRESH_COMMANDS
-        .iter()
-        .find(|name| in_path(name))
-        .unwrap_or(&REFRESH_COMMANDS[0]);
-    format!("sudo {found}")
+    format!("sudo {}", refresh_program())
 }
+
+/// Whether the program [`refresh_command`] names was actually found.
+pub fn refresh_command_found() -> bool {
+    REFRESH_COMMANDS.iter().any(|name| resolves(name))
+}
+
+fn refresh_program() -> &'static str {
+    REFRESH_COMMANDS
+        .iter()
+        .find(|name| resolves(name))
+        .unwrap_or(&REFRESH_COMMANDS[0])
+}
+
+/// Directories to look in beyond `$PATH`, for programs that live in `sbin` and
+/// are invoked with `sudo` rather than run by us.
+const SBIN_DIRS: [&str; 2] = ["/usr/sbin", "/sbin"];
 
 /// The first of AdGuard's four anchor directories that exists here.
 ///
 /// `$SYSTEM_CERT_DIR` overrides the search, because `install_cert.sh` honours
 /// exactly that variable for exactly that purpose — so a check pointed at a
 /// throwaway directory reports on the same place the installer would write to.
+/// **A variable that is set decides the answer, even when it names nothing.**
+/// Falling back to the search would answer an overridden question from the
+/// machine's own trust store, in the reassuring direction, and silently: a
+/// mistyped path in a test recipe would report the real certificate as
+/// installed and the test would pass for the wrong reason. `install_cert.sh`
+/// takes the same line — set but not a directory is a hard error there, not a
+/// reason to go looking elsewhere.
 pub fn anchor_dir() -> Option<PathBuf> {
     if let Some(explicit) = std::env::var_os("SYSTEM_CERT_DIR") {
         let candidate = PathBuf::from(explicit);
-        if candidate.is_dir() {
-            return Some(candidate);
-        }
+        return candidate.is_dir().then_some(candidate);
     }
     ANCHOR_DIRS
         .iter()
@@ -360,12 +420,13 @@ pub fn anchor_dir() -> Option<PathBuf> {
 /// test override is removing a certificate from the system trust store to see
 /// what the app does about it, which is the act this whole design exists to
 /// leave to the user. `$ADGUARD_ROOT_HELPER` is there for the same reason.
+/// Set but absent means **no bundle**, for the reason [`anchor_dir`] gives:
+/// a recipe that points this at a path it forgot to create must fail loudly,
+/// not quietly report the machine's own trust store.
 pub fn bundle() -> Option<PathBuf> {
     if let Some(explicit) = std::env::var_os("ADGUARD_CA_BUNDLE") {
         let candidate = PathBuf::from(explicit);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
+        return candidate.is_file().then_some(candidate);
     }
     BUNDLES
         .iter()
@@ -410,21 +471,33 @@ fn read(path: &Path) -> String {
 ///
 /// Only `CERTIFICATE` blocks. A `.pem` beside a private key is a shape AdGuard
 /// does not produce, but reading a `PRIVATE KEY` body into a comparison of
-/// certificates would be a bug waiting for the install that does. An unclosed
-/// block ends the walk rather than yielding the rest of the file, which is what
-/// a truncated bundle looks like.
+/// certificates would be a bug waiting for the install that does.
+///
+/// **An unclosed block is discarded, not run together with the next one.** A
+/// truncated bundle — an interrupted `update-ca-certificates`, a full disk —
+/// leaves exactly that, and scanning to the *first* `END` from the *first*
+/// `BEGIN` would swallow the intervening `BEGIN` and hand back one body that
+/// matches nothing. Every certificate after the truncation would then read as
+/// absent, which on this machine's bundle means reporting a trusted CA as
+/// untrusted. So a `BEGIN` found before the `END` restarts the block there.
 fn blocks(text: &str) -> impl Iterator<Item = &str> {
     const BEGIN: &str = "-----BEGIN CERTIFICATE-----";
     const END: &str = "-----END CERTIFICATE-----";
 
     let mut rest = text;
-    std::iter::from_fn(move || {
+    std::iter::from_fn(move || loop {
         let start = rest.find(BEGIN)?;
         let after = &rest[start + BEGIN.len()..];
         let stop = after.find(END)?;
-        let body = &after[..stop];
-        rest = &after[stop + END.len()..];
-        Some(body)
+        match after[..stop].find(BEGIN) {
+            // Another block opened before this one closed: the one we are in
+            // was never terminated. Drop it and take up from the inner marker.
+            Some(next) => rest = &after[next..],
+            None => {
+                rest = &after[stop + END.len()..];
+                return Some(&after[..stop]);
+            }
+        }
     })
 }
 
@@ -441,7 +514,7 @@ fn bodies(text: &str) -> Vec<String> {
 ///
 /// Deliberately not `bodies(text).contains(body)`. This is the bundle read, it
 /// runs on the GTK main loop every time the window regains focus, and the
-/// bundle is 200 KB holding 123 certificates: collecting all of them to find
+/// bundle is 185 KB holding 123 certificates: collecting all of them to find
 /// one costs 123 allocations per check, and it was **almost the entire cost of
 /// the check**. Measured, debug build, ten calls: 4.84 ms each with `bodies`,
 /// 0.52 ms each with this. Comparing character by character through the
@@ -456,12 +529,13 @@ fn contains(text: &str, body: &str) -> bool {
         })
 }
 
-/// Whether a bare command name resolves on `$PATH`. No execution.
-fn in_path(name: &str) -> bool {
-    let Some(path) = std::env::var_os("PATH") else {
-        return false;
-    };
-    std::env::split_paths(&path).any(|dir| dir.join(name).is_file())
+/// Whether a bare command name resolves on `$PATH` or in an `sbin` directory.
+/// No execution.
+fn resolves(name: &str) -> bool {
+    let on_path = std::env::var_os("PATH").is_some_and(|path| {
+        std::env::split_paths(&path).any(|dir| dir.join(name).is_file())
+    });
+    on_path || SBIN_DIRS.iter().any(|dir| Path::new(dir).join(name).is_file())
 }
 
 #[cfg(test)]
@@ -619,6 +693,120 @@ mod tests {
         );
     }
 
+    /// A file at the anchor path that holds no certificate at all is **stale**,
+    /// not absent. `install_cert.sh` tests `[ ! -f ]`, so a zero-length file
+    /// from an interrupted copy blocks the install exactly as an old
+    /// certificate does — and calling it absent would send the user to a
+    /// command that prints "Certificate already exists in system trust store"
+    /// and changes nothing.
+    #[test]
+    fn an_anchor_holding_no_certificate_still_blocks_the_installer() {
+        let dir = scratch("empty-anchor");
+        let certificate = dir.join("Test CA.pem");
+        fs::write(&certificate, ONE).expect("write the certificate");
+        let anchors = dir.join("anchors");
+        fs::create_dir_all(&anchors).expect("create the anchor directory");
+        fs::write(anchors.join("Test CA.crt"), b"").expect("write an empty anchor");
+
+        let trust = CaTrust::inspect(&certificate, Some(&anchors), None);
+        assert!(!trust.anchored, "{trust:?}");
+        assert!(trust.stale, "{trust:?}");
+        assert_eq!(
+            trust.unmet(),
+            vec!["a different certificate of the same name is already installed"]
+        );
+    }
+
+    /// An anchor file may hold more than one certificate, so the question is
+    /// membership and not "is the first one ours". Judging by the first would
+    /// report a file that *does* carry the CA as carrying a different one, and
+    /// send the user to a `sudo rm` of a file that was fine.
+    #[test]
+    fn an_anchor_holding_several_certificates_is_searched_not_compared() {
+        let dir = scratch("multi-anchor");
+        let certificate = dir.join("Test CA.pem");
+        fs::write(&certificate, ONE).expect("write the certificate");
+        let anchors = dir.join("anchors");
+        fs::create_dir_all(&anchors).expect("create the anchor directory");
+        fs::write(anchors.join("Test CA.crt"), format!("{TWO}{ONE}")).expect("write the anchor");
+
+        let trust = CaTrust::inspect(&certificate, Some(&anchors), None);
+        assert!(trust.anchored, "{trust:?}");
+        assert!(!trust.stale, "{trust:?}");
+    }
+
+    /// [`CaTrust::unmet`] and [`CaTrust::is_trusted`] answer the same question
+    /// and must never disagree. A certificate that reached the bundle without
+    /// leaving an anchor behind is the case that used to make them: trusted,
+    /// and reporting a missing step the bundle read had just disproved.
+    #[test]
+    fn nothing_is_unmet_once_the_bundle_carries_it() {
+        let dir = scratch("bundled-only");
+        let certificate = dir.join("Test CA.pem");
+        fs::write(&certificate, ONE).expect("write the certificate");
+        let anchors = dir.join("anchors");
+        fs::create_dir_all(&anchors).expect("create the anchor directory");
+        let bundle = dir.join("bundle.crt");
+        fs::write(&bundle, ONE).expect("write the bundle");
+
+        let trust = CaTrust::inspect(&certificate, Some(&anchors), Some(&bundle));
+        assert!(!trust.anchored, "{trust:?}");
+        assert!(trust.is_trusted(), "{trust:?}");
+        assert!(trust.unmet().is_empty(), "{trust:?}");
+    }
+
+    /// A truncated bundle must not take the following certificate down with
+    /// it. Scanning from the first `BEGIN` to the first `END` would return one
+    /// body spanning both blocks, matching nothing — and on this machine's real
+    /// bundle that means reporting a trusted CA as untrusted.
+    #[test]
+    fn an_unclosed_block_does_not_swallow_the_next_one() {
+        let truncated = format!("-----BEGIN CERTIFICATE-----\nU0VMRg==\n{ONE}");
+        assert_eq!(bodies(&truncated), bodies(ONE));
+        assert!(contains(&truncated, &bodies(ONE)[0]));
+
+        // And the same in the middle of a bundle, which is where a partial
+        // write actually lands.
+        let bundle = format!("{TWO}-----BEGIN CERTIFICATE-----\nU0VMRg==\n{ONE}");
+        assert_eq!(bodies(&bundle).len(), 2);
+        assert!(contains(&bundle, &bodies(ONE)[0]));
+        assert!(contains(&bundle, &bodies(TWO)[0]));
+    }
+
+    /// An override that names nothing answers **nothing**, rather than falling
+    /// back to the machine's own trust store.
+    ///
+    /// The failure it prevents is silent and points the reassuring way: a test
+    /// recipe with a mistyped `SYSTEM_CERT_DIR` would have been answered from
+    /// `/usr/local/share/ca-certificates`, reported the real certificate as
+    /// installed, and passed. `install_cert.sh` treats the same variable the
+    /// same way — set but not a directory is an error there, not a search.
+    ///
+    /// Serialised by being one test rather than two: these set process-wide
+    /// environment variables, and `cargo test` runs threads.
+    #[test]
+    fn an_override_that_names_nothing_reports_nothing() {
+        let absent = std::env::temp_dir().join("adguard-ui-trust-test/definitely-absent");
+        let _ = fs::remove_dir_all(&absent);
+        let _ = fs::remove_file(&absent);
+
+        // SAFETY: single-threaded within this test, and both variables are
+        // restored before it returns. Nothing else in this suite reads them.
+        unsafe {
+            std::env::set_var("SYSTEM_CERT_DIR", &absent);
+            std::env::set_var("ADGUARD_CA_BUNDLE", &absent);
+        }
+        let dir = anchor_dir();
+        let file = bundle();
+        unsafe {
+            std::env::remove_var("SYSTEM_CERT_DIR");
+            std::env::remove_var("ADGUARD_CA_BUNDLE");
+        }
+
+        assert_eq!(dir, None, "an absent SYSTEM_CERT_DIR must not fall back");
+        assert_eq!(file, None, "an absent ADGUARD_CA_BUNDLE must not fall back");
+    }
+
     /// No certificate at all — a data directory that has never been configured,
     /// or a `root_certificate_name` that was changed after generation. Not an
     /// error: the path is what the report needs, and it is kept.
@@ -711,6 +899,9 @@ mod tests {
             "/data/`id`.pem",
             "/data/x\\\".pem",
             "/data/one\nsudo rm -rf ~\n.pem",
+            // History expansion. Inert in a script and live at the interactive
+            // prompt this command is pasted into.
+            "/data/AdGuard!! CA.pem",
         ];
         for name in hostile {
             assert!(!quotable(Path::new(name)), "{name}");
@@ -751,14 +942,19 @@ mod tests {
         let command = refresh_command();
         assert!(command.starts_with("sudo update-ca-"), "{command}");
         let named = command.trim_start_matches("sudo ");
-        if in_path(REFRESH_COMMANDS[0]) || in_path(REFRESH_COMMANDS[1]) {
-            assert!(in_path(named), "{command} names something not on PATH");
+        assert_eq!(refresh_command_found(), resolves(named), "{command}");
+        // The reference machine has `/usr/sbin/update-ca-certificates`, and a
+        // GUI process's `$PATH` frequently does not carry `/usr/sbin` — which
+        // is the case this search exists for, so it is asserted rather than
+        // left to a machine that happens to have it either way.
+        if std::path::Path::new("/usr/sbin/update-ca-certificates").is_file() {
+            assert!(refresh_command_found(), "{command}");
         }
     }
 
     /// What the check costs, because it runs on the GTK main loop whenever the
     /// window regains focus and the largest of its three reads is the system
-    /// bundle — 200 KB and 123 certificates on the reference machine, against
+    /// bundle — 185 KB and 123 certificates on the reference machine, against
     /// the root helper's single `stat`.
     ///
     /// An upper bound with a wide margin, as every timing assertion in this

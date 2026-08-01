@@ -706,7 +706,7 @@ pub const ADVANCED: [SettingGroup; 6] = [
 /// | --- | --- | --- |
 /// | proxy server mode | `proxy_mode` | Still out, and now for a **measured** reason rather than an assumed one — see below. |
 /// | proxy listen address | `listen_address` | Always blocked at first run: the seeded config has `listen_auth` off with empty credentials, and moving beyond loopback in that state is a **measured silent no-op** (contract §5). The Advanced page owns it, after setup, where the credentials can be set first. |
-/// | certificate name | `https_filtering.root_certificate_name` | Cosmetic, and the seeded default is the name the CA on disk already carries. |
+/// | certificate name | `https_filtering.root_certificate_name` | **Not cosmetic, though this table said so until the trust check was built.** The value names the CA *file*, so changing it points the check at a path nothing will create — only `configure` generates a certificate, and it will not run again here. Left out all the more firmly, and read-only everywhere (`config::key::ROOT_CERTIFICATE_NAME`). |
 /// | filter list groups | the `filters` list | The Filters page is the whole of this, with a localised catalogue the wizard's numbered list cannot match. |
 ///
 /// What remains is: the one protection switch whose answer changes what the

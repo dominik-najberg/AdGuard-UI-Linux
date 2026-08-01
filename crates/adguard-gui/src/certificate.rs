@@ -70,10 +70,20 @@ impl CertificateView {
         copy.set_tooltip_text(Some("Copy the command"));
         copy.set_valign(gtk::Align::Center);
         copy.add_css_class("flat");
+        // **Weak, both of them.** The row owns the button, the button owns this
+        // closure, and a strong `command` in it would close a GObject cycle
+        // that nothing breaks — the row, its subtitle and this button would
+        // outlive every rebuild of the page. `toasts` is worse: the overlay is
+        // an ancestor of the whole view, so holding it strongly from a leaked
+        // row keeps the entire widget tree alive, including the first-run
+        // assistant's after it has handed the window over.
         copy.connect_clicked({
-            let toasts = toasts.clone();
-            let command = command.clone();
+            let toasts = toasts.downgrade();
+            let command = command.downgrade();
             move |_| {
+                let (Some(command), Some(toasts)) = (command.upgrade(), toasts.upgrade()) else {
+                    return;
+                };
                 let text = command.subtitle().unwrap_or_default();
                 command.clipboard().set_text(&text);
                 toasts.add_toast(toast("Command copied"));
@@ -145,7 +155,7 @@ impl CertificateView {
         }
 
         self.group.set_visible(true);
-        self.status.set_subtitle(&self.explain(&trust));
+        self.status.set_subtitle(&self.explain(&trust, filtering));
 
         match remedy {
             Some(remedy) => {
@@ -172,16 +182,29 @@ impl CertificateView {
     }
 
     /// What the check found, in the order the machine applies it.
-    fn explain(&self, trust: &CaTrust) -> String {
+    ///
+    /// The opening clause is not decoration: it says *why this row is here at
+    /// all*, and it must not assert a switch state that was never read. An
+    /// unreadable `https_filtering.enabled` is why these rows are shown at all
+    /// in that case — the same rule as everywhere else in this app, that a fact
+    /// we could not read is never rendered as the reassuring answer — but the
+    /// row says so rather than claiming filtering is on. The Protection switch
+    /// immediately above is already reading *unavailable*, and two rows
+    /// disagreeing about the same key would be worse than either.
+    fn explain(&self, trust: &CaTrust, filtering: Option<bool>) -> String {
         let missing = trust
             .unmet()
             .first()
             .copied()
             .unwrap_or("it is not trusted");
+        let why = match filtering {
+            Some(_) => "HTTPS filtering is on, but",
+            None => "Whether HTTPS filtering is on could not be read, and",
+        };
 
         if !trust.generated {
             return format!(
-                "HTTPS filtering is on, but {missing} — nothing is at {}. \
+                "{why} {missing} — nothing is at {}. \
                  Filtered pages will fail to load until there is.",
                 abbreviate(&trust.certificate)
             );
@@ -214,7 +237,7 @@ impl CertificateView {
             },
         };
 
-        format!("HTTPS filtering is on, but {missing}.{where_}")
+        format!("{why} {missing}.{where_}")
     }
 
     /// The command that moves this machine to the next state, or `None` when

@@ -38,6 +38,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use adguard_core::config::key;
 use adguard_core::{cli, Cli, Config, Kind, Setting, Toggle, SETUP};
 use adw::prelude::*;
 use gtk::glib;
@@ -379,6 +380,30 @@ impl SetupAssistant {
 
     // --- page 2: the questions ---------------------------------------------
 
+    /// The certificate-trust rows for the questions page.
+    ///
+    /// This screen is where the state they report is *created*: `configure`
+    /// generates the CA and then skips its own *"Do you want to install the
+    /// certificate on the system?"* prompt in silence, since that one needs a
+    /// password and there is no TTY (contract §7). So the assistant is not
+    /// merely a good place to mention the certificate — it is the first moment
+    /// at which there is one to install, and the HTTPS row above has only ever
+    /// been able to say the certificate is *needed*.
+    ///
+    /// Painted once, from the seeded file, and not held afterwards. The switch
+    /// above can still be turned off before *Apply*, which would make these
+    /// rows moot — but the pages this hands over to carry the same group, and
+    /// repainting a wizard step from a control the user has not committed yet
+    /// would flicker between two answers while they are still deciding.
+    fn certificate(&self, config: &Config) -> Rc<CertificateView> {
+        let view = CertificateView::new(&self.toasts);
+        view.paint(
+            config.toggle(Toggle::HttpsFiltering),
+            config.certificate_name(),
+        );
+        view
+    }
+
     fn show_choices(self: &Rc<Self>, config: &Config) {
         self.answers.borrow_mut().clear();
 
@@ -403,28 +428,19 @@ impl SetupAssistant {
                 rendered.add(self.answer(*setting, config).control.widget());
             }
             page_.add(&rendered);
-        }
 
-        // Under the HTTPS filtering question, because the seed has just created
-        // the state it reports: `configure` generates the CA and then skips its
-        // own *"Do you want to install the certificate on the system?"* prompt
-        // in silence, since that one needs a password and there is no TTY
-        // (contract §7). So this screen is not merely a good place to say the
-        // certificate needs installing — it is the first moment at which it is
-        // true, and the HTTPS row above has only ever been able to say the
-        // certificate is *needed*.
-        //
-        // Painted once, from the seeded file. The switch above it can still be
-        // turned off before *Apply*, which would make these rows moot — but the
-        // pages this hands over to carry the same group, and re-painting a
-        // wizard step from a control the user has not committed yet would make
-        // the screen flicker between two answers while they think.
-        let certificate = CertificateView::new(&self.toasts);
-        certificate.paint(
-            config.toggle(Toggle::HttpsFiltering),
-            config.certificate_name(),
-        );
-        page_.add(certificate.widget());
+            // Immediately under the question it qualifies, keyed off the
+            // setting rather than off the group's position — the same way the
+            // Advanced page keys its root-helper rows off `proxy_mode`, so a
+            // reordered `SETUP` table takes these rows with it.
+            if group
+                .settings
+                .iter()
+                .any(|setting| setting.key == key::HTTPS_FILTERING)
+            {
+                page_.add(self.certificate(config).widget());
+            }
+        }
 
         // The two questions the CLI's wizard asks that this page deliberately
         // does not, said out loud rather than silently dropped. `listen_address`

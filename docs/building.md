@@ -253,8 +253,10 @@ That is a licensed install with no configuration — the exact state the assista
 It also means the assistant's certificate rows are *correctly* invisible in that sandbox — the certificate it seeds is already trusted here. To see the unmet branches, point the check somewhere empty:
 
 ```bash
-: > /tmp/empty-bundle.crt && ADGUARD_CA_BUNDLE=/tmp/empty-bundle.crt SYSTEM_CERT_DIR=/tmp/empty XDG_DATA_HOME=/tmp/firstrun cargo run -p adguard-gui
+mkdir -p /tmp/empty && : > /tmp/empty-bundle.crt && ADGUARD_CA_BUNDLE=/tmp/empty-bundle.crt SYSTEM_CERT_DIR=/tmp/empty XDG_DATA_HOME=/tmp/firstrun cargo run -p adguard-gui
 ```
+
+`mkdir` first: an earlier version of this recipe created the empty *bundle* and not the empty *directory*, which was worth the correction it prompted. Both variables now answer **nothing** when they name nothing rather than falling back to the machine's own locations, so a missing directory fails the way it should — visibly, with the anchor reported as absent — instead of quietly answering from `/usr/local/share/ca-certificates` and reporting the real certificate as installed.
 
 `$SYSTEM_CERT_DIR` is AdGuard's own variable, honoured by `install_cert.sh`; `$ADGUARD_CA_BUNDLE` is ours and exists only so those branches are reachable without removing a certificate from the machine's real trust store. `$ADGUARD_CERT_INSTALLER` does the same for the "installer is missing" branch.
 
@@ -344,7 +346,7 @@ Both recommended routes are built. Neither needs root, and neither installs anyt
 make package
 ```
 
-That leaves `target/package/adguard-ui_0.1.0_amd64.deb` (2.4 MB) and `adguard-ui-0.1.0-x86_64.tar.gz` (2.4 MB). `make deb` and `make tarball` build one each; the work is in `packaging/deb.sh` and `packaging/tarball.sh`, which carry the reasoning per step.
+That leaves `target/package/adguard-ui_0.1.0_amd64.deb` (2.4 MB) and `adguard-ui-0.1.0-x86_64.tar.gz` (3.0 MB — gzip against the `.deb`'s zstd, and it carries the whole `data/` tree). `make deb` and `make tarball` build one each; the work is in `packaging/deb.sh` and `packaging/tarball.sh`, which carry the reasoning per step.
 
 The routes were assessed for this machine before either was written:
 
@@ -360,9 +362,11 @@ The constraint is not privilege — there is none to preserve — but reach: thi
 
 Six things the two scripts do that are worth knowing before changing them:
 
-- **`Depends:` is derived, never written down.** `dpkg-shlibdeps` reads the binary's nine `DT_NEEDED` entries and each providing package's `.symbols` file, which gives the symbol-level minimum: `libc6 (>= 2.39)`, where copying this machine's *installed* version would have said 2.43 and refused to install on four years of perfectly capable systems. It wants a `debian/control` relative to the working directory and reads only the package name out of it, so it gets a two-line stub in a scratch directory; `-O` makes it print to stdout instead of writing a `debian/substvars` nobody asked for. The written fallback list is there for a machine without `dpkg-dev` and is deliberately looser.
+- **`Depends:` is derived, never written down.** `dpkg-shlibdeps` reads the binary's nine `DT_NEEDED` entries and each providing package's `.symbols` file, which gives the symbol-level minimum: `libc6 (>= 2.39)`, where copying this machine's *installed* version would have said 2.43 and refused to install on two years of perfectly capable systems — glibc 2.39 through 2.42, which is Ubuntu 24.04 through 25.10. It wants a `debian/control` relative to the working directory and reads only the package name out of it, so it gets a two-line stub in a scratch directory; `-O` makes it print to stdout instead of writing a `debian/substvars` nobody asked for.
+
+  Two things about the fallback beneath it, both of which it got wrong first time. The substitution ends in `|| true`, because `set -e` aborts on a failed command substitution — so a `dpkg-shlibdeps` that *errors* (a library whose package ships no dependency data, which is what a locally built libadwaita looks like) would have killed the build instead of reaching the fallback written for that case. And the fallback carries the derived version predicates rather than bare package names: `libc6` with no predicate installs cheerfully on a system too old to run the binary and fails at exec with `version 'GLIBC_2.39' not found`, which is the one direction a dependency must never be wrong in.
 - **No `libsqlite3-0`.** `rusqlite` is built with `bundled`, so SQLite is compiled in — confirmed from the `ldd` output, which names no sqlite at all.
-- **`fakeroot`, not `sudo`.** `dpkg-deb` records each file's uid and gid verbatim, so a tree built as you would install every path in `/usr` owned by you. `fakeroot` intercepts the `chown` and the `stat` so the archive records `0/0` with nothing on disk ever changing hands.
+- **Neither `sudo` nor `fakeroot`.** `dpkg-deb` records each file's uid and gid verbatim, so a tree built as you would install every path in `/usr` owned by you — which is what the conventional `fakeroot chown -R root:root` exists to fix. It is not needed: `--root-owner-group` (dpkg 1.19+) forces `0/0` into the archive on its own. Measured both ways, `dpkg-deb -c` shows identical `root/root` on every path, so carrying `fakeroot` would be a hard build dependency for a step with no effect — and one that is not in `build-essential`.
 - **The binary is stripped in the packaging step, not by a `[profile.release]`.** 9.3 MB to 7.0 MB, all of it Rust symbol names — worth removing from a package and worth keeping in a `cargo build`, where a backtrace is the point.
 - **No maintainer scripts.** dpkg's own file triggers already refresh both caches this package touches, `hicolor-icon-theme` on `/usr/share/icons/hicolor` and `desktop-file-utils` on `/usr/share/applications`. A `postinst` calling `gtk-update-icon-cache` would be duplicating dpkg's work. The `.deb` therefore has no `preinst`/`postinst`/`prerm`/`postrm` at all.
 - **The autostart entry ships as an example, not a launcher.** `/usr/share/doc/adguard-ui/examples/autostart/`. Installed among the applications it would appear in the app grid as a second, windowless entry (§4); installed into `/etc/xdg/autostart` it would start the tray at login for *every* user of the machine, which is a decision for whoever runs the package and not for whoever built it.
@@ -414,6 +418,6 @@ cp ~/.local/share/adguard-cli/proxy.yaml ~/proxy.yaml.orig
 | `building.md` | This file — prerequisites, running, tests, install, packaging |
 | `overnight-plan.md` | Operational, and dated. History once its night is over |
 
-The scripts under `packaging/` are the sixth piece of documentation, and are written to be read: each step says why it is that shape, and §5 above says what the two of them are for.
+The scripts under `packaging/` are the seventh piece of documentation, and are written to be read: each step says why it is that shape, and §5 above says what the two of them are for.
 
-Keep the five in `docs/`, versioned with the code, so a change to CLI-handling behaviour and its documentation land in the same commit. When bumping the supported `adguard-cli` version, re-verify `cli-contract.md` — every claim in it is a measurement that a new release could invalidate.
+Keep all six in `docs/`, versioned with the code, so a change to CLI-handling behaviour and its documentation land in the same commit. When bumping the supported `adguard-cli` version, re-verify `cli-contract.md` — every claim in it is a measurement that a new release could invalidate.
