@@ -22,13 +22,41 @@ use std::time::{Duration, Instant};
 use crate::model::{FilterAction, FilterSet, License, ProxyStatus};
 use crate::paths;
 
-/// Deadline for the local commands — `status`, `config get/set`, `start`.
+/// Deadline for the local commands — `status`, `config get/set`.
 ///
 /// They cost 10–30 ms measured, so this is not a performance budget; it is the
 /// point past which the command is not coming back and the UI should say so
 /// rather than hold a worker thread. Generous enough that a machine under load
 /// does not trip it.
 const LOCAL_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Deadline for `start` and `restart`, which are local but not quick when they
+/// fail.
+///
+/// This list used to include `start` under [`LOCAL_TIMEOUT`], on the strength of
+/// a *successful* start — measured at **1.1 s**, well inside 15 s. A failing one
+/// is three orders of magnitude slower. Against an install holding a wedged
+/// leftover process (see [`crate::orphan`]) the CLI waits on its own internal
+/// deadline before giving up:
+///
+/// ```text
+/// 10:37:21.870  AdGuardCli start_command: ...
+/// 10:38:21.871  CSM response_from_listener: Client wait data from listener timeout
+/// 10:38:21.881  SERVICE_FACADE start_internal: Failed to stop process manager
+/// ```
+///
+/// **60.0 s**, then `Failed to start proxy server: An unknown error has
+/// occurred` on stdout at exit 0. At 15 s the wrapper was killing that command
+/// three quarters of the way through and reporting *"did not finish within 15s
+/// and was stopped"* — a message about us, thrown over the top of the CLI's own
+/// explanation, which was seconds from arriving.
+///
+/// So the deadline sits above AdGuard's, and stays a backstop rather than the
+/// thing that normally fires. The cost is real and belongs to whoever hits it: a
+/// start that is going to fail now holds the button for a minute. That is the
+/// CLI's minute, and being told what happened at the end of it beats being told
+/// nothing at 15 s.
+const START_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// Deadline for the commands that reach the network — `filters update`,
 /// `check-update`, `update` (`architecture.md` §4), and [`Cli::activate`].
@@ -360,18 +388,59 @@ impl Cli {
 
     /// Start the proxy. The caller must re-read [`Self::status`] afterwards
     /// rather than trusting this to have worked (contract rule 3).
+    ///
+    /// # A start that failed used to come back as success
+    ///
+    /// It exits **0** either way — rule 3 again — so returning `Ok` for the
+    /// whole output meant the Status page had nothing to show and said nothing
+    /// at all. Measured against an install with a wedged leftover process
+    /// (see [`crate::orphan`]), stderr empty, after 60 s:
+    ///
+    /// ```text
+    /// Failed to start proxy server: An unknown error has occurred
+    /// ```
+    ///
+    /// [`start_refusal`] recognises that, so the one shape known to mean
+    /// failure becomes [`Error::Refused`] carrying AdGuard's own sentence.
+    /// **Failure is defined positively here, not success** — the opposite of
+    /// [`Self::config_set`] — because an unrecognised line must stay `Ok` and
+    /// leave the verdict to the status re-read that follows. Defining success
+    /// instead would turn any reworded confirmation into a start that reports
+    /// failure while the proxy runs.
+    ///
+    /// The `Ok` value is the CLI's last line rather than its whole output: a
+    /// start prints two kilobytes of redrawn log before its conclusion, which
+    /// is not something to hand to a toast.
     pub fn start(&self) -> Result<String, Error> {
-        Ok(self.run(&["start"])?.stdout.trim().to_owned())
+        self.lifecycle("start")
     }
 
     /// Stop the proxy. Re-read status afterwards.
+    ///
+    /// Deliberately *not* given [`Self::start`]'s failure check. `stop` against
+    /// an install with nothing running answers `Failed to stop proxy server, it
+    /// is not running` in 0.1 s at exit 0 — measured — and that is the ordinary
+    /// outcome of stopping something already stopped, not an error worth a
+    /// toast. The status re-read that follows every action is what decides.
     pub fn stop(&self) -> Result<String, Error> {
         Ok(self.run(&["stop"])?.stdout.trim().to_owned())
     }
 
     /// Restart the proxy. Re-read status afterwards.
+    ///
+    /// Shares [`Self::start`]'s deadline and its failure check, because it ends
+    /// in a start and fails the same way when one cannot bind.
     pub fn restart(&self) -> Result<String, Error> {
-        Ok(self.run(&["restart"])?.stdout.trim().to_owned())
+        self.lifecycle("restart")
+    }
+
+    /// The shared half of [`Self::start`] and [`Self::restart`].
+    fn lifecycle(&self, verb: &str) -> Result<String, Error> {
+        let out = self.run_within(&[verb], START_TIMEOUT)?;
+        match start_refusal(&out.stdout) {
+            Some(message) => Err(Error::Refused { message }),
+            None => Ok(last_line(&out.stdout).unwrap_or_default()),
+        }
     }
 
     /// Read the licence.
@@ -1010,6 +1079,33 @@ fn confirms(stdout: &str, verb: &str) -> bool {
         .any(|line| line.starts_with("Filter [") && line.contains(']') && line.ends_with(verb))
 }
 
+/// The one line that means a `start` or `restart` did not take.
+///
+/// Matched on its opening, not the whole sentence: the tail is AdGuard's
+/// description of the cause — `An unknown error has occurred` is the measured
+/// one, and a build that names a real reason should have that shown rather than
+/// go unrecognised.
+///
+/// Anchored at the start of a line so it cannot be tripped by the redrawn log
+/// block a start prints above its conclusion, where the same words could appear
+/// inside a longer message.
+///
+/// Note the prefix says *start* for both verbs. `restart` was not measured in
+/// the failing state — the only install available to wedge on purpose is the
+/// author's own, and once cleared it does not come back on demand — but it ends
+/// in the same start, and the cost of being wrong here is an unrecognised
+/// failure falling through to the status re-read, which is exactly where it went
+/// before.
+const START_FAILED: &str = "Failed to start proxy server";
+
+fn start_refusal(stdout: &str) -> Option<String> {
+    stdout
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with(START_FAILED))
+        .map(str::to_owned)
+}
+
 fn first_line(stdout: &str) -> Option<String> {
     stdout
         .lines()
@@ -1307,6 +1403,57 @@ mod tests {
     fn distinguishes_enabled_from_disabled() {
         assert!(is_enabled("Manual DNS proxy is enabled"));
         assert!(!is_enabled("Manual DNS proxy is disabled"));
+    }
+
+    /// The tail of a real failing `start`, captured against an install holding
+    /// a wedged leftover process. Exit 0, stderr empty, 60 s in — the log block
+    /// above the conclusion is what the ANSI stripper leaves behind, and it is
+    /// kept here because the recogniser has to see past it.
+    const START_FAILED_OUTPUT: &str =
+        "01.08.2026 10:43:14.501442 ERROR [119992] SERVICE_FACADE start_internal: Failed\n\
+         01.08.2026 10:43:14.501476 INFO  [119992] AdGuardCli ~AdGuardCli: Stop CLI App\n\
+         Failed to start proxy server: An unknown error has occurred\n";
+
+    /// The tail of a real successful `start` — 1.1 s, same exit code.
+    const START_OK_OUTPUT: &str = "The AdGuard proxy server is running\n\
+         HTTP proxy is listening on 127.0.0.1:3129\n\
+         Manual DNS proxy is disabled\n\
+         You can check the status of the proxy server by running `adguard-cli status`\n";
+
+    #[test]
+    fn recognises_a_start_that_failed() {
+        assert_eq!(
+            start_refusal(START_FAILED_OUTPUT).as_deref(),
+            Some("Failed to start proxy server: An unknown error has occurred")
+        );
+    }
+
+    /// The whole point of defining *failure* positively: anything else, known
+    /// or not, stays a success and leaves the verdict to the status re-read.
+    #[test]
+    fn a_successful_start_is_not_a_refusal() {
+        assert_eq!(start_refusal(START_OK_OUTPUT), None);
+        assert_eq!(start_refusal(""), None);
+        assert_eq!(start_refusal("Some wording nobody has measured yet"), None);
+    }
+
+    /// The `SERVICE_FACADE start_internal: Failed` line sits in the log block of
+    /// every failing start and says the same thing far less usefully. Anchoring
+    /// at the line start is what keeps it from being the sentence we show.
+    #[test]
+    fn the_log_block_is_not_mistaken_for_the_conclusion() {
+        let logs_only = "01.08.2026 10:43:14 ERROR SERVICE_FACADE start_internal: Failed\n";
+        assert_eq!(start_refusal(logs_only), None);
+    }
+
+    /// A start prints its conclusion last, and `Ok` carries that line rather
+    /// than the two kilobytes of log above it.
+    #[test]
+    fn success_reports_only_the_last_line() {
+        assert_eq!(
+            last_line(START_OK_OUTPUT).as_deref(),
+            Some("You can check the status of the proxy server by running `adguard-cli status`")
+        );
     }
 
     /// Captured from v1.4.13. `add` confirms twice; the failures are the ones

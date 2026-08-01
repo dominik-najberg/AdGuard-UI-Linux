@@ -35,6 +35,13 @@ pub const BADGE_UNKNOWN: &str = "state-badge-unknown";
 pub const STATS: &str = "stat-row";
 pub const STAT: &str = "stat-tile";
 pub const STAT_VALUE: &str = "stat-value";
+/// The button wrapping one figure, which is a way in to the page that counts it.
+pub const STAT_BUTTON: &str = "stat-button";
+
+/// A widget [`crate::reveal`] has just jumped to, and the transition that takes
+/// the tint back off it.
+pub const REVEAL_TARGET: &str = "reveal-target";
+pub const REVEALED: &str = "revealed";
 
 const CSS: &str = "
 .hero {
@@ -93,6 +100,36 @@ const CSS: &str = "
 .stat-value {
   font-size: 1.4em;
   font-weight: bold;
+}
+
+/* Each figure is a button now, and a button brings padding, a minimum height and
+   a frame of its own — all of which would push the three tiles apart and make
+   the card look like a toolbar. Stripped back to nothing, the `.stat-tile`
+   padding inside is what shapes it again, and what is left of the button is the
+   part that was wanted: a hover state, a focus ring, and Enter/Space. The corner
+   radius matches the card's, so the hover highlight cannot square off a corner
+   the card has rounded. */
+.stat-button {
+  padding: 0;
+  min-height: 0;
+  min-width: 0;
+  border-radius: 12px;
+}
+
+/* A group the Status page has just jumped to.
+   Instant in and slow out, which is not a flourish: the tint has to be there
+   before the eye arrives, or it explains nothing — and it has to leave slowly,
+   or it is gone before the user has finished reading the rows under it. CSS
+   transitions use the property of the state being moved *to*, so `none` on the
+   tinted state is what makes the two directions differ. */
+.reveal-target {
+  border-radius: 12px;
+  transition: background-color 800ms ease-out;
+}
+
+.reveal-target.revealed {
+  background-color: alpha(@accent_color, 0.13);
+  transition: none;
 }
 ";
 

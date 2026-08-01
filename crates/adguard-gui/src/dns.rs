@@ -60,6 +60,10 @@ const MODES: [&str; 3] = ["Disabled", "Automatic port", "Fixed port"];
 /// dropped with it — so this is replaced rather than reused, and every handler
 /// reaches the page through a `Weak` instead of capturing a row.
 struct Widgets {
+    /// The group the two rows below live in, held only so a link from the Status
+    /// page has something to land on — the "Manual DNS proxy" row there is
+    /// reporting exactly what these two settings decide.
+    filtering: adw::PreferencesGroup,
     mode: adw::ComboRow,
     port: adw::SpinRow,
     port_caveat: gtk::Image,
@@ -218,6 +222,35 @@ impl DnsPage {
         }
     }
 
+    /// Mark the local DNS proxy's controls, as a link from the Status page asks.
+    ///
+    /// That page's "Manual DNS proxy" row reads `status`, which reports what the
+    /// running daemon did; the two settings marked here are what it was told to
+    /// do. The group is the first thing on this page today, so the scroll is
+    /// usually a no-op and the tint is the whole of the answer — but the prelude
+    /// is rebuilt with the catalogue above it, and its position is not something
+    /// this method is in a position to promise.
+    ///
+    /// Nothing to do before the first build; the page opens at the top, which is
+    /// where this group is.
+    pub fn reveal(&self) {
+        if let Some(widgets) = self.widgets.borrow().as_ref() {
+            crate::reveal(&widgets.filtering);
+        }
+    }
+
+    /// Bring the DNS filter lists to the top of the view.
+    ///
+    /// The way in from the Status page's DNS filter count, and the reason the
+    /// catalogue has to be asked rather than simply switched to: on this page
+    /// three groups of `dns_filtering` settings sit above the lists, so opening
+    /// the page is not the same as showing them.
+    pub fn scroll_to_lists(&self) {
+        if let Some(catalogue) = self.catalogue.borrow().as_ref() {
+            catalogue.scroll_to_lists();
+        }
+    }
+
     /// Read the file into [`Self::last`] and paint from it, without rebuilding.
     fn refresh_config(self: &Rc<Self>) {
         let this = self.clone();
@@ -296,6 +329,7 @@ impl DnsPage {
 
         self.connect(&mode, &port, &upstream, &fallbacks, &bootstraps, &user_rules);
         *self.widgets.borrow_mut() = Some(Widgets {
+            filtering: filtering.clone(),
             mode,
             port,
             port_caveat,

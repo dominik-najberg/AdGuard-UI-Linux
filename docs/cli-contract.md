@@ -32,8 +32,12 @@ This is viable mainly because invocation is cheap — see §2.
 | `filters list` | 0.02 s |
 | `config show` | 0.02 s |
 | `filters list --all` | 0.03 s |
+| `start` (success) | 1.1 s |
+| `start` (failure) | **60.0 s** |
 
 Process startup is ~10–30 ms. Polling `status` on a 1–2 s timer is entirely affordable; there is no need for a persistent connection or a caching daemon.
+
+**`start` is the one local command whose failure is slow.** A start that cannot bind waits on AdGuard's own internal deadline before admitting it — see [§11](#11-a-proxy-the-cli-has-lost-track-of) — so a wrapper deadline sized for the 1.1 s success case kills the command three quarters of the way through the 60 s failure and replaces the CLI's explanation with a timeout of ours. `Cli`'s `START_TIMEOUT` sits above AdGuard's at 90 s for that reason; every other local command keeps the 15 s one.
 
 Still run every invocation off the GTK main thread — 30 ms of jank is visible, and network-touching commands (`check-update`, `filters update`) take seconds.
 
@@ -850,3 +854,67 @@ Anything in the `adguard-cli` wrapper crate must:
 9. Pass `--` before any user-supplied key or value ([§5](#the----guard-is-mandatory)).
 10. Range-check numbers itself — `config set` only type-checks ([§5](#config-set-type-checks-and-nothing-else)).
 11. Keep secrets out of error text. `config set` echoes the value it was given, and our own `BadInvocation` quotes the whole command line, so a refused password write would otherwise leak into any toast that shows it. `Cli::set_secret` scrubs every variant that carries our arguments.
+12. Size the `start` deadline above AdGuard's own. A failing start takes 60 s and a successful one 1.1 s, so the deadline that fits the success case truncates the failure and loses its explanation ([§11](#11-a-proxy-the-cli-has-lost-track-of)). Recognise that failure by its stdout line and define *failure* positively there, not success — an unrecognised confirmation must stay a success and leave the verdict to the status re-read.
+
+---
+
+## 11. A proxy the CLI has lost track of
+
+Measured on 2026-08-01, v1.4.13, after the state arose on its own during ordinary use.
+
+An install can end up with the previous proxy process still alive and still holding the ports, while `adguard-cli` reports the proxy stopped:
+
+```
+$ ps -eo pid,ppid,etime,stat,cmd
+   6925    2968  01:11:56 Sl  …/adguard-cli start --no-fork --log-to-file
+   6932    6925  01:11:56 Z   [adguard_root_he] <defunct>
+
+$ ss -lntp
+LISTEN 127.0.0.1:3129  users:(("adguard-cli",pid=6925,fd=62))
+LISTEN 127.0.0.1:1081  users:(("adguard-cli",pid=6925,fd=63))
+
+$ adguard-cli status                                    # exit 0
+The AdGuard proxy server is not running
+```
+
+The daemon has been reparented to `systemd --user` and never reaped its root helper. `status` reports it gone; the kernel says otherwise.
+
+### Neither lifecycle command gets out of it
+
+`stop` is a **no-op** — 0.1 s, exit 0, and the process is still there afterwards:
+
+```
+Failed to stop the AdGuard proxy server
+Failed to stop proxy server, it is not running
+```
+
+`start` cannot bind what is already bound, and takes 60.0 s to say so. From `logs/app.log`:
+
+```
+10:37:21.870  AdGuardCli start_command: ...
+10:38:21.871  CSM response_from_listener: Client wait data from listener timeout
+10:38:21.881  SERVICE_FACADE start_internal: Failed to stop process manager
+```
+
+then, on stdout at **exit 0**:
+
+```
+Failed to start proxy server: An unknown error has occurred
+```
+
+So the CLI has no route out of this state. The user is left with a proxy that is down, a UI that agrees it is down, and a Start button that does nothing for a minute — and `stop && killall adguard-cli` is the recovery people arrive at, of which only the `killall` does anything.
+
+### The command line is not the signature; the contradiction is
+
+A **healthy** daemon is also `adguard-cli start --no-fork --log-to-file` — measured immediately after recovery, on the working process that replaced this one. Killing on that alone kills a running proxy.
+
+What identifies the leftover is that such a process exists *and* `status` says nothing is running. Both halves are required, and `orphan.rs` supplies only the first.
+
+### `SIGTERM` is the whole cure
+
+A `SIGTERM` to that one pid ended it in under 0.5 s and released both ports; `SIGKILL` was never needed. The process belongs to the user running this application, so no privilege is involved and [§8](#8-privileged-operations) does not apply — this is the one recovery the app performs itself rather than printing for the user to run.
+
+Two guards make that safe, both in `orphan.rs`:
+
+- **Signal nothing newer than the attempt.** A start forks a daemon that looks identical to the wedged one, so the caller lists daemons *before* running `start` and only ever signals from that list.
+- **Signal nothing that has been recycled.** A pid is unique only among live processes, and the two reads are separated by a command that can take a minute, so the start time from `/proc/<pid>/stat` field 22 is carried alongside the pid and re-checked. A zombie counts as gone: it keeps an unchanged start time, and waiting for one to exit again would wait forever.

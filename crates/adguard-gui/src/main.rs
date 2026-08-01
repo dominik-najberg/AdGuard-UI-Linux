@@ -462,6 +462,54 @@ struct Page {
     icon: &'static str,
 }
 
+/// Where a click on the Status page asks to be taken.
+///
+/// That page answers one question — *am I protected?* — and every figure and row
+/// on it is the readable end of a setting that is written somewhere else. A
+/// number that counts something is a question about it ("four enabled, out of
+/// what?") and a row that reads "Disabled" is a question about how to change it;
+/// both answers are a page away, and until now the user had to know which page.
+///
+/// These name the other end. The Status page picks one and knows nothing more —
+/// which page holds which setting, how the sidebar and the stack are kept in
+/// step, and what "arriving" means once there, are all [`main_view`]'s business.
+#[derive(Clone, Copy)]
+pub enum Destination {
+    /// The six protection modules.
+    Protection,
+    /// The HTTP/HTTPS filter catalogue.
+    WebFilters,
+    /// The DNS page, for its catalogue.
+    DnsFilters,
+    /// The DNS page, at the local DNS proxy's own controls.
+    DnsProxy,
+    /// The Advanced page, at the group holding this setting.
+    Advanced(&'static str),
+}
+
+impl Destination {
+    /// Which of [`PAGES`] this leads to.
+    fn page(self) -> &'static str {
+        match self {
+            Self::Protection => "protection",
+            Self::WebFilters => "filters",
+            Self::DnsFilters | Self::DnsProxy => "dns",
+            Self::Advanced(_) => "advanced",
+        }
+    }
+
+    /// The sidebar row to select, which is how every other part of the window
+    /// finds out where we went.
+    ///
+    /// `None` is unreachable — [`Self::page`] returns ids from [`PAGES`] and a
+    /// test pins that — and is an `Option` rather than an `expect` because the
+    /// cost of being wrong should be a link that does nothing, not a window that
+    /// disappears mid-click.
+    fn page_index(self) -> Option<usize> {
+        PAGES.iter().position(|page| page.id == self.page())
+    }
+}
+
 /// The window's content, plus the pages the tray needs to reach.
 ///
 /// The pages were local to `main_view` while the only thing that drove them was
@@ -484,6 +532,15 @@ fn main_view(cli: &Cli) -> MainView {
     let toasts = adw::ToastOverlay::new();
 
     let status = status::StatusPage::new(cli.clone(), toasts.clone());
+    // Before anything else asks the CLI for anything: an install can be left
+    // holding a proxy process the CLI has lost track of, and in that state
+    // `start` fails for a minute and `stop` does nothing at all. Clearing it is
+    // this application's to do — the process belongs to the user running it and
+    // needs no privilege to end. See `adguard_core::orphan`.
+    //
+    // Costs one `/proc` scan on a healthy machine, and stops there without
+    // running the CLI at all.
+    status.sweep();
     let protection = protection::ProtectionPage::new(cli.clone(), toasts.clone());
     let filters = filters::FiltersPage::new(cli.clone(), toasts.clone(), FilterSet::Http);
     // The DNS catalogue plus the `dns_filtering` settings around it, on one
@@ -576,6 +633,63 @@ fn main_view(cli: &Cli) -> MainView {
     });
     sidebar.select_row(sidebar.row_at_index(0).as_ref());
 
+    // The Status page's links, resolved. Routed through the sidebar rather than
+    // straight at the stack so that everything hanging off `row-selected`
+    // follows — the sidebar highlight, the header title, the recount of the
+    // figures, and the narrow-window move to the content pane. Switching the
+    // stack directly would leave the sidebar pointing at Status while the
+    // Advanced page was showing.
+    //
+    // Every capture here is weak, and it has to be: the sidebar's own
+    // `row-selected` handler holds a strong `status`, so a strong sidebar here
+    // would close the loop and neither would ever be freed.
+    status.connect_navigate({
+        let sidebar = sidebar.downgrade();
+        let advanced = Rc::downgrade(&advanced);
+        let dns = Rc::downgrade(&dns);
+        let filters = Rc::downgrade(&filters);
+        move |destination: Destination| {
+            let Some(sidebar) = sidebar.upgrade() else { return };
+            if let Some(index) = destination.page_index() {
+                sidebar.select_row(sidebar.row_at_index(index as i32).as_ref());
+            }
+            // Being on the page is not the same as being at the setting: on
+            // Advanced the ports are four groups down, and a link that lands
+            // above the fold has answered a different question than the one
+            // asked. The pages that can say where to stop, do.
+            match destination {
+                Destination::Advanced(setting) => {
+                    if let Some(advanced) = advanced.upgrade() {
+                        advanced.reveal(setting);
+                    }
+                }
+                Destination::DnsProxy => {
+                    if let Some(dns) = dns.upgrade() {
+                        dns.reveal();
+                    }
+                }
+                // A count of filter lists means the lists, which is the top of
+                // the catalogue and not necessarily the top of the page — the
+                // DNS page keeps three groups of settings above its own. Both
+                // pages also hold their scroll position between visits, and a
+                // link that says "show me the filters" should not arrive two
+                // thirds of the way down where it was left.
+                Destination::WebFilters => {
+                    if let Some(filters) = filters.upgrade() {
+                        filters.scroll_to_lists();
+                    }
+                }
+                Destination::DnsFilters => {
+                    if let Some(dns) = dns.upgrade() {
+                        dns.scroll_to_lists();
+                    }
+                }
+                // The whole page is the answer: the six modules are all of it.
+                Destination::Protection => {}
+            }
+        }
+    });
+
     let sidebar_view = adw::ToolbarView::new();
     sidebar_view.add_top_bar(&adw::HeaderBar::new());
     sidebar_view.set_content(Some(&sidebar));
@@ -660,6 +774,112 @@ pub fn toast(message: &str) -> adw::Toast {
     adw::Toast::builder().use_markup(false).title(message).build()
 }
 
+/// Scroll a widget to the top of whatever scrolls it, and tint it for a moment.
+///
+/// The second half of a link from the Status page. Switching pages is not the
+/// same as arriving: on the Advanced page the ports the user clicked are four
+/// groups below the fold, and a page that opens at the top has put them back
+/// where they were before the link existed.
+///
+/// The tint is what makes the scroll readable. A page that has jumped to the
+/// middle of itself looks, without it, like a page that opened somewhere
+/// arbitrary — the user has to re-find the thing they just clicked in order to
+/// recognise that they arrived. Use [`scroll_to`] instead when the answer is
+/// everything from the widget downwards rather than the widget itself; marking
+/// one group there would point at the wrong thing.
+pub fn reveal(widget: &impl IsA<gtk::Widget>) {
+    once_allocated(widget, |widget| {
+        scroll_into_view(widget);
+        mark(widget);
+    });
+}
+
+/// [`reveal`] without the tint: bring a widget to the top of the view and leave
+/// it looking like itself.
+pub fn scroll_to(widget: &impl IsA<gtk::Widget>) {
+    once_allocated(widget, scroll_into_view);
+}
+
+/// Run `then` against `widget` once it has a size, or give up.
+///
+/// # Why this waits for a frame
+///
+/// A `GtkStack` does not allocate the children that are not showing, so at the
+/// instant a page is switched to, the group on it has no position on screen to
+/// scroll to — and asking for one yields zero, which reads as "the top of the
+/// page" and would silently do nothing at all.
+///
+/// So the work is deferred to an idle, which runs *after* the frame clock has
+/// laid the page out: GDK draws at a higher priority than an idle callback, so
+/// one pass round the main loop is enough in the ordinary case. It re-arms while
+/// the width is still zero rather than assuming that, and gives up after a
+/// handful of frames — losing the scroll, never the navigation, which has
+/// already happened by then.
+fn once_allocated(widget: &impl IsA<gtk::Widget>, then: impl FnOnce(&gtk::Widget) + 'static) {
+    /// Frames to wait for an allocation before giving up.
+    const FRAMES: u32 = 8;
+
+    let widget = widget.as_ref().clone();
+    let mut then = Some(then);
+    let mut waited = 0;
+    glib::idle_add_local(move || {
+        waited += 1;
+        if widget.width() == 0 {
+            return if waited < FRAMES {
+                glib::ControlFlow::Continue
+            } else {
+                glib::ControlFlow::Break
+            };
+        }
+        if let Some(then) = then.take() {
+            then(&widget);
+        }
+        glib::ControlFlow::Break
+    });
+}
+
+/// Tint a widget, and take the tint off again a moment later.
+fn mark(widget: &gtk::Widget) {
+    /// How long the tint stays at full strength before it starts fading.
+    const HOLD: std::time::Duration = std::time::Duration::from_millis(1200);
+
+    widget.add_css_class(style::REVEAL_TARGET);
+    widget.add_css_class(style::REVEALED);
+    glib::timeout_add_local_once(HOLD, {
+        let widget = widget.clone();
+        // Only the tint comes off. `REVEAL_TARGET` carries the transition that
+        // fades it, so removing that too would make it vanish instead.
+        move || widget.remove_css_class(style::REVEALED)
+    });
+}
+
+/// Put `widget` at the top of the nearest scrolling ancestor.
+///
+/// Translating into the scrolled window rather than into its child: the child is
+/// a `GtkViewport` on some libadwaita versions and the page's clamp on others,
+/// and the arithmetic only needs a widget whose origin is the top of the visible
+/// area — which the scrolled window itself always is. The offset that comes back
+/// is therefore the widget's distance from the top of the *view*, and the scroll
+/// position already in effect is what turns it back into a distance from the top
+/// of the content.
+fn scroll_into_view(widget: &gtk::Widget) {
+    let Some(scroller) = widget
+        .ancestor(gtk::ScrolledWindow::static_type())
+        .and_downcast::<gtk::ScrolledWindow>()
+    else {
+        return;
+    };
+    let Some((_, offset)) = widget.translate_coordinates(&scroller, 0.0, 0.0) else {
+        return;
+    };
+    let adjustment = scroller.vadjustment();
+    // A group near the foot of a short page cannot reach the top, and asking for
+    // it would leave the adjustment holding a value it will silently clamp
+    // anyway — with the group off screen if anything ever read the value back.
+    let furthest = (adjustment.upper() - adjustment.page_size()).max(adjustment.lower());
+    adjustment.set_value((adjustment.value() + offset).clamp(adjustment.lower(), furthest));
+}
+
 /// `/home/you/.local/share/...` -> `~/.local/share/...`, so an AdGuard path
 /// fits in a subtitle without wrapping.
 pub fn abbreviate(path: &std::path::Path) -> String {
@@ -672,5 +892,40 @@ pub fn abbreviate(path: &std::path::Path) -> String {
                 .map_or(display.clone(), |rest| format!("~{rest}"))
         }
         _ => display,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every link on the Status page has to resolve to a sidebar row.
+    ///
+    /// The two halves are strings that meet nowhere else: `Destination::page`
+    /// spells the id and `PAGES` defines it, so renaming a page id — or adding a
+    /// destination for a page that does not exist — would otherwise turn a link
+    /// into a click that quietly does nothing. Nothing on screen would say so.
+    #[test]
+    fn every_destination_names_a_page() {
+        for destination in [
+            Destination::Protection,
+            Destination::WebFilters,
+            Destination::DnsFilters,
+            Destination::DnsProxy,
+            Destination::Advanced(adguard_core::config::key::PROXY_MODE),
+        ] {
+            assert!(
+                destination.page_index().is_some(),
+                "{} is not one of PAGES",
+                destination.page()
+            );
+        }
+    }
+
+    /// The Status page is index 0, which [`main_view`] relies on when it
+    /// recounts the figures on the way back to it.
+    #[test]
+    fn status_is_the_first_page() {
+        assert_eq!(PAGES[0].id, "status");
     }
 }

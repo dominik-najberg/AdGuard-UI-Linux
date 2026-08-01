@@ -16,6 +16,25 @@
 //! shape measured to make one of them fail (contract §3), so a figure that
 //! needed the CLI could not be refreshed as freely as this one is.
 //!
+//! # Everything on it that reports a setting is a way in to that setting
+//!
+//! This page reads and does not write — apart from the proxy's own lifecycle and
+//! the licence, it holds no control that changes anything. That is what makes it
+//! readable, and it was also what made it a dead end: a figure reading "4 of 6"
+//! is a question about the other two, and a row reading "Disabled" is a question
+//! about how to enable it, and the answer to both was for the user to already
+//! know which of the five other pages to go and look on.
+//!
+//! So each of them is now a link. The figures are buttons, the endpoint and
+//! filtering rows are activatable, and each one names a [`Destination`] — the
+//! page that owns the setting it is reporting, and where on it. This page picks
+//! the destination and stops there; the window resolves it, in `main.rs`.
+//!
+//! **No link writes anything.** They lead to the control rather than operating
+//! it, which keeps the one-writer-per-setting rule this app is built on: a
+//! shortcut here that flipped `proxy_mode` would be a second writer for a key
+//! the Advanced page owns, and the two would reconcile over each other.
+//!
 //! # Activation is user-driven, and that is the only shape the CLI supports
 //!
 //! The obvious design — open the activation URL, then poll `license` until it
@@ -42,13 +61,16 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Duration;
 
-use adguard_core::{Activation, Catalogue, Cli, Config, FilterSet, License, ProxyStatus, Toggle};
+use adguard_core::config::key;
+use adguard_core::{
+    orphan, Activation, Catalogue, Cli, Config, Daemon, FilterSet, License, ProxyStatus, Toggle,
+};
 use adw::prelude::*;
 use gtk::glib;
 use gtk4 as gtk;
 use libadwaita as adw;
 
-use crate::{style, toast, worker};
+use crate::{style, toast, worker, Destination};
 
 /// `status` costs ~10 ms and there is no event mechanism to subscribe to, so
 /// polling is the only way to notice the proxy going down underneath us.
@@ -189,6 +211,14 @@ pub struct StatusPage {
     /// it gets it — rather than polling `status` itself, which is what a second
     /// process had to do.
     observer: RefCell<Option<Box<dyn Fn(&ProxyStatus)>>>,
+
+    /// Notified when a figure or a row here is clicked to go somewhere else.
+    ///
+    /// The same shape as `observer` and for the same reason: this page names
+    /// what it wants and the window decides how to do it. It cannot hold the
+    /// sidebar or the other pages itself — it is built before any of them exist,
+    /// and the sidebar already holds this page.
+    navigate: RefCell<Option<Box<dyn Fn(Destination)>>>,
 }
 
 impl StatusPage {
@@ -283,33 +313,75 @@ impl StatusPage {
         // figures and two rules divide the card into fifths — the rules render
         // as grey slabs and the captions wrap inside what is left. Whitespace
         // separates them perfectly well.
-        for (value, caption) in [
-            (&modules, "Protection modules"),
-            (&web_filters, "Web filters"),
-            (&dns_filters, "DNS filters"),
-        ] {
-            stats.append(&stat_tile(value, caption));
-        }
+        //
+        // Collected rather than connected here, because the handler each one
+        // needs is a method on a page that does not exist yet.
+        let tiles: Vec<(gtk::Button, Destination)> = [
+            (
+                &modules,
+                "Protection modules",
+                "Show which protection modules are on",
+                Destination::Protection,
+            ),
+            (
+                &web_filters,
+                "Web filters",
+                "Show the web filter lists",
+                Destination::WebFilters,
+            ),
+            (
+                &dns_filters,
+                "DNS filters",
+                "Show the DNS filter lists",
+                Destination::DnsFilters,
+            ),
+        ]
+        .into_iter()
+        .map(|(value, caption, tooltip, destination)| {
+            let button = stat_button(value, caption, tooltip);
+            stats.append(&button);
+            (button, destination)
+        })
+        .collect();
 
         let stats_group = adw::PreferencesGroup::new();
         stats_group.add(&stats);
 
         // ---- the detail behind the answer ----
 
+        // Where the ports are changed goes in the description rather than on
+        // each row, because both rows lead to the same group and saying it twice
+        // would read as two different offers.
         let endpoint_group = adw::PreferencesGroup::builder()
             .title("Proxy endpoints")
-            .description("Point applications at these local addresses to filter their traffic.")
+            .description(
+                "Point applications at these local addresses to filter their traffic. \
+                 Their ports are set on the Advanced page.",
+            )
             .build();
-        let (http, http_value) = endpoint_row("HTTP");
-        let (socks5, socks5_value) = endpoint_row("SOCKS5");
+        let (http, http_value) = endpoint_row("HTTP", "Change the HTTP proxy port");
+        let (socks5, socks5_value) = endpoint_row("SOCKS5", "Change the SOCKS5 proxy port");
         for r in [&http, &socks5] {
             endpoint_group.add(r);
         }
 
+        // These three rows lead to two different pages, so each says where it
+        // goes itself. The wording names the setting behind the state rather
+        // than claiming the mechanism: `status` reports what the daemon is
+        // doing, and how it came to be doing it is the other page's to explain.
         let filtering_group = adw::PreferencesGroup::builder().title("Filtering").build();
-        let manual_dns = StateRow::new("Manual DNS proxy");
-        let system_filtering = StateRow::new("System-wide filtering");
-        let system_dns = StateRow::new("System-wide DNS filtering");
+        let manual_dns = StateRow::new(
+            "Manual DNS proxy",
+            "Set the local DNS proxy's port on the DNS page",
+        );
+        let system_filtering = StateRow::new(
+            "System-wide filtering",
+            "Follows the proxy mode, on the Advanced page",
+        );
+        let system_dns = StateRow::new(
+            "System-wide DNS filtering",
+            "Follows the proxy mode, on the Advanced page",
+        );
         for r in [&manual_dns, &system_filtering, &system_dns] {
             filtering_group.add(&r.row);
         }
@@ -398,6 +470,7 @@ impl StatusPage {
             window_visible: Cell::new(true),
             ticks: Cell::new(0),
             observer: RefCell::new(None),
+            navigate: RefCell::new(None),
         });
 
         // The primary button's action follows the state the panel is showing,
@@ -421,6 +494,45 @@ impl StatusPage {
                 }
             }
         });
+
+        // ---- the links out ----
+        //
+        // Every one of these reports a setting that is written on another page,
+        // and each opens that page rather than offering a control of its own —
+        // see the note on one writer per setting at the top of this module.
+        for (button, destination) in tiles {
+            button.connect_clicked({
+                let this = Rc::downgrade(&this);
+                move |_| {
+                    if let Some(this) = this.upgrade() {
+                        this.go(destination);
+                    }
+                }
+            });
+        }
+
+        for (row, destination) in [
+            // The two endpoints lead to their own port, not merely to the group
+            // holding both: the group is what gets scrolled to either way, and
+            // naming the port keeps each row honest about what it is reporting.
+            (&this.http, Destination::Advanced(key::LISTEN_PORT_HTTP)),
+            (&this.socks5, Destination::Advanced(key::LISTEN_PORT_SOCKS5)),
+            (&this.manual_dns.row, Destination::DnsProxy),
+            (
+                &this.system_filtering.row,
+                Destination::Advanced(key::PROXY_MODE),
+            ),
+            (&this.system_dns.row, Destination::Advanced(key::PROXY_MODE)),
+        ] {
+            row.connect_activated({
+                let this = Rc::downgrade(&this);
+                move |_| {
+                    if let Some(this) = this.upgrade() {
+                        this.go(destination);
+                    }
+                }
+            });
+        }
 
         activate.connect_clicked({
             let this = Rc::downgrade(&this);
@@ -589,6 +701,28 @@ impl StatusPage {
         self.observer.replace(Some(Box::new(observer)));
     }
 
+    /// Where a click on a figure or a row here should take the user.
+    ///
+    /// Set by the window once the pages this can lead to exist. Until it is —
+    /// and it never is on the licence-less startup path, where there are no
+    /// pages at all — the links are inert rather than broken: they highlight and
+    /// they can be pressed, and pressing one does nothing.
+    pub fn connect_navigate(&self, navigate: impl Fn(Destination) + 'static) {
+        self.navigate.replace(Some(Box::new(navigate)));
+    }
+
+    /// Ask the window to open the page behind whatever was just clicked.
+    ///
+    /// The borrow is held across the call, as [`Self::apply`] holds `observer`'s
+    /// across its own. Safe for the same reason: what the window does in
+    /// response — select a sidebar row, scroll a page — comes back into this
+    /// page at `refresh_stats` and no further.
+    fn go(&self, destination: Destination) {
+        if let Some(navigate) = self.navigate.borrow().as_ref() {
+            navigate(destination);
+        }
+    }
+
     /// Tell the page whether the main window is on screen, which sets the poll
     /// rate. Hiding the window does not stop polling: the tray still shows
     /// whether the proxy is up.
@@ -604,6 +738,56 @@ impl StatusPage {
 
     pub fn stop_proxy(self: &Rc<Self>) {
         self.act(Action::Stop);
+    }
+
+    /// Clear a wedged leftover proxy process left behind by a previous session.
+    ///
+    /// Run once, when the application starts. The state it looks for outlives
+    /// the application that was running when it happened — the leftover is
+    /// reparented to `systemd --user` and sits there indefinitely — so the
+    /// likeliest way to meet it is to come back to the machine and open this
+    /// window, with no failed start to notice it by.
+    ///
+    /// # It clears, and stops there
+    ///
+    /// Deliberately no start afterwards, which is the one place this differs
+    /// from [`Action::perform`]. There the user pressed *Start protection* and
+    /// finishing the job is what they asked for. Here they opened a window, and
+    /// a proxy that begins running because an application was launched is a
+    /// decision this page has not been given. The panel will show it stopped,
+    /// with a working button under it.
+    ///
+    /// # Nothing needs a snapshot here
+    ///
+    /// [`Action::perform`] compares against daemons listed before its own start
+    /// because a start forks one that looks identical. Nothing has been started
+    /// at this point, so every daemon found is by definition from before — and
+    /// the `status` read still has to disagree with it before anything happens.
+    pub fn sweep(self: &Rc<Self>) {
+        let cli = self.cli.clone();
+        let this = self.clone();
+        worker::run(
+            move || {
+                let stranded = orphan::daemons(cli.binary());
+                // The contradiction, in the order that costs least: no daemons
+                // is the overwhelmingly common answer and it needs no `status`.
+                // An unreadable status is not a licence to kill anything.
+                if stranded.is_empty() || cli.status().is_ok_and(|status| status.running) {
+                    return None;
+                }
+                match clear(&stranded) {
+                    Some(pids) => Some(cleared_note(&pids, Outcome::NotAttempted)),
+                    None => Some(couldnt_clear(&stranded)),
+                }
+            },
+            move |note: Option<String>| {
+                // Nothing found means nothing to say and nothing to re-read:
+                // the page polls on its own timer and was about to anyway.
+                let Some(note) = note else { return };
+                this.toasts.add_toast(toast(&note));
+                this.refresh();
+            },
+        );
     }
 
     fn start_polling(self: &Rc<Self>) {
@@ -632,9 +816,15 @@ impl StatusPage {
         let cli = self.cli.clone();
         let this = self.clone();
         worker::run(
-            move || action.run(&cli).map_err(|err| err.to_string()),
-            move |result| {
+            move || action.perform(&cli),
+            move |(result, recovery): (Result<String, String>, Option<String>)| {
                 this.busy.set(false);
+                // The recovery first, because it explains the rest: a start that
+                // needed one took a minute to get here, and a user who watched
+                // that happen is owed the reason before the outcome.
+                if let Some(note) = recovery {
+                    this.toasts.add_toast(toast(&note));
+                }
                 if let Err(err) = result {
                     this.toasts.add_toast(toast(&err));
                 }
@@ -1115,6 +1305,148 @@ impl Action {
             Action::Restart => cli.restart(),
         }
     }
+
+    /// Does this action expect the proxy to be up when it returns?
+    ///
+    /// The question recovery hangs on: only a start that was supposed to leave
+    /// the proxy running can be said to have *not taken*.
+    fn expects_running(self) -> bool {
+        matches!(self, Action::Start | Action::Restart)
+    }
+
+    /// Run the action, and clear a wedged leftover process if one turns out to
+    /// have been in the way.
+    ///
+    /// Blocking, for a worker thread — worst case a failed start (60 s), a
+    /// termination (under a second), and a second start.
+    ///
+    /// # The order of these steps is the safety argument
+    ///
+    /// The daemons are listed **before** the command runs. A start forks a
+    /// daemon of its own, and one that is still finding its feet looks exactly
+    /// like the wedged one — same binary, same command line (see
+    /// [`adguard_core::orphan`]). Anything this function signals therefore has
+    /// to have existed before we tried, which is what the snapshot establishes
+    /// and [`Daemon::alive`] re-checks against pid reuse.
+    ///
+    /// The `status` re-read between the two is the other half. A leftover
+    /// process is only *leftover* if the CLI disagrees that it is there, so a
+    /// start that worked — or one whose status we could not read, which is no
+    /// basis for killing anything — ends this here.
+    ///
+    /// Returns what the action said, and separately what was done about it.
+    fn perform(self, cli: &Cli) -> (Result<String, String>, Option<String>) {
+        let before = if self.expects_running() {
+            orphan::daemons(cli.binary())
+        } else {
+            Vec::new()
+        };
+
+        let said = self.run(cli).map_err(|err| err.to_string());
+
+        if !self.expects_running() || cli.status().is_ok_and(|status| status.running) {
+            return (said, None);
+        }
+
+        // Alive, and alive since before the attempt. In a healthy install that
+        // failed to start for some other reason this is empty, and the CLI's own
+        // complaint stands as the only explanation — which is right, because
+        // there is nothing here to blame.
+        let stranded: Vec<_> = before.into_iter().filter(Daemon::alive).collect();
+        if stranded.is_empty() {
+            return (said, None);
+        }
+
+        let Some(cleared) = clear(&stranded) else {
+            return (said, Some(couldnt_clear(&stranded)));
+        };
+
+        // One retry, not a loop. If a start still fails with the ports free,
+        // the leftover was not the reason and trying again would only spend
+        // another minute finding that out.
+        let retried = self.run(cli).map_err(|err| err.to_string());
+        let outcome = if cli.status().is_ok_and(|status| status.running) {
+            Outcome::Running
+        } else {
+            Outcome::StillDown
+        };
+        (retried, Some(cleared_note(&cleared, outcome)))
+    }
+}
+
+/// Ask every stranded process to exit. `None` if any of them would not.
+///
+/// All or nothing: they hold the same ports, so one survivor is enough to keep
+/// the next start failing, and reporting a partial success would send the user
+/// away believing it was fixed.
+fn clear(stranded: &[Daemon]) -> Option<Vec<i32>> {
+    // Collected rather than folded through `all`, which stops at the first
+    // `false`: one process that will not go would leave the others running and
+    // unasked, and they hold the same ports. Every one gets signalled, then the
+    // results are judged.
+    let ended: Vec<bool> = stranded.iter().map(Daemon::terminate).collect();
+    ended
+        .iter()
+        .all(|ended| *ended)
+        .then(|| stranded.iter().map(Daemon::pid).collect())
+}
+
+/// Where the proxy stood once the leftovers were cleared.
+///
+/// Three states, not a `bool`, because the start-up sweep never starts anything
+/// and so has no answer to give — and "did not start" is a different sentence
+/// from "was not asked to".
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum Outcome {
+    /// Cleared, started, and the proxy is up.
+    Running,
+    /// Cleared and started, and it still did not come up.
+    StillDown,
+    /// Cleared, and no start was attempted — the start-up sweep.
+    NotAttempted,
+}
+
+/// What to say once the leftovers are gone.
+///
+/// Names the pids. They are meaningless to most users and precisely what the one
+/// who reports this needs — and they are also the promise this application is
+/// keeping: *these* processes, not every `adguard-cli` on the machine.
+fn cleared_note(pids: &[i32], outcome: Outcome) -> String {
+    let what = format!(
+        "Cleared {} that AdGuard had lost track of ({})",
+        plural(pids.len(), "a stopped proxy process", "stopped proxy processes"),
+        pid_list(pids),
+    );
+    match outcome {
+        Outcome::Running => format!("{what}. Protection is on."),
+        // The leftovers were real and are gone, and the proxy still will not
+        // come up. Two separate facts, and flattening them would misreport one.
+        Outcome::StillDown => format!("{what}, but the proxy still would not start."),
+        Outcome::NotAttempted => format!("{what}. Protection can be started now."),
+    }
+}
+
+fn couldnt_clear(stranded: &[Daemon]) -> String {
+    let pids: Vec<i32> = stranded.iter().map(Daemon::pid).collect();
+    format!(
+        "{} still holding the proxy ports and did not exit when asked ({})",
+        plural(
+            pids.len(),
+            "A stopped AdGuard process is",
+            "Stopped AdGuard processes are"
+        ),
+        pid_list(&pids),
+    )
+}
+
+fn plural(count: usize, one: &str, many: &str) -> String {
+    if count == 1 { one } else { many }.to_owned()
+}
+
+fn pid_list(pids: &[i32]) -> String {
+    let label = plural(pids.len(), "pid", "pids");
+    let pids: Vec<String> = pids.iter().map(i32::to_string).collect();
+    format!("{label} {}", pids.join(", "))
 }
 
 /// One reading of the three figures under the panel.
@@ -1181,6 +1513,27 @@ fn stat_value() -> gtk::Label {
     label
 }
 
+/// One figure, as the way in to the page that counts it.
+///
+/// The tile is the button rather than something added beside it, because the
+/// number is what the eye lands on and a separate affordance would be asking the
+/// user to aim at the smaller of two things. `.flat` and the padding reset in
+/// [`style`] leave a button that looks exactly like the tile did and behaves
+/// like a button: hover, focus ring, Enter and Space.
+fn stat_button(value: &gtk::Label, caption: &str, tooltip: &str) -> gtk::Button {
+    let button = gtk::Button::builder()
+        .child(&stat_tile(value, caption))
+        .tooltip_text(tooltip)
+        .build();
+    button.add_css_class("flat");
+    button.add_css_class(style::STAT_BUTTON);
+    // The tile is a figure and a caption, and a screen reader reading them out
+    // is told a count and nothing about the button being a way anywhere. The
+    // tooltip is the sentence that says so, so it is also the description.
+    button.update_property(&[gtk::accessible::Property::Description(tooltip)]);
+    button
+}
+
 fn stat_tile(value: &gtk::Label, caption: &str) -> gtk::Box {
     let tile = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
@@ -1202,13 +1555,17 @@ fn stat_tile(value: &gtk::Label, caption: &str) -> gtk::Box {
     tile
 }
 
-/// A proxy endpoint: a name, an icon, and an address to copy.
+/// A proxy endpoint: a name, an icon, an address to copy, and the way to its
+/// port.
 ///
 /// The address goes in a suffix rather than a subtitle so it can be selected
 /// without the row swallowing the drag, and so it lines up down the right-hand
-/// edge with the states in the group below.
-fn endpoint_row(title: &str) -> (adw::ActionRow, gtk::Label) {
-    let row = row(title, "");
+/// edge with the states in the group below. Selecting it still works now that
+/// the row is activatable: the label handles its own clicks, and the arrow after
+/// it is what the rest of the row is for.
+fn endpoint_row(title: &str, tooltip: &str) -> (adw::ActionRow, gtk::Label) {
+    let row = link_row(title);
+    row.set_tooltip_text(Some(tooltip));
     row.add_prefix(&gtk::Image::from_icon_name("network-workgroup-symbolic"));
 
     let value = gtk::Label::builder()
@@ -1219,30 +1576,70 @@ fn endpoint_row(title: &str) -> (adw::ActionRow, gtk::Label) {
     value.add_css_class("dim-label");
     value.add_css_class("numeric");
     row.add_suffix(&value);
+    row.add_suffix(&chevron());
 
     (row, value)
 }
 
-/// Render one endpoint, dimming the row while the proxy is not listening.
+/// Render one endpoint, saying so in the subtitle when there is nothing to show.
+///
+/// **The row used to go insensitive instead, and that was right until it became
+/// a link.** An insensitive row cannot be activated, so dimming it would take
+/// the way to the port settings away in precisely the state where a user is
+/// likeliest to be going to look at them — a proxy that is stopped, or a port
+/// that has been set to -1. The dash on its own does not say which of those it
+/// is either, so the subtitle is worth more than the dimming was.
 fn set_endpoint(row: &adw::ActionRow, value: &gtk::Label, address: Option<&str>) {
     value.set_label(address.unwrap_or(PLACEHOLDER));
     // Rather than hiding the row: the endpoints are what a user comes to this
     // group to write down, and a group that empties itself while the proxy is
     // stopped reads as "there are none" instead of "not right now".
-    row.set_sensitive(address.is_some());
+    row.set_subtitle(match address {
+        Some(_) => "",
+        None => "Not listening",
+    });
+}
+
+/// A row that leads somewhere when clicked.
+///
+/// `activatable` gives the row the hover, the pointer target and keyboard
+/// activation but nothing to look at, so [`chevron`] goes on beside the value —
+/// the pair GNOME uses everywhere for a row that opens something else, and the
+/// only thing that tells a user this row is not the inert label it was.
+///
+/// What it leads to is left to the caller, because the two kinds of row here say
+/// it differently: an endpoint has its address in the subtitle's place and says
+/// it in a tooltip, and a state row has the room to say it outright.
+fn link_row(title: &str) -> adw::ActionRow {
+    let row = row(title, "");
+    row.set_activatable(true);
+    row
+}
+
+fn chevron() -> gtk::Image {
+    let arrow = gtk::Image::from_icon_name("go-next-symbolic");
+    arrow.add_css_class("dim-label");
+    arrow.set_valign(gtk::Align::Center);
+    arrow
 }
 
 /// A row whose value is one of two words, shown as a state rather than prose.
+///
+/// `leads_to` is a permanent subtitle naming the setting that decides the state,
+/// and it is the row's whole answer to "so how do I change it?" — the state
+/// itself is read from `status` and there is nothing here that could write it.
 struct StateRow {
     row: adw::ActionRow,
     value: gtk::Label,
 }
 
 impl StateRow {
-    fn new(title: &str) -> Self {
-        let row = row(title, "");
+    fn new(title: &str, leads_to: &str) -> Self {
+        let row = link_row(title);
+        row.set_subtitle(leads_to);
         let value = gtk::Label::builder().valign(gtk::Align::Center).build();
         row.add_suffix(&value);
+        row.add_suffix(&chevron());
         Self { row, value }
     }
 

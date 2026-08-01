@@ -128,6 +128,12 @@ pub struct AdvancedPage {
     cli: Cli,
     toasts: adw::ToastOverlay,
     rows: RefCell<Vec<Rc<Row>>>,
+    /// The rendered groups, positionally against [`Self::table`], so a link from
+    /// the Status page can be resolved to the part of this page it meant.
+    ///
+    /// The helper group is deliberately absent: it is not one of the table's and
+    /// including it would put every group after `proxy_mode` one place out.
+    groups: RefCell<Vec<adw::PreferencesGroup>>,
     /// Set while we write control states ourselves, so the change handlers can
     /// tell a user's edit from our own reconcile. Property notifications are
     /// synchronous, so a plain flag around the write is enough.
@@ -182,6 +188,7 @@ impl AdvancedPage {
             cli,
             toasts,
             rows: RefCell::new(Vec::new()),
+            groups: RefCell::new(Vec::new()),
             reconciling: Cell::new(false),
             last: RefCell::new(None),
             listen_group: RefCell::new(None),
@@ -264,8 +271,34 @@ impl AdvancedPage {
         }
     }
 
+    /// Scroll to the group that holds `setting` and mark it, as a link from the
+    /// Status page asks.
+    ///
+    /// Addressed by setting rather than by group title, because the caller is
+    /// naming a `proxy.yaml` key it already knows — the same key it would hand
+    /// `config set` — and titles are prose that can be reworded without anyone
+    /// thinking about the links pointing at them.
+    ///
+    /// Silently does nothing while this page is still building, or for a setting
+    /// this table does not carry. Either way the page has already been switched
+    /// to and is showing its first group, which is where an unscrolled page is
+    /// anyway.
+    pub fn reveal(&self, setting: &str) {
+        let Some(index) = self
+            .table
+            .iter()
+            .position(|group| group.settings.iter().any(|s| s.key == setting))
+        else {
+            return;
+        };
+        if let Some(group) = self.groups.borrow().get(index) {
+            crate::reveal(group);
+        }
+    }
+
     fn build(self: &Rc<Self>, config: &Config) -> adw::PreferencesPage {
         self.rows.borrow_mut().clear();
+        self.groups.borrow_mut().clear();
         self.listen_group.replace(None);
         self.helper_view.replace(None);
 
@@ -292,6 +325,9 @@ impl AdvancedPage {
                 self.listen_group.replace(Some(widget.clone()));
             }
             page.add(&widget);
+            // In table order and with nothing skipped, which is what lets
+            // `reveal` index this by the position of the group in the table.
+            self.groups.borrow_mut().push(widget);
 
             // The helper rows belong immediately under the mode they explain,
             // not at the foot of the page: keyed off `proxy_mode` the way the

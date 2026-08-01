@@ -286,7 +286,7 @@ Make the virtual screen taller than the window if you want a whole `AdwPreferenc
 
 ## 4. Local install
 
-Matching the pattern already used for other tools on this machine (`~/.local/bin` + a desktop entry):
+Matching the pattern already used for other tools on this machine (`~/.local/bin` + a desktop entry). This is an *alternative* to the `.deb` in §5, not a companion to it: `~/.local/bin` comes before `/usr/bin` on a stock `$PATH`, so an install here wins over an installed package and keeps winning until it is removed. `make uninstall-local` removes exactly the files below, and `make install` runs it.
 
 ```bash
 cargo build --release && install -Dm755 target/release/adguard-ui ~/.local/bin/adguard-ui
@@ -340,13 +340,27 @@ sudo rm -f /usr/share/polkit-1/actions/io.github.dominik-najberg.AdGuardUI.polic
 
 ## 5. Packaging
 
-Both recommended routes are built. Neither needs root, and neither installs anything:
+Both recommended routes are built. Neither script needs root, and neither installs anything — building a package and installing one are separate steps here, and only the second of them is privileged:
 
 ```bash
 make package
 ```
 
 That leaves `target/package/adguard-ui_0.1.0_amd64.deb` (2.4 MB) and `adguard-ui-0.1.0-x86_64.tar.gz` (3.0 MB — gzip against the `.deb`'s zstd, and it carries the whole `data/` tree). `make deb` and `make tarball` build one each; the work is in `packaging/deb.sh` and `packaging/tarball.sh`, which carry the reasoning per step.
+
+To put the `.deb` on this machine rather than just build it:
+
+```bash
+make install
+```
+
+That is `make deb`, one `sudo apt-get install` of the file it wrote, and the cleanup described below it; it is the only target in the Makefile that asks for a password — the *build* stays unprivileged, exactly as above, and only the install step is handed to `sudo`. It is `apt-get install ./file.deb` and not `dpkg -i` because apt resolves the `Depends:` line `deb.sh` derived; `dpkg` would leave the package unpacked-but-unconfigured with a "dependency problems" error and expect you to run `apt-get -f install` yourself. Uninstall is `sudo apt-get remove adguard-ui`, which has no `make` target because it needs nothing built and nothing worked out.
+
+**The two routes shadow each other, and `make install` now resolves that rather than leaving it to be discovered.** A per-user install from the tarball puts `adguard-ui` in `~/.local/bin`, which is ahead of `/usr/bin` on a stock Ubuntu `$PATH`; both `.desktop` files run a bare `Exec=adguard-ui`; so with both installed, the package is on disk and the older per-user binary is what opens — from the terminal and from the app grid alike. Nothing about it reads as a failure. `apt` reports the package unpacked, `/usr/bin/adguard-ui` really is the new build, and the window that appears is weeks old. Version numbers cannot help here: these are not two versions of a package, they are two files with the same name, and only one of them is a package at all.
+
+So after the `apt` step, `install` removes the `~/.local` copy — naming every path as it goes, and only paths that belong to this application — and then checks that `$PATH` actually resolves `adguard-ui` to the file the package installed, failing if anything else still wins. `make uninstall-local` does the removal on its own, for undoing a per-user install without installing the `.deb` over it. To go the other way, re-run the tarball's `install.sh`; `sudo apt-get remove adguard-ui` is still the way to remove the package.
+
+The tarball's route is the unprivileged counterpart: extract it and run its `install.sh`, which writes under `~/.local` and never asks for anything.
 
 The routes were assessed for this machine before either was written:
 
