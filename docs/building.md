@@ -282,6 +282,50 @@ Make the virtual screen taller than the window if you want a whole `AdwPreferenc
 
 **Unset `DISPLAY` before any of this, and know what it looks like when you forget.** A GNOME session exports `DISPLAY=:0`, and a harness that starts `Xvfb :99` without exporting `DISPLAY=:99` into the app's own environment hands the app the *real* display instead — so the window opens on the desktop through Xwayland while `ffmpeg -i :99` grabs an empty screen. The frame comes back black with nothing in it but the X cursor, which reads exactly like a window that failed to open. The AT-SPI walk is no help in spotting it: the accessibility bus is on the session bus and does not care which X server drew anything, so every probe still passes. `env -u DISPLAY -u WAYLAND_DISPLAY` on the way in, and `export DISPLAY=:99` inside.
 
+### Taking focus away and giving it back
+
+The three checks that live outside `proxy.yaml` — the root helper, the certificate, and browser integration — all re-read themselves from one `connect_is_active_notify` handler in `main.rs` (`architecture.md` §6). For a long time the handler was the one line in this application nothing had ever exercised, because the note in this section said focus needed `xdotool`, and there is no `xdotool` here, no `wmctrl`, and no window manager on the Xvfb display at all.
+
+**None of that is needed. `XSetInputFocus` is one call, and with no window manager present there is nothing to argue with it.** Twenty lines of C against `libX11`, which is installed:
+
+```c
+/* xfocus.c — cc -O1 -o xfocus xfocus.c -lX11 */
+#include <X11/Xlib.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+int main(int argc, char **argv) {
+    Display *d = XOpenDisplay(NULL);
+    if (!d) { fprintf(stderr, "xfocus: cannot open display\n"); return 1; }
+    if (argc < 2) { fprintf(stderr, "usage: xfocus show|none|<window-id>\n"); return 2; }
+    if (strcmp(argv[1], "show") == 0) {
+        Window w; int revert;
+        XGetInputFocus(d, &w, &revert);
+        printf("focus=0x%lx revert=%d\n", (unsigned long) w, revert);
+    } else if (strcmp(argv[1], "none") == 0) {
+        XSetInputFocus(d, None, RevertToNone, CurrentTime);
+    } else {
+        XSetInputFocus(d, (Window) strtoul(argv[1], NULL, 0), RevertToParent, CurrentTime);
+    }
+    XSync(d, False);
+    XCloseDisplay(d);
+    return 0;
+}
+```
+
+The window id comes from `xwininfo`, which *is* installed, and the title is the one `main.rs` sets:
+
+```bash
+xwininfo -root -children | grep '"AdGuard UI"' | awk '{print $1}'
+```
+
+Then `./xfocus none`, a second's pause, `./xfocus 0x400005`. GTK4 takes the resulting `FocusOut`/`FocusIn` without a window manager anywhere in the picture, `is-active` moves, and the handler runs. Measured: the window holds the focus from the moment it maps (`focus=0x400005 revert=2`, not `PointerRoot`), so the round trip has somewhere to come back from.
+
+**Give the run a phase that changes nothing, and put it before the focus round trip.** The check's input is a file, and a harness that writes the file and immediately takes focus proves only that the rows are capable of changing — a 2 s poll would pass it just as well. Write the file, walk the page, and assert the walk is **identical**; then take focus, walk again, and assert it is not. It is the same discipline as hashing `proxy.yaml` either side of an edit (`handoff.md` §4), pointed the other way: there, silence had to be shown to mean something; here, a change has to be shown to have a cause.
+
+`$ADGUARD_BROWSER_HOME` makes the browser check the cheapest of the three to drive this way, because its whole input is files under one directory that a test may create and delete — no environment variable has to change mid-process, which is impossible anyway, and no browser profile of the user's is touched.
+
 ---
 
 ## 4. Local install
@@ -430,7 +474,7 @@ cp ~/.local/share/adguard-cli/proxy.yaml ~/proxy.yaml.orig
 | [`architecture.md`](architecture.md) | Design of the GUI: crates, data flow, UI structure, privilege model |
 | [`handoff.md`](handoff.md) | Current state, the next step, and the traps worth knowing before touching anything |
 | `building.md` | This file — prerequisites, running, tests, install, packaging |
-| `overnight-plan.md` | Operational, and dated. History once its night is over |
+| `overnight-plan.md` | **Archived.** Its night is over and every item in it is done. Kept for §3, the standing stop list, and §4, the verification discipline — both of which apply to any session, not just an unattended one |
 
 The scripts under `packaging/` are the seventh piece of documentation, and are written to be read: each step says why it is that shape, and §5 above says what the two of them are for.
 

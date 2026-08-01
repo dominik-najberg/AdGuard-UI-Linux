@@ -1,14 +1,43 @@
-# Overnight plan
+# Overnight plan — closed
 
-An operational document for an autonomous run with nobody watching. Rewritten for the night of **31 July 2026**, against `5744205`; the previous edition, written against `a9a03ff`, closed everything it planned and is superseded except for §5.
+> **ARCHIVED, 1 August 2026. Do not execute this file.** Every item in §2 is
+> done and committed: the reconcile toast (§2.1), auto mode (§2.2) and custom
+> filter removal (§2.3). What §6 predicted would still be open in the morning is
+> the one thing that is — the activation success leg — and the certificate work
+> it hoped for landed the same day, along with packaging, browser integration
+> and the focus-trigger verification. [`handoff.md`](handoff.md) is the current
+> state; this file is kept for the two sections that outlived the night.
+>
+> **§3 and §4 are still in force**, and they are the reason this document was
+> not deleted. §3's stop list is the standing set of things nothing here may run
+> — `configure` against a populated directory, the mutate suites, `sudo`, an
+> exposed `listen_address`, a filter installed into the real catalogue — and §4
+> is the verification discipline the project is held to. Both are written as
+> rules rather than as tonight's instructions, and they apply to any session.
+>
+> **§1's hash is stale, and the way it went stale is worth more than the hash
+> was.** `proxy.yaml` now reads
+> `7b419727afde68a8e09cdc90382915d14daff4159ae2a0c85aa0b300d38af3f5`. The whole
+> difference is one line — `proxy_mode: 'manual'` → `'auto'` — and it is the
+> **owner's own change**, made through the feature §2.2 built: the root helper
+> is installed and running on this machine, which `architecture.md` §6 already
+> records. So the discipline held; what failed is pinning a mutable file by
+> hash in a document nobody re-pins. **A mismatch is still a hard stop for a
+> session that did not expect one**, but diff before concluding anything — the
+> file is rewritten by every `adguard-cli` invocation, and the running proxy
+> touches its mtime without touching its contents.
+>
+> **§5 was already history before this banner.** It is the evidence the five
+> scope decisions were taken from, and two of its recommendations were
+> overturned by measurement. `handoff.md` §2 indexes what was actually decided.
 
-Read [`handoff.md`](handoff.md) for state and [`building.md`](building.md) §3 for the verification recipes. This file says only what to do tonight, in what order, and what not to touch.
+An operational document for an autonomous run with nobody watching. Written for the night of **31 July 2026**, against `5744205`; the previous edition, written against `a9a03ff`, closed everything it planned and was superseded except for §5. This edition did the same, and is superseded by the banner above.
 
-**§5 is history, not instructions.** It is the evidence the five scope decisions were taken from, and `handoff.md` §2 links to it as such. It is left unedited on purpose — two of its recommendations were overturned by measurement. Do not act on it.
+Read [`handoff.md`](handoff.md) for state and [`building.md`](building.md) §3 for the verification recipes.
 
 ---
 
-## 1. Ground truth before writing a line
+## 1. Ground truth before writing a line — superseded
 
 ```bash
 git log --oneline -1        # 5744205 or later
@@ -17,13 +46,17 @@ cargo test --workspace      # 150 pass, 42 ignored
 sha256sum ~/.local/share/adguard-cli/proxy.yaml
 ```
 
-The config hash is `c4b58ce8ced6598fa94a5c48faae7bd4ac9695a64a924b3f27263ee7cbce19e3`. Re-check it after every commit. **A mismatch is a hard stop.** That file is 220 lines, roughly half of them upstream explanatory comments, with no backup and no regeneration path short of `configure`.
+The counts are three sessions out of date — it is **218 passing and 44 ignored** now — and so is the hash below. The *shape* of the check is the part to keep: know what the working tree and the user's real configuration look like before touching either, and re-check after every commit.
 
-It is the same hash the previous overnight run recorded, three feature sessions ago, which is the evidence the sandbox discipline in §3 actually holds rather than merely being written down.
+The config hash was `c4b58ce8ced6598fa94a5c48faae7bd4ac9695a64a924b3f27263ee7cbce19e3` and is now `7b419727afde68a8e09cdc90382915d14daff4159ae2a0c85aa0b300d38af3f5`, for the one deliberate reason in the banner. **A mismatch is a hard stop** — but a hard stop means stop and diff, not stop and assume the worst. That file is 220 lines, roughly half of them upstream explanatory comments, with no backup and no regeneration path short of `configure`.
+
+The hash held unchanged across four feature sessions before the owner moved it, which is the evidence the sandbox discipline in §3 actually holds rather than merely being written down.
 
 ---
 
-## 2. Ordered work
+## 2. Ordered work — all three done
+
+**Closed on the night, in this order, one commit each: `1310f19` the toast, `57be45b` auto mode, `9391fcb` custom filter removal.** What each of them turned up is in `handoff.md` §3, which is where to read it; this section is left as written so the plan can be compared against what the night actually produced.
 
 Three items, smallest first. Each is a separate commit, pushed before the next is started, so a night that ends early still ends somewhere clean.
 

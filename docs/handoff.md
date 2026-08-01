@@ -1,17 +1,52 @@
 # Handoff
 
-> **Where the session of 1 August 2026 stopped.** Both items the previous note
-> called ready are **done, committed, and verified**: **certificate-trust
-> detection** (§3 gap 4) and **packaging** — a `.deb` and a tarball, behind
-> `make package`. The real `proxy.yaml` still hashes to `c4b58ce8…`, unchanged
-> across both commits, and nothing was installed into the system trust store or
-> anywhere else.
+> **Where the evening of 1 August 2026 stopped.** Two things landed after the
+> note below was written, and it did not cover either: **browser integration**
+> (`architecture.md` §6, contract §12) — the check that says whether AdGuard's
+> extension can actually reach the CLI — and, this session, the verification
+> that closes the oldest debt in §3.
 >
-> **One thing is left open, and it is still not an agent's to take:** the
-> activation success leg (§3 gap 5). It needs a real account and spends a
-> device slot.
+> **The `connect_is_active_notify` trigger is no longer unverified.** Both
+> entries below used to end "what is untested is the trigger, not the
+> re-check", on the grounds that taking focus from an Xvfb window needs
+> `xdotool` and there is none here. That was wrong, and it stood for three
+> features and about a week. There is no window manager on the Xvfb display, so
+> there is nothing to negotiate with: `XSetInputFocus` is one call, `libX11` is
+> installed, and twenty lines of C do it. The recipe is `building.md` §3, and
+> the whole of §3's "not verified" wording is gone rather than softened.
 >
-> Five things from this session worth carrying forward:
+> **Nothing was left open by this session.** What remains open is what was open
+> before it and is still not an agent's to take: the activation success leg
+> (§3 item 6). It needs a real account and spends a device slot.
+>
+> **The machine underneath the docs has moved, and the old hash was the alarm
+> rather than the problem.** `proxy.yaml` now hashes to `7b419727…`, not the
+> `c4b58ce8…` pinned in `overnight-plan.md` §1 across four sessions. The entire
+> difference is `proxy_mode: 'manual'` → `'auto'`, made by the owner through the
+> feature that exists for it — the root helper is installed and running here
+> now, so **the unmet rendering of that check is no longer reachable locally**
+> without `$ADGUARD_ROOT_HELPER`, exactly as the certificate's already was not.
+> Diff before drawing a conclusion from a moved hash: the file is rewritten by
+> every `adguard-cli` invocation, and the running proxy moves its mtime without
+> moving a byte.
+>
+> Two things from the verification worth carrying forward, both about the shape
+> of the proof rather than the result:
+>
+> - **A phase that must change nothing has to come first, or the run proves
+>   nothing.** Write the manifest, walk the page, assert the walk is
+>   *identical*; only then take focus and assert it is not. Without that middle
+>   phase a passing run is equally consistent with a 2 s poll having noticed —
+>   and this application has three of those. It is §4's rule about hashing
+>   `proxy.yaml` either side of an edit, inverted: there silence had to be shown
+>   to mean something, here a change had to be shown to have a cause.
+> - **Drive it in both directions.** Met → unmet is the direction the feature
+>   exists for and the one a single run is tempting to stop at. The reverse —
+>   a browser appearing on disk mid-session, the group coming *back* naming it
+>   — is the ordering trap contract §12 describes, and it is the case with no
+>   diagnostic anywhere else in AdGuard's tooling.
+>
+> Five things from the session that built the certificate check, still true:
 >
 > - **`configure` does not generate a CA when `adguard.conf` is present — it
 >   reproduces the existing one, byte for byte** (contract §8). So that one file
@@ -52,9 +87,9 @@
 >   — which is why removal is confirmed up front rather than offered as an undo
 >   afterwards (contract §6).
 
-Working state as of 31 July 2026. The overnight run closed the config monitor, the CLI timeout, the lapsed-licence mapping, the Stealth page and the `dns_filtering` dependency caveat; the session after it built **licence activation**, the one after that the **DNS page**, the one after that the **first-run assistant** — the first page here that exists for a machine where AdGuard has never been configured at all — and the one after that **custom filter install by URL**. Read [`cli-contract.md`](cli-contract.md) and [`architecture.md`](architecture.md) first — the contract doc records measured CLI behaviour and the code depends on it. §5 of the contract is the part that matters for anything touching config; §4 of architecture.md is the part that matters for anything touching the tray or the way the process starts.
+Working state as of 1 August 2026. The overnight run of the 31st closed the config monitor, the CLI timeout, the lapsed-licence mapping, the Stealth page and the `dns_filtering` dependency caveat; the session after it built **licence activation**, then the **DNS page**, then the **first-run assistant** — the first page here that exists for a machine where AdGuard has never been configured at all — then **custom filter install by URL**, then **certificate trust** and **packaging**, and last **browser integration**, which is the only check in this application whose answer can be invalidated by something that has nothing to do with AdGuard. Read [`cli-contract.md`](cli-contract.md) and [`architecture.md`](architecture.md) first — the contract doc records measured CLI behaviour and the code depends on it. §5 of the contract is the part that matters for anything touching config; §4 of architecture.md is the part that matters for anything touching the tray or the way the process starts.
 
-**If you are picking up where the custom filters left off**, the thing to know is that contract §6 gained a subsection, and the fact in it that changes decisions is this: **AdGuard checks only whether what it downloaded *begins* with HTML.** That catches a link answering 200 with an error page, and nothing else. JSON, prose, the wrong plain-text file and an empty response all install as filter lists holding no rules, report success, and leave a switch reading *on* over something that filters nothing. The Filters page says so in the group description because no other part of this UI ever could.
+**If you are touching the filter pages**, the fact in contract §6 most likely to change a decision is this: **AdGuard checks only whether what it downloaded *begins* with HTML.** That catches a link answering 200 with an error page, and nothing else. JSON, prose, the wrong plain-text file and an empty response all install as filter lists holding no rules, report success, and leave a switch reading *on* over something that filters nothing. The Filters page says so in the group description because no other part of this UI ever could.
 
 That subsection also carries the correction worth reading before trusting anything else in it: an earlier revision of it said content was *never* validated, generalised from a single probe file that happened to open with a line of prose before its HTML. The reasoning was fine and the fixture was not — the same lesson §3 already records about measuring one line and one stream, arriving a third time as one sample. A test caught it, which is the argument for `filters_sandbox.rs` pinning both sides of the boundary.
 
@@ -62,7 +97,7 @@ That subsection also carries the correction worth reading before trusting anythi
 
 ## 1. Where things stand
 
-**176 tests pass by default** and 44 more are `#[ignore]`d.
+**218 tests pass by default** and 44 more are `#[ignore]`d.
 
 | Page | State |
 | --- | --- |
@@ -83,6 +118,8 @@ That subsection also carries the correction worth reading before trusting anythi
 | Auto mode | Done. A `proxy_mode` row on Advanced, AdGuard's three-property helper check beside it, its `sudo` command with a copy button, and a re-check on window focus. No privileged component of ours, `architecture.md` §6. |
 | Reconcile toast | Done. One toast per reading, gated on `reconcile`'s count of rows that actually moved; the Status module figure is repainted but not counted, `architecture.md` §3. |
 | Certificate trust | Done. Three facts read from three files, under the Protection switches and in the first-run assistant, with AdGuard's own `install_cert.sh` command and a copy button. Four unmet states, all four rendered headlessly; hidden when trusted or when HTTPS filtering is off. `architecture.md` §6, contract §8. |
+| Root helper | Done. `gui/root_helper.rs`, one widget behind two screens — the Advanced page under the mode row it gates, and the first-run assistant, because every install this app completes ends unmet. The Status page carries the symptom instead, as one line under the HTTP endpoint, re-read on its existing 2 s poll rather than on focus. `architecture.md` §6. |
+| Browser integration | Done. Six manifest locations, four states — ready, missing, stale, unreadable — on the Protection page below the certificate group, with `install-browser-integration` and a copy button. Browsers that are not installed are not reported; the command is withheld when `adguard_cli_nm` is absent. `architecture.md` §6, contract §12. |
 | Packaging | Done. `make deb`, `make tarball`, `make package`. Neither needs root; `Depends:` is derived by `dpkg-shlibdeps` rather than written down. `building.md` §5. |
 
 Userscripts are **out of v1** — `architecture.md` §7 has the reasoning.
@@ -124,7 +161,7 @@ Two of these overturned a recommendation in `overnight-plan.md` §5, both becaus
    - **The helper is a sibling of the *resolved* binary.** `$PATH` finds `~/.local/bin/adguard-cli`, which is a symlink; the helper is next to the real file. `paths::root_helper` canonicalises, and `RootHelper::inspect` uses `fs::metadata` so symlinks are followed — `symlink_metadata` would report the link's `lrwxrwxrwx` and read as not-root-owned whatever it pointed at.
    - **The met branch needs no privilege to test.** `/usr/bin/passwd` is already `-rwsr-xr-x root root`, so pointing `$ADGUARD_ROOT_HELPER` at it exercises the whole met path without this project ever setting a suid bit on anything.
 
-   What is **not** verified: the `connect_is_active_notify` line itself. There is no `xdotool` or `wmctrl` here to take focus from an Xvfb window and give it back. The half underneath it is verified — repointing the helper mid-session and provoking a repaint takes the group off the page — so what is untested is the trigger, not the re-check.
+   The re-check is verified by repointing the helper mid-session and provoking a repaint, which takes the group off the page. The `connect_is_active_notify` trigger above it is verified too, as of 1 August — item 5. Note this machine has since run the `sudo`, so the *unmet* rendering is now the one nothing local reaches; `$ADGUARD_ROOT_HELPER` is the only route to it.
 3. ~~**Reconcile toast**~~ — done, `architecture.md` §3. Left here for the one thing it found: the suppression of our own writes comes from the per-row `pending` flag, not from counting, so any figure rendered *outside* the page that writes it has no such flag and will announce the user's own click back at them. The Status module count is that figure, and it is now repainted without being counted. The stderr line no longer claims the change came from "outside the app"; it reports the count instead, which is a fact it has.
 4. ~~**The certificate is seeded but not trusted.**~~ — done, `architecture.md` §6. Detect, then show AdGuard's own `install_cert.sh`; nothing here installs anything. Four things it turned up are worth keeping:
 
@@ -133,8 +170,19 @@ Two of these overturned a recommendation in `overnight-plan.md` §5, both becaus
    - **`configure` reproduces the CA from `adguard.conf` rather than generating one** — byte-identical, weeks-old dates. That file carries the private key of a CA this system trusts, which makes `building.md` §3's "delete the sandbox afterwards" rather more than housekeeping.
    - **The met branch is this machine's real state**, the mirror of the root helper, so every *unmet* branch needed the paths to be parameters. `$SYSTEM_CERT_DIR` is AdGuard's own variable; `$ADGUARD_CA_BUNDLE` and `$ADGUARD_CERT_INSTALLER` are ours and exist only so those branches can be reached without touching the real trust store.
 
-   What is **not** verified, exactly as with the helper: the `connect_is_active_notify` trigger itself. There is still no `xdotool` here to take focus from an Xvfb window and give it back. The re-check underneath it is verified — the rows repaint from a check pointed elsewhere — so what is untested is the trigger, not the re-check.
-5. **The activation success leg is a claim, not a measurement.** Everything up to the browser log-in is proven, including against a real unlicensed install: `activate` hands back a link, the page shows it, *finish activation* re-runs `activate`, reads `license`, and says "not activated yet" without pretending otherwise. What nobody has watched is the leg after a genuine log-in — it needs a real account, and completing an activation spends a device slot. **This is the owner's call, not an agent's.** Two things go with it: what `activate` prints against an install that is *already* licensed is unmeasured for the same reason, and the "AdGuard is activated" wording has never been seen on screen.
+5. ~~**The focus trigger has never been exercised.**~~ — done, 1 August, and it had been open since the root helper landed. All three checks above re-read themselves from one `connect_is_active_notify` closure in `main.rs`, and every entry here used to end by excusing it: no `xdotool`, no `wmctrl`, no way to take focus from an Xvfb window and give it back. **The excuse was wrong.** There is no window manager on that display, so there is nothing to negotiate with — `XSetInputFocus` is one call and `libX11` is installed. Twenty lines of C, in `building.md` §3. Three things it settled:
+
+   - **The trigger fires.** Driven through the browser check, whose entire input is files under `$ADGUARD_BROWSER_HOME`: a sandbox `$HOME` holding `.config/chromium` and no manifest renders the group naming the file it looked for; writing a valid manifest changes nothing; `xfocus none` then `xfocus <window-id>` takes the group off the page. Since the closure calls all three re-checks unconditionally, this is the trigger for the certificate and the helper as well.
+   - **The middle phase is the proof.** A run that writes the file and immediately takes focus demonstrates only that the rows *can* change — a 2 s poll would pass it identically, and this app has three of those. The walk taken after the write and before the focus round trip must be **byte-identical** to the one before it, and it was. Same discipline as hashing `proxy.yaml` either side of an edit (§4), pointed the other way: there silence had to be shown to mean something, here a change had to be shown to have a cause.
+   - **Both directions, because the second one is the feature.** Reversed — one browser set up, group hidden, then `.config/vivaldi` created mid-session — the group comes *back*, naming Vivaldi and the manifest it looked for. That is contract §12's ordering trap driven end to end: a browser installed after `install-browser-integration` last ran, which the installer's own success message hides and which nothing else in AdGuard's tooling reports.
+
+   What is still **not** verified anywhere is the window regaining focus by the route a user would take, since that needs a window manager. What the focus round trip proves is that GTK's `is-active` moving runs the handler, which is the line that was in question.
+6. **The activation success leg is a claim, not a measurement.** Everything up to the browser log-in is proven, including against a real unlicensed install: `activate` hands back a link, the page shows it, *finish activation* re-runs `activate`, reads `license`, and says "not activated yet" without pretending otherwise. What nobody has watched is the leg after a genuine log-in — it needs a real account, and completing an activation spends a device slot. **This is the owner's call, not an agent's.** Two things go with it: what `activate` prints against an install that is *already* licensed is unmeasured for the same reason, and the "AdGuard is activated" wording has never been seen on screen.
+7. **Three CLI behaviours the UI depends on are deliberately unmeasured**, and this is the list, because they are scattered across the contract and each looks like an oversight where it sits. None is a gap an agent should close; each would cost more than it settles.
+
+   - **What `adguard-cli cert` does to a CA that already exists** (contract §8). The command installs into the **system** trust store, which is a machine-wide change no test here is entitled to make. The UI therefore only ever *names* it, in AdGuard's own words, and never says what it will do — that wording is load-bearing and should not be "improved" into a description.
+   - **`configure`'s second-run branch** (contract §7). Against a directory that already has a `proxy.yaml` it announces that the configuration will be reset, and with stdin closed there is no prompt at which to decline. `Cli::configure` guards the call; the branch behind the guard stays unmeasured on purpose.
+   - **Where `proxy_mode auto` is actually validated** (contract §8). Reaching the check needs `start`, and neither route is open: a sandbox is unlicensed so `start` is refused first, and starting the real proxy in `auto` is the owner's call. The contract says validation-at-use is an *inference* from where the strings sit in the binary, and it should keep saying so.
 
 ---
 
@@ -163,6 +211,8 @@ XDG_DATA_HOME=/tmp/fake cargo run -p adguard-gui
 **Formatting.** The tree is hand-formatted and `cargo fmt --check` has been dirty since the first commit. That is deliberate — the measured-behaviour tables in `config.rs`, `cli.rs` and `model.rs` do not survive rustfmt. Do not reformat.
 
 **Screenshots.** GNOME denies D-Bus screenshots, and `x11grab` on `:0` captures nothing under Wayland because Xwayland windows are not drawn into the X root window. Use Xvfb; the recipe is in `building.md`. There is no `xdotool`, so the virtual screen has to be taller than the window to get a whole page in one frame.
+
+**"The tool is not installed" is a statement about the tool, not about the task.** New, and it had been quietly costing this project a verified line since the root helper landed: three separate entries in §3 excused the focus trigger on the grounds that focus needs `xdotool`, and each new feature inherited the excuse from the one before it rather than re-examining it. `xdotool` exists to talk to a *window manager*, and there is no window manager on an Xvfb display — the thing standing in the way was the reason it was thought impossible. `XSetInputFocus` is one X call, `libX11` is installed, and `cc -o xfocus xfocus.c -lX11` is the whole build (`building.md` §3). Before writing that something cannot be verified here, check whether the missing tool was ever the one the job needed; a note like that gets copied forward and stops being questioned.
 
 **Subagents.** If you run a review workflow, check `git status` afterwards — one previously wrote a scratch test file into the tree. And do not apply fixes while a verify phase is still running; verifiers ended up reading already-corrected code and citing the new tests as proof the findings were wrong.
 
