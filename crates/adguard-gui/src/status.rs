@@ -58,12 +58,14 @@
 //! the outcome, not anything `activate` printed.
 
 use std::cell::{Cell, RefCell};
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
 
 use adguard_core::config::key;
 use adguard_core::{
-    orphan, Activation, Catalogue, Cli, Config, Daemon, FilterSet, License, ProxyStatus, Toggle,
+    orphan, Activation, Catalogue, Cli, Config, Daemon, FilterSet, License, ProxyStatus, RootHelper,
+    Toggle,
 };
 use adw::prelude::*;
 use gtk::glib;
@@ -176,6 +178,11 @@ pub struct StatusPage {
     socks5: adw::ActionRow,
     http_value: gtk::Label,
     socks5_value: gtk::Label,
+    /// Where AdGuard's root helper is read from, for the HTTP endpoint's
+    /// caveat. A field rather than a call to [`RootHelper::detect`] for the
+    /// reason the Advanced page has one: `$ADGUARD_ROOT_HELPER` is what makes
+    /// both branches reachable on a machine that sits on one side of the check.
+    helper_path: Option<PathBuf>,
     manual_dns: StateRow,
     system_filtering: StateRow,
     system_dns: StateRow,
@@ -361,6 +368,9 @@ impl StatusPage {
             .build();
         let (http, http_value) = endpoint_row("HTTP", "Change the HTTP proxy port");
         let (socks5, socks5_value) = endpoint_row("SOCKS5", "Change the SOCKS5 proxy port");
+        // The HTTP row is the one that carries the root-helper caveat, and that
+        // caveat is a sentence rather than the two words "Not listening".
+        http.set_subtitle_lines(2);
         for r in [&http, &socks5] {
             endpoint_group.add(r);
         }
@@ -456,6 +466,9 @@ impl StatusPage {
             socks5,
             http_value,
             socks5_value,
+            helper_path: std::env::var_os("ADGUARD_ROOT_HELPER")
+                .map(PathBuf::from)
+                .or_else(adguard_core::paths::root_helper),
             manual_dns,
             system_filtering,
             system_dns,
@@ -835,6 +848,42 @@ impl StatusPage {
         );
     }
 
+    /// What to say under the HTTP endpoint, or `None` when there is nothing to
+    /// say about it.
+    ///
+    /// **This page reports a listener that is bound, and being bound is not the
+    /// same as working.** `adguard-cli status` says only that the port is open;
+    /// with AdGuard's root helper unmet, that port accepts connections, answers
+    /// every one of them 502, and never opens an upstream socket at all
+    /// (contract §8). So the endpoint this group exists to advertise was
+    /// advertised as healthy in exactly the state where nothing at all could
+    /// get through it, and the one row that explained why sat on the Advanced
+    /// page, filed under a proxy mode the user had never selected.
+    ///
+    /// Read on every poll rather than cached, which is one `stat` beside a
+    /// `status` invocation costing 10–30 ms — and it means the caveat clears
+    /// itself within a tick of the user running the command, without the window
+    /// needing to lose and regain focus the way the Advanced page's row does.
+    ///
+    /// It says the state and where to go, not which of the three properties is
+    /// missing: that, and the command itself, belong to the page that owns them
+    /// — the same division every other row on this page keeps.
+    fn helper_caveat(&self) -> Option<&'static str> {
+        match self.helper_path.as_ref().map(RootHelper::inspect)? {
+            Ok(helper) if helper.is_set_up() => None,
+            Ok(_) => Some(
+                "Listening, but requests through it fail until AdGuard's root helper \
+                 is set up — the Advanced page has the command",
+            ),
+            // Unreadable is not the same as unmet, and this row must not claim
+            // the stronger of the two. The Advanced page reports the error.
+            Err(_) => Some(
+                "Listening. AdGuard's root helper could not be checked, and requests \
+                 through here fail when it is not set up — see the Advanced page",
+            ),
+        }
+    }
+
     fn apply(&self, status: &ProxyStatus) {
         self.set_runtime(if status.running {
             Runtime::Up
@@ -842,11 +891,21 @@ impl StatusPage {
             Runtime::Down
         });
 
-        set_endpoint(&self.http, &self.http_value, status.http_proxy.as_deref());
+        set_endpoint(
+            &self.http,
+            &self.http_value,
+            status.http_proxy.as_deref(),
+            self.helper_caveat(),
+        );
         set_endpoint(
             &self.socks5,
             &self.socks5_value,
             status.socks5_proxy.as_deref(),
+            // Measured unaffected: with the helper unmet the SOCKS5 proxy
+            // serves requests normally while the HTTP one beside it fails
+            // every single one (contract §8). Repeating the caveat here would
+            // send a user to fix something that is not stopping them.
+            None,
         );
 
         self.manual_dns.set(status.manual_dns_proxy);
@@ -1589,14 +1648,25 @@ fn endpoint_row(title: &str, tooltip: &str) -> (adw::ActionRow, gtk::Label) {
 /// likeliest to be going to look at them — a proxy that is stopped, or a port
 /// that has been set to -1. The dash on its own does not say which of those it
 /// is either, so the subtitle is worth more than the dimming was.
-fn set_endpoint(row: &adw::ActionRow, value: &gtk::Label, address: Option<&str>) {
+fn set_endpoint(
+    row: &adw::ActionRow,
+    value: &gtk::Label,
+    address: Option<&str>,
+    caveat: Option<&str>,
+) {
     value.set_label(address.unwrap_or(PLACEHOLDER));
     // Rather than hiding the row: the endpoints are what a user comes to this
     // group to write down, and a group that empties itself while the proxy is
     // stopped reads as "there are none" instead of "not right now".
-    row.set_subtitle(match address {
-        Some(_) => "",
-        None => "Not listening",
+    //
+    // A caveat only qualifies an endpoint there is one to qualify. Nothing is
+    // listening on a stopped proxy, so "requests through it fail" would be an
+    // odd thing to tell someone whose proxy is not running — and it would bury
+    // the reason they are actually looking at a dash.
+    row.set_subtitle(match (address, caveat) {
+        (Some(_), Some(caveat)) => caveat,
+        (Some(_), None) => "",
+        (None, _) => "Not listening",
     });
 }
 

@@ -5,6 +5,7 @@
 //!
 //! See `docs/cli-contract.md` for the measured CLI behaviour this encodes.
 
+pub mod browser;
 pub mod cli;
 pub mod config;
 pub mod filters;
@@ -15,6 +16,7 @@ pub mod orphan;
 pub mod paths;
 pub mod trust;
 
+pub use browser::BrowserIntegration;
 pub use cli::{Activation, Applied, Cli, Error};
 pub use config::{AddressPlan, AuthState, Config, DnsListenPort, Watch};
 pub use helper::RootHelper;

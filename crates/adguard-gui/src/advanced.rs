@@ -40,10 +40,17 @@ use gtk::glib;
 use gtk4 as gtk;
 use libadwaita as adw;
 
+use crate::root_helper::{join_with_and, RootHelperView};
 use crate::{abbreviate, toast, worker};
 
-/// The `proxy_mode` value that needs AdGuard's root helper. The other is
-/// `manual`, which needs nothing and is never gated.
+/// The `proxy_mode` value AdGuard *gates* on its root helper, and so the one
+/// whose row carries a caveat when the helper is not set up.
+///
+/// Not the only value that needs the helper: `manual`'s HTTP proxy fails every
+/// request without it (contract §8). The difference is what the row can say —
+/// choosing `auto` with the helper unmet selects a mode that does nothing,
+/// which is this row's business, whereas the manual-mode breakage is the whole
+/// application's and is reported where the user meets it, on Status.
 const AUTO: &str = "auto";
 
 /// How long a spin row sits still before its value is written.
@@ -148,10 +155,10 @@ pub struct AdvancedPage {
     /// The "Listen address" group, whose description carries the credential
     /// requirement when it is not yet met.
     listen_group: RefCell<Option<adw::PreferencesGroup>>,
-    /// The root-helper rows under the proxy-mode group, and the last reading
-    /// they were painted from. `None` on a table without `proxy_mode`, which is
-    /// how the Stealth page gets none of this for free.
-    helper_view: RefCell<Option<HelperView>>,
+    /// The root-helper rows under the proxy-mode group. `None` on a table
+    /// without `proxy_mode`, which is how the Stealth page gets none of this
+    /// for free.
+    helper_view: RefCell<Option<Rc<RootHelperView>>>,
     /// Where the helper check is read from.
     ///
     /// A field rather than a call to [`RootHelper::detect`] so a test — or
@@ -159,25 +166,6 @@ pub struct AdvancedPage {
     /// shipped unmet, which is every machine — can point it somewhere else.
     /// `$ADGUARD_ROOT_HELPER` is read once, at construction.
     helper_path: Option<PathBuf>,
-}
-
-/// The widgets that report AdGuard's root-helper check.
-///
-/// Three separate facts, not a verdict: a helper that is root-owned but not
-/// suid says exactly that, because a user who has already run the `sudo`
-/// command and still cannot switch modes needs to know which property is
-/// missing (`architecture.md` §6).
-struct HelperView {
-    /// Holds everything below; hidden entirely once the check passes, because
-    /// a satisfied requirement is not worth a permanent row.
-    group: adw::PreferencesGroup,
-    /// What the check found, in AdGuard's own three-property wording.
-    status: adw::ActionRow,
-    /// AdGuard's own command, with a copy button. Never run from here.
-    command: adw::ActionRow,
-    /// The last check rendered, so a focus re-check that found nothing new
-    /// does not rebuild the rows under the user's pointer.
-    painted: RefCell<Option<String>>,
 }
 
 impl AdvancedPage {
@@ -334,64 +322,15 @@ impl AdvancedPage {
             // listen-address special-casing is keyed off its own setting, so a
             // table without that key — Stealth — never builds them.
             if group.settings.iter().any(|s| s.key == key::PROXY_MODE) {
-                let view = self.build_helper_view();
-                page.add(&view.group);
+                let view = RootHelperView::new(&self.toasts);
+                page.add(view.widget());
+                view.paint();
                 self.helper_view.replace(Some(view));
             }
         }
 
         self.apply(config);
         page
-    }
-
-    /// The rows that report AdGuard's root-helper check and carry its command.
-    ///
-    /// Built once and then patched, so a focus re-check does not rebuild
-    /// widgets under the pointer. Nothing here can run the command — there is a
-    /// copy button and no other affordance, which is the whole design
-    /// (`architecture.md` §6).
-    fn build_helper_view(self: &Rc<Self>) -> HelperView {
-        let group = adw::PreferencesGroup::builder()
-            .title("AdGuard's root helper")
-            .build();
-
-        let status = adw::ActionRow::new();
-        status.set_use_markup(false);
-        status.set_title("Root helper");
-        status.set_subtitle_lines(3);
-        status.add_prefix(&gtk::Image::from_icon_name("dialog-warning-symbolic"));
-        group.add(&status);
-
-        let command = adw::ActionRow::new();
-        command.set_use_markup(false);
-        command.set_title("Run this in a terminal");
-        command.set_subtitle_lines(3);
-        // `.monospace` on the subtitle would need a stylesheet rule; the
-        // command is the subtitle so it stays a plain label and the copy button
-        // is the thing that makes it usable.
-        let copy = gtk::Button::from_icon_name("edit-copy-symbolic");
-        copy.set_tooltip_text(Some("Copy the command"));
-        copy.set_valign(gtk::Align::Center);
-        copy.add_css_class("flat");
-        copy.connect_clicked({
-            let this = Rc::downgrade(self);
-            let command = command.clone();
-            move |_| {
-                let Some(this) = this.upgrade() else { return };
-                let text = command.subtitle().unwrap_or_default();
-                command.clipboard().set_text(&text);
-                this.toasts.add_toast(toast("Command copied"));
-            }
-        });
-        command.add_suffix(&copy);
-        group.add(&command);
-
-        HelperView {
-            group,
-            status,
-            command,
-            painted: RefCell::new(None),
-        }
     }
 
     /// Re-read the helper check and repaint the rows that report it.
@@ -405,10 +344,9 @@ impl AdvancedPage {
     /// helper that has just been set up turns `auto` from a warning into an
     /// ordinary value, and vice versa.
     pub fn recheck_helper(self: &Rc<Self>) {
-        if self.helper_view.borrow().is_none() {
-            return;
-        }
-        self.paint_helper();
+        let view = self.helper_view.borrow().clone();
+        let Some(view) = view else { return };
+        view.paint();
 
         // The mode row's rendering reads the check, and `render` skips a row
         // whose snapshot has not moved — which is exactly what happens here,
@@ -422,60 +360,6 @@ impl AdvancedPage {
         if let (Some(row), Some(config)) = (mode_row, self.last.borrow().clone()) {
             self.repaint(&row);
             self.render(&row, &config);
-        }
-    }
-
-    /// Render the check into the three-property row and the command row.
-    fn paint_helper(&self) {
-        let view = self.helper_view.borrow();
-        let Some(view) = view.as_ref() else { return };
-
-        let check = self.helper();
-        let snapshot = format!("{check:?}");
-        if view.painted.borrow().as_deref() == Some(snapshot.as_str()) {
-            return;
-        }
-        view.painted.replace(Some(snapshot));
-
-        match check {
-            // Set up. The group goes away entirely: a requirement that is met
-            // is not worth a standing row, and leaving one would invite a user
-            // to run a `sudo` command they no longer need.
-            Some(Ok(helper)) if helper.is_set_up() => {
-                view.group.set_visible(false);
-            }
-            Some(Ok(helper)) => {
-                view.group.set_visible(true);
-                view.command.set_visible(true);
-                view.status.set_subtitle(&format!(
-                    "Automatic mode needs it {}. Checked {}.",
-                    join_with_and(&helper.unmet()),
-                    helper.path.display()
-                ));
-                view.command.set_subtitle(&helper.setup_command());
-                view.group.set_description(Some(
-                    "The setuid bit lets any user on this machine run the helper as \
-                     root. AdGuard's helper lives in a directory you can write to, so \
-                     anyone who can replace that file would gain root with it — which \
-                     is why this application shows the command rather than running it \
-                     for you.",
-                ));
-            }
-            // Installed, but the helper could not be read. Different from "not
-            // set up", and the command would be a guess.
-            Some(Err(err)) => {
-                view.group.set_visible(true);
-                view.command.set_visible(false);
-                view.status
-                    .set_subtitle(&format!("Could not be read — {err}"));
-                view.group.set_description(Some(
-                    "Automatic mode needs AdGuard's root helper, and this check could \
-                     not read it.",
-                ));
-            }
-            // The CLI itself could not be located, which the window already
-            // says elsewhere. Nothing useful to add here.
-            None => view.group.set_visible(false),
         }
     }
 
@@ -652,7 +536,9 @@ impl AdvancedPage {
         // `proxy.yaml`, so they cannot have moved because of the edit that
         // brought us here — and a toast saying the config changed would be
         // wrong about a row that changed for another reason entirely.
-        self.paint_helper();
+        if let Some(view) = self.helper_view.borrow().as_ref() {
+            view.paint();
+        }
 
         self.last.replace(Some(config.clone()));
         moved
@@ -927,8 +813,8 @@ impl AdvancedPage {
             let refusal = match self.helper() {
                 Some(Ok(helper)) if helper.is_set_up() => None,
                 Some(Ok(helper)) => Some(format!(
-                    "Automatic mode needs AdGuard's root helper {}. Run `{}` in a \
-                     terminal first — the row below has it.",
+                    "Automatic mode needs AdGuard's root helper, which is missing {}. \
+                     Run `{}` in a terminal first — the row below has it.",
                     join_with_and(&helper.unmet()),
                     helper.setup_command()
                 )),
@@ -1193,20 +1079,6 @@ impl AdvancedPage {
 }
 
 /// The subtitle for a number row that holds a value we can write.
-/// Join the missing properties into something readable: "owned by root and the
-/// setuid bit set", rather than a debug-printed list.
-///
-/// The three facts are reported separately on purpose (`architecture.md` §6),
-/// and a user who has already run AdGuard's command needs to read which one is
-/// still missing without decoding punctuation.
-fn join_with_and(parts: &[&str]) -> String {
-    match parts {
-        [] => "nothing".to_owned(),
-        [one] => (*one).to_owned(),
-        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
-    }
-}
-
 fn describe_number(setting: Setting, value: i64) -> String {
     match setting.kind {
         Kind::Number {

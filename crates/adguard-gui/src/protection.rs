@@ -18,6 +18,7 @@ use adw::prelude::*;
 use gtk4 as gtk;
 use libadwaita as adw;
 
+use crate::browser_integration::BrowserIntegrationView;
 use crate::certificate::CertificateView;
 use crate::{abbreviate, toast, worker};
 
@@ -83,6 +84,15 @@ pub struct ProtectionPage {
     /// certificate is called. Kept from the last `apply` so the focus re-check
     /// does not have to re-read the file to repaint one row.
     certificate_inputs: RefCell<(Option<bool>, String)>,
+
+    /// The browser-integration rows. `None` until the page has been built.
+    ///
+    /// Held for the same reason the certificate view is — the check reads files
+    /// elsewhere on the machine, not `proxy.yaml`, so it has to be repainted on
+    /// window focus. It needs nothing from a reading of the config, so unlike
+    /// the certificate there is no companion `_inputs` field: the check is
+    /// entirely a question about this machine.
+    browser: RefCell<Option<Rc<BrowserIntegrationView>>>,
 }
 
 impl ProtectionPage {
@@ -99,6 +109,7 @@ impl ProtectionPage {
                 None,
                 String::from(adguard_core::trust::DEFAULT_CERTIFICATE_NAME),
             )),
+            browser: RefCell::new(None),
         });
         this.reload();
         this
@@ -125,6 +136,19 @@ impl ProtectionPage {
         let Some(view) = view.as_ref() else { return };
         let (filtering, name) = &*self.certificate_inputs.borrow();
         view.paint(*filtering, name);
+    }
+
+    /// Re-read the browser-integration check and repaint the rows that report
+    /// it.
+    ///
+    /// Public for the same reason [`Self::recheck_certificate`] is, and called
+    /// from the same place. It takes no arguments because the check reads
+    /// nothing from `proxy.yaml` — the question is what is on this machine, not
+    /// what AdGuard is configured to do.
+    pub fn recheck_browser_integration(&self) {
+        let view = self.browser.borrow();
+        let Some(view) = view.as_ref() else { return };
+        view.paint();
     }
 
     /// Report every reading of `proxy.yaml` to `observer` — the tray's source
@@ -198,6 +222,7 @@ impl ProtectionPage {
     fn build(self: &Rc<Self>, config: &Config) -> adw::PreferencesPage {
         self.rows.borrow_mut().clear();
         self.certificate.replace(None);
+        self.browser.replace(None);
 
         let group = adw::PreferencesGroup::builder()
             .title("Protection")
@@ -227,6 +252,22 @@ impl ProtectionPage {
         let certificate = CertificateView::new(&self.toasts);
         page.add(certificate.widget());
         self.certificate.replace(Some(certificate));
+
+        // Below the certificate, and last, because it is the least urgent of
+        // the three: a machine in this state still filters everything it is
+        // configured to filter. What it cannot do is tell the browser extension
+        // so — and the extension blames adguard-cli for it, which is what makes
+        // the row worth carrying at all rather than leaving to the user to
+        // work out (`adguard_core::browser`).
+        //
+        // On this page rather than the Status page because the subject is a
+        // filtering surface, not the daemon: the same reason the certificate
+        // rows are here. It paints itself immediately — unlike the certificate
+        // it needs nothing from `config`, so there is nothing to wait for.
+        let browser = BrowserIntegrationView::new(&self.toasts);
+        page.add(browser.widget());
+        browser.paint();
+        self.browser.replace(Some(browser));
 
         self.apply(config);
         page

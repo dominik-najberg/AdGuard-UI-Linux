@@ -99,6 +99,24 @@ pub fn certificate(name: &str) -> Option<PathBuf> {
     Some(data_dir()?.join(format!("{name}.pem")))
 }
 
+/// AdGuard's native-messaging host, beside the **resolved** binary.
+///
+/// The program a browser launches on behalf of AdGuard's extension — the far
+/// end of the `connectNative` call in [`crate::browser`]. It is what the
+/// manifests `install-browser-integration` writes name in their `path`, so it
+/// is also what those manifests are checked against.
+///
+/// Found the same way as [`root_helper`] and for the same measured reason: the
+/// entry on `$PATH` is a symlink on the reference machine, and the host is a
+/// sibling of the real file rather than of the link.
+///
+/// Returns the path whether or not anything is there — whether it exists is
+/// [`crate::browser::BrowserIntegration`]'s question, and one it reports
+/// separately. `None` means only that the CLI itself could not be located.
+pub fn nm_host() -> Option<PathBuf> {
+    beside_binary(crate::browser::HOST_BINARY)
+}
+
 /// A file shipped alongside the **resolved** `adguard-cli` binary.
 fn beside_binary(name: &str) -> Option<PathBuf> {
     let binary = cli_binary()?;

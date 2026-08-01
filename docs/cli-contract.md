@@ -14,7 +14,7 @@ Four other surfaces exist. None should be used.
 | --- | --- |
 | `agcli.socket` (unix socket in the data dir) | Undocumented internal control channel between the CLI and its daemon. No stability guarantee; format not published. Disappears entirely when the proxy is stopped. |
 | `AGLocalApiServer` — a WebSocket server inside the daemon | Confirmed present (`AGLocalApiServer.cpp`, `AGWebSocketHandler`, `connectToLocalApiServer` in the binary). But it is wired to userscript/content processing (`AGPFProcessingUnit`), not general control. Its port key `local_api_server_port` is not even present in the config (`config get local_api_server_port` → `not found`). Internal. |
-| `adguard_cli_nm` (Native Messaging host) | Locked to specific browser extension IDs via manifests. No AdGuard manifest is installed on this machine — `install-browser-integration` has never been run. Impersonating a browser extension is fragile and rude. |
+| `adguard_cli_nm` (Native Messaging host) | Locked to specific browser extension IDs via the manifests that name it — five `chrome-extension://` origins, two Firefox `allowed_extensions` — and the browser vouches for the caller. Impersonating a browser extension is fragile and rude. **Its absence is worth reporting, and is:** `install-browser-integration` is a separate step that unpacking the CLI does not perform, so on a stock install the extension reports that it cannot detect `adguard-cli` while AdGuard runs and filters perfectly. That check is `crates/adguard-core/src/browser.rs`, which reads the manifests without ever speaking the protocol. |
 | Writing `proxy.yaml` directly | See [§5](#5-configuration-writes) — it would destroy the file's comments. |
 
 **Decision: shell out to the `adguard-cli` binary for all writes; read state from `proxy.yaml` and the filter SQLite DBs.**
@@ -686,6 +686,8 @@ Everything measured about that prompt was measured without a TTY, where the CLI 
 
 `adguard_root_helper` is **not setuid** as shipped (`-rwxr-xr-x potworny potworny`, in `~/.local/opt/adguard-cli/`) and the package ships **no polkit policy** — a search of `/usr/share/polkit-1/actions/` and `/etc/polkit-1/` for "adguard" returns nothing.
 
+> **This machine no longer matches that sentence, and the sentence stays.** `sudo … -s` has since been run here, so the helper reads `-rwsr-xr-x root root`. What is recorded above is the **shipped** state, which is what every fresh install starts from and therefore what the GUI has to render. The consequence for testing is that the branch which is unreachable locally has swapped — it used to be the met one — and `$ADGUARD_ROOT_HELPER` is what makes either reachable. What prompted the `sudo` is the subsection below.
+
 **But AdGuard ships its own escalation path, and it is the one to use.** Measured from the binary's strings, `adguard-cli` checks the helper three ways and tells the user exactly how to satisfy the check:
 
 ```
@@ -700,6 +702,43 @@ So `sudo ~/.local/opt/adguard-cli/adguard_root_helper -s` is AdGuard's own docum
 The reason to leave that `sudo` to the user rather than run it for them: the helper lives in a user-writable directory, so the suid bit makes anyone who can write that file root. That is AdGuard's design decision, and the user opted into it by installing AdGuard — but it is not something to confer from behind a button.
 
 An earlier revision of this section concluded there was "no existing escalation path to reuse". That was wrong; it was inferred from the file mode without reading the binary.
+
+### The helper is not only about automatic mode: without it the HTTP proxy serves nothing
+
+**Measured, and it is the reason any of this is user-visible.** Every string AdGuard prints about the helper names automatic mode, and this document and the app both read them as meaning auto mode was the only thing that needed it. With `proxy_mode: 'manual'`, the proxy running, and the helper in its shipped state, **every request through the HTTP proxy fails**:
+
+```console
+$ curl -sS -o /dev/null -w '%{http_code}\n' -x http://127.0.0.1:3129 http://wp.pl/
+502
+$ curl -sS -o /dev/null -w '%{http_code}\n' -x http://127.0.0.1:3129 https://wp.pl/
+000                                         # CONNECT tunnel failed, response 502
+$ curl -sS -o /dev/null -w '%{http_code}\n' --socks5-hostname 127.0.0.1:1081 http://wp.pl/
+301                                         # the SOCKS5 listener is unaffected
+```
+
+The body of the 502 is AdGuard's own `blocking-pages` error page. **It never opens an upstream connection at all** — pointed at a local `python3 -m http.server`, the HTTP proxy still returns 502 and that server logs no request, while the same fetch over SOCKS5 arrives normally. The daemon logs exactly two lines per attempt and nothing else:
+
+```text
+ERROR RootHelperClient send_command: Sequencer is not initialized
+WARN  AGStandaloneServerSocketFactory prepareFd: Failed to protect socket: Failed to send command to root helper
+```
+
+`ps` says why: the daemon spawns its helper and the helper dies immediately, leaving `[adguard_root_he] <defunct>` parented to it. Socket protection then fails for every outbound socket the HTTP listener creates, and the connection is abandoned before `connect(2)`.
+
+**`restart` was run as a control first, and it does not help** — the 502 came back and the zombie respawned with it, which is what rules out a merely wedged daemon (§11) and leaves the suid bit as the only variable. After `sudo … -s` and a restart, the helper runs as `root`, and:
+
+```console
+$ curl -sS -o /dev/null -w '%{http_code}\n' -x http://127.0.0.1:3129 http://wp.pl/
+301
+$ curl -sS -o /dev/null -w '%{http_code}\n' -x http://127.0.0.1:3129 https://wp.pl/
+301
+```
+
+A request through the proxy now writes **nothing** to `proxy.log`.
+
+**What the user sees instead of any of this.** The error page reports the failure against the *upstream* host with a `strerror` that varies per attempt — `Error connecting to wp.pl:80. Error: 104(Connection reset by peer)`, and `115(Operation in progress)` and `11(Resource temporarily unavailable)` on other attempts. It reads as a fault at the far end, in a browser, with nothing naming the helper; `adguard-cli status` meanwhile reports the HTTP proxy listening, because it is. **Bound is not the same as working**, and `status` only answers the first. That is why the GUI reports the check on the Status page beside the endpoint and in the first-run assistant, and no longer files it under automatic mode (`architecture.md` §6).
+
+Two limits on the above, stated rather than glossed. The mechanism inside AdGuard is inferred from its own log lines — what is measured is that the failure and the fix track the suid bit exactly. And this is one machine and one version (helper and CLI dated 27 May 2026); it is enough to stop the app claiming the helper matters only for auto mode, which was measurably false, and not enough to claim every version behaves this way.
 
 ### `config set proxy_mode auto` does not check anything
 

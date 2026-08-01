@@ -1,9 +1,8 @@
 //! Whether AdGuard's own root helper has been set up.
 //!
-//! `auto` proxy mode is the one thing in this application that needs root, and
-//! **none of that root is ours** (`architecture.md` §6). AdGuard ships the
-//! helper, gates auto mode on three properties of it, and names the fix itself.
-//! Measured from the binary's strings (contract §8):
+//! The helper needs root and **none of that root is ours** (`architecture.md`
+//! §6). AdGuard ships it, names the fix itself, and gates on three properties
+//! of it. Measured from the binary's strings (contract §8):
 //!
 //! ```text
 //! Root helper check: owned_by_root={}, has_suid={}, is_executable={}
@@ -15,6 +14,19 @@
 //! those three properties — and reports **the check**, not a verdict. Three
 //! separate facts, so a helper that is root-owned but not suid says so rather
 //! than collapsing into "not set up".
+//!
+//! **Those strings name automatic mode, and they undersell what the check is
+//! worth.** An earlier revision of this module took them at their word and said
+//! auto mode was the one thing here that needs root. It is not. With the helper
+//! in its shipped state, `manual` mode — the default, and the mode every
+//! endpoint on the Status page advertises — answers **every** request through
+//! its HTTP proxy with 502 and never opens an upstream connection at all, while
+//! the SOCKS5 proxy beside it works normally. Contract §8 has the measurement
+//! and the before-and-after. Nothing in the CLI's own output connects the two:
+//! the daemon logs `prepareFd: Failed to protect socket` and the user sees a
+//! browser that cannot load anything.
+//!
+//! That is why the check is not filed under auto mode anywhere it is shown.
 //!
 //! **The check is advisory, and the contract measurement says why.** `config
 //! set proxy_mode auto` succeeds with every one of the three unmet: exit 0,
@@ -50,12 +62,21 @@ pub struct RootHelper {
 impl RootHelper {
     /// Read the three properties of the file at `path`.
     ///
-    /// **The path is a parameter on purpose.** On this machine the helper is
-    /// shipped `-rwxr-xr-x potworny potworny`, so the unmet branch is the real
-    /// state and renders for free; the met branch is only reachable by pointing
-    /// the check somewhere else. A constant buried in the function would leave
-    /// half the feature unprovable without setting a suid bit on something,
-    /// which is exactly the act this design exists to avoid.
+    /// **The path is a parameter on purpose, and which branch that buys has
+    /// changed.** It was written when the helper here was shipped `-rwxr-xr-x
+    /// potworny potworny`: the unmet branch was the real state and rendered for
+    /// free, and the met branch was only reachable by pointing the check
+    /// somewhere else. This machine has since run AdGuard's own `sudo … -s`, so
+    /// the helper is `-rwsr-xr-x root root` and the two have swapped — the
+    /// unmet rendering is now the one nothing local reaches.
+    ///
+    /// The parameter is what makes that a non-event: `$ADGUARD_ROOT_HELPER`
+    /// points the check at any file, and the tests below cover both ends
+    /// against binaries the system already ships. A constant buried in the
+    /// function would have left half the feature unprovable on whichever side
+    /// of that line the machine happened to sit — and the only way back would
+    /// be setting a suid bit on something, which is exactly the act this design
+    /// exists to avoid.
     ///
     /// Symlinks are followed. `fs::metadata` does; `fs::symlink_metadata` would
     /// report the *link's* `lrwxrwxrwx` and its uid, so a helper reached through
@@ -84,7 +105,9 @@ impl RootHelper {
         crate::paths::root_helper().map(Self::inspect)
     }
 
-    /// All three, which is what `adguard-cli` requires before `auto` will work.
+    /// All three, which is what `adguard-cli` gates automatic mode on — and,
+    /// measured, what its HTTP proxy needs before it will connect to anything
+    /// in any mode (contract §8).
     pub fn is_set_up(&self) -> bool {
         self.owned_by_root && self.has_suid && self.is_executable
     }
@@ -102,16 +125,24 @@ impl RootHelper {
 
     /// The properties that are missing, in the order the CLI names them.
     /// Empty when [`Self::is_set_up`].
+    ///
+    /// **Noun phrases, so any subset of them reads as a sentence.** They were
+    /// participles once — "owned by root", "the setuid bit set" — which suited
+    /// the one caller there was then ("Automatic mode needs it owned by root")
+    /// and fell apart on the subset that caller was least likely to see:
+    /// a root-owned helper missing only the suid bit rendered "needs it the
+    /// setuid bit set". Callers now say "missing …", which holds for all seven
+    /// combinations.
     pub fn unmet(&self) -> Vec<&'static str> {
         let mut missing = Vec::new();
         if !self.owned_by_root {
-            missing.push("owned by root");
+            missing.push("root ownership");
         }
         if !self.has_suid {
-            missing.push("the setuid bit set");
+            missing.push("the setuid bit");
         }
         if !self.is_executable {
-            missing.push("the executable bit set");
+            missing.push("the executable bit");
         }
         missing
     }
@@ -205,7 +236,7 @@ mod tests {
         assert!(!helper.has_suid, "{helper:?}");
         assert!(helper.is_executable, "{helper:?}");
         assert!(!helper.is_set_up());
-        assert_eq!(helper.unmet(), vec!["the setuid bit set"]);
+        assert_eq!(helper.unmet(), vec!["the setuid bit"]);
     }
 
     /// Root-owned, no suid, not executable.
@@ -228,7 +259,7 @@ mod tests {
         );
         assert_eq!(
             helper.unmet(),
-            vec!["the setuid bit set", "the executable bit set"]
+            vec!["the setuid bit", "the executable bit"]
         );
     }
 
@@ -253,7 +284,7 @@ mod tests {
             "{helper:?}"
         );
         assert!(!helper.is_set_up());
-        assert_eq!(helper.unmet(), vec!["owned by root", "the setuid bit set"]);
+        assert_eq!(helper.unmet(), vec!["root ownership", "the setuid bit"]);
 
         let _ = fs::remove_file(&path);
     }
@@ -271,7 +302,7 @@ mod tests {
         assert!(!helper.is_set_up());
         assert_eq!(
             helper.unmet(),
-            vec!["owned by root", "the setuid bit set", "the executable bit set"]
+            vec!["root ownership", "the setuid bit", "the executable bit"]
         );
 
         let _ = fs::remove_file(&path);

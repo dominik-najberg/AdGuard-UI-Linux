@@ -46,6 +46,7 @@ use gtk4 as gtk;
 use libadwaita as adw;
 
 use crate::certificate::CertificateView;
+use crate::root_helper::RootHelperView;
 use crate::{abbreviate, toast, worker};
 
 /// Wire a button to the assistant without the closure keeping it alive.
@@ -442,6 +443,21 @@ impl SetupAssistant {
             }
         }
 
+        // Not a question, and not deferrable either: AdGuard ships its helper
+        // unmet, and until it is set up the HTTP proxy this assistant is about
+        // to start answers every request with an error (contract §8). So every
+        // install this screen completes ends in that state — the same thing
+        // §6 says about the certificate, and the same reason this screen is
+        // where it belongs rather than a page the user may never open.
+        //
+        // Below the questions rather than above them: it is an errand to run
+        // outside this window, and putting a `sudo` command before the settings
+        // would read as a demand to satisfy before continuing. Painted once,
+        // like the certificate group, and not held afterwards.
+        let helper = RootHelperView::new(&self.toasts);
+        helper.paint();
+        page_.add(helper.widget());
+
         // The two questions the CLI's wizard asks that this page deliberately
         // does not, said out loud rather than silently dropped. `listen_address`
         // in particular is not an omission of taste: moving beyond loopback with
@@ -452,8 +468,8 @@ impl SetupAssistant {
             .description(
                 "The listen address stays on this machine for now — exposing the proxy to \
                  your network needs a proxy username and password first, which the \
-                 Advanced page asks for. Automatic proxy mode needs AdGuard's root helper \
-                 set up outside this app. Filter lists are the Filters page.",
+                 Advanced page asks for. Automatic proxy mode is on the Advanced page too, \
+                 and needs the root helper above. Filter lists are the Filters page.",
             )
             .build();
         page_.add(&elsewhere);

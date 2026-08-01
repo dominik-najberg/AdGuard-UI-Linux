@@ -6,10 +6,12 @@
 //! measured CLI behaviour the wrapper encodes.
 
 mod advanced;
+mod browser_integration;
 mod certificate;
 mod dns;
 mod filters;
 mod protection;
+mod root_helper;
 mod setup;
 mod status;
 mod style;
@@ -714,22 +716,30 @@ fn main_view(cli: &Cli) -> MainView {
     }
 }
 
-/// Re-read the two checks that live outside `proxy.yaml` whenever the window
-/// regains focus: AdGuard's root helper, and whether its certificate is
-/// trusted.
+/// Re-read the three checks that live outside `proxy.yaml` whenever the window
+/// regains focus: AdGuard's root helper, whether its certificate is trusted,
+/// and whether its browser integration is installed.
 ///
-/// The user's way out of either unmet state is a command they run in a
+/// The user's way out of any of these unmet states is a command they run in a
 /// terminal, so the moment they come back to this window is exactly the moment
 /// the answer has changed — and hunting for a refresh button to be told so
 /// would make the instruction feel like it had not worked
 /// (`architecture.md` §6).
 ///
+/// **The browser check has a second trigger the other two do not**, and it is
+/// the reason it is here rather than read once when the page is built:
+/// installing a browser invalidates it. `install-browser-integration` writes
+/// only where it already sees a browser, so a browser installed after that
+/// command was last run has no manifest and nothing anywhere says so
+/// (`adguard_core::browser`). Coming back to this window after installing one
+/// is a plausible way to find out, and the only one this application can offer.
+///
 /// `is-active` rather than a focus event on the widget: the check is about the
 /// window as a whole, and the row the user needs to see may not be the one with
 /// the keyboard focus. It notifies on *losing* focus too, which the guard below
-/// makes free — the cost is one `stat` and three small reads, and it is paid
-/// only on the way back in. Both checks are re-read rather than cached, and
-/// both are cheap enough for the main loop for that reason.
+/// makes free — the cost is one `stat`, three small reads and at most six more,
+/// and it is paid only on the way back in. All three are re-read rather than
+/// cached, and all three are cheap enough for the main loop for that reason.
 fn connect_focus_rechecks(window: &adw::ApplicationWindow, view: &MainView) {
     let advanced = view.advanced.clone();
     let protection = view.protection.clone();
@@ -737,6 +747,7 @@ fn connect_focus_rechecks(window: &adw::ApplicationWindow, view: &MainView) {
         if window.is_active() {
             advanced.recheck_helper();
             protection.recheck_certificate();
+            protection.recheck_browser_integration();
         }
     });
 }
