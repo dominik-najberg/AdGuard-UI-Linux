@@ -38,12 +38,13 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use adguard_core::{cli, Cli, Config, Kind, Setting, SETUP};
+use adguard_core::{cli, Cli, Config, Kind, Setting, Toggle, SETUP};
 use adw::prelude::*;
 use gtk::glib;
 use gtk4 as gtk;
 use libadwaita as adw;
 
+use crate::certificate::CertificateView;
 use crate::{abbreviate, toast, worker};
 
 /// Wire a button to the assistant without the closure keeping it alive.
@@ -403,6 +404,27 @@ impl SetupAssistant {
             }
             page_.add(&rendered);
         }
+
+        // Under the HTTPS filtering question, because the seed has just created
+        // the state it reports: `configure` generates the CA and then skips its
+        // own *"Do you want to install the certificate on the system?"* prompt
+        // in silence, since that one needs a password and there is no TTY
+        // (contract §7). So this screen is not merely a good place to say the
+        // certificate needs installing — it is the first moment at which it is
+        // true, and the HTTPS row above has only ever been able to say the
+        // certificate is *needed*.
+        //
+        // Painted once, from the seeded file. The switch above it can still be
+        // turned off before *Apply*, which would make these rows moot — but the
+        // pages this hands over to carry the same group, and re-painting a
+        // wizard step from a control the user has not committed yet would make
+        // the screen flicker between two answers while they think.
+        let certificate = CertificateView::new(&self.toasts);
+        certificate.paint(
+            config.toggle(Toggle::HttpsFiltering),
+            config.certificate_name(),
+        );
+        page_.add(certificate.widget());
 
         // The two questions the CLI's wizard asks that this page deliberately
         // does not, said out loud rather than silently dropped. `listen_address`

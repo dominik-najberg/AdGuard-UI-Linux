@@ -248,6 +248,16 @@ XDG_DATA_HOME=/tmp/firstrun cargo run -p adguard-gui
 
 That is a licensed install with no configuration — the exact state the assistant exists for, and the only way to exercise the seeding path without resetting your own config. Two warnings go with it. The directory now holds your licence key, so delete it when you are done. And a walk of the resulting Status page carries the owner's e-mail like any other licensed install, which is the thing `handoff.md` §4's "just use a sandbox" advice no longer protects you from.
 
+**That one file carries the certificate as well, which makes the deletion less optional than it sounds.** Measured while building the certificate check: `configure` in such a sandbox does not generate a new CA, it reproduces the machine's existing one — byte-identical, same fingerprint, dated weeks before the run (contract §8). For HTTPS filtering to work in the sandbox at all, `adguard.conf` must therefore carry the CA's **private key**, for a CA this system trusts. Copy it to `/tmp` and you have put that key somewhere it does not belong; `rm -rf` the sandbox as soon as you are finished with it.
+
+It also means the assistant's certificate rows are *correctly* invisible in that sandbox — the certificate it seeds is already trusted here. To see the unmet branches, point the check somewhere empty:
+
+```bash
+: > /tmp/empty-bundle.crt && ADGUARD_CA_BUNDLE=/tmp/empty-bundle.crt SYSTEM_CERT_DIR=/tmp/empty XDG_DATA_HOME=/tmp/firstrun cargo run -p adguard-gui
+```
+
+`$SYSTEM_CERT_DIR` is AdGuard's own variable, honoured by `install_cert.sh`; `$ADGUARD_CA_BUNDLE` is ours and exists only so those branches are reachable without removing a certificate from the machine's real trust store. `$ADGUARD_CERT_INSTALLER` does the same for the "installer is missing" branch.
+
 GUI code needs a display. Under Wayland, headless CI requires a compositor:
 
 ```bash
@@ -267,6 +277,8 @@ ffmpeg -f x11grab -video_size 1000x820 -i :99 -frames:v 1 -y /tmp/shot.png
 ```
 
 Make the virtual screen taller than the window if you want a whole `AdwPreferencesPage` in one frame; there is no way to scroll without `xdotool`, which is not installed here.
+
+**Unset `DISPLAY` before any of this, and know what it looks like when you forget.** A GNOME session exports `DISPLAY=:0`, and a harness that starts `Xvfb :99` without exporting `DISPLAY=:99` into the app's own environment hands the app the *real* display instead — so the window opens on the desktop through Xwayland while `ffmpeg -i :99` grabs an empty screen. The frame comes back black with nothing in it but the X cursor, which reads exactly like a window that failed to open. The AT-SPI walk is no help in spotting it: the accessibility bus is on the session bus and does not care which X server drew anything, so every probe still passes. `env -u DISPLAY -u WAYLAND_DISPLAY` on the way in, and `export DISPLAY=:99` inside.
 
 ---
 

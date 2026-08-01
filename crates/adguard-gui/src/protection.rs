@@ -18,6 +18,7 @@ use adw::prelude::*;
 use gtk4 as gtk;
 use libadwaita as adw;
 
+use crate::certificate::CertificateView;
 use crate::{abbreviate, toast, worker};
 
 /// A rendered switch and the caveat icon that belongs to it.
@@ -67,6 +68,21 @@ pub struct ProtectionPage {
     /// The tray shows these same six toggles, and this is how it learns their
     /// state — it holds no `Cli` and reads no config of its own.
     observer: RefCell<Option<Box<dyn Fn(&Config)>>>,
+
+    /// The certificate-trust rows under the HTTPS filtering switch, and the
+    /// name of the certificate they were last painted for. `None` until the
+    /// page has been built.
+    ///
+    /// Held rather than looked up because the trust check does not come from
+    /// `proxy.yaml` — it is three files elsewhere on the machine, so it has to
+    /// be repainted on window focus as well as on every reading of the config
+    /// (`architecture.md` §6).
+    certificate: RefCell<Option<Rc<CertificateView>>>,
+    /// Everything [`CertificateView::paint`] needs that only a reading of
+    /// `proxy.yaml` can supply: whether HTTPS filtering is on, and what the
+    /// certificate is called. Kept from the last `apply` so the focus re-check
+    /// does not have to re-read the file to repaint one row.
+    certificate_inputs: RefCell<(Option<bool>, String)>,
 }
 
 impl ProtectionPage {
@@ -78,6 +94,11 @@ impl ProtectionPage {
             rows: RefCell::new(Vec::new()),
             reconciling: Cell::new(false),
             observer: RefCell::new(None),
+            certificate: RefCell::new(None),
+            certificate_inputs: RefCell::new((
+                None,
+                String::from(adguard_core::trust::DEFAULT_CERTIFICATE_NAME),
+            )),
         });
         this.reload();
         this
@@ -85,6 +106,25 @@ impl ProtectionPage {
 
     pub fn widget(&self) -> &adw::Bin {
         &self.bin
+    }
+
+    /// Re-read the certificate check and repaint the rows that report it.
+    ///
+    /// Public because the window calls it when it regains focus, exactly as it
+    /// does for the root helper: the user's way out is a command they run in a
+    /// terminal, so the moment they come back is the moment the answer has
+    /// changed (`architecture.md` §6). It reads no config — the two things a
+    /// reading supplies are kept from the last one — so a focus event costs
+    /// three file reads and nothing else.
+    ///
+    /// Does nothing before the page has been built, which is also the state a
+    /// spinner or an error view is in: there is no group to paint yet, and
+    /// `build` paints it as soon as there is.
+    pub fn recheck_certificate(&self) {
+        let view = self.certificate.borrow();
+        let Some(view) = view.as_ref() else { return };
+        let (filtering, name) = &*self.certificate_inputs.borrow();
+        view.paint(*filtering, name);
     }
 
     /// Report every reading of `proxy.yaml` to `observer` — the tray's source
@@ -152,6 +192,7 @@ impl ProtectionPage {
 
     fn build(self: &Rc<Self>, config: &Config) -> adw::PreferencesPage {
         self.rows.borrow_mut().clear();
+        self.certificate.replace(None);
 
         let group = adw::PreferencesGroup::builder()
             .title("Protection")
@@ -167,6 +208,21 @@ impl ProtectionPage {
 
         let page = adw::PreferencesPage::new();
         page.add(&group);
+
+        // Directly under the switches, because it qualifies one of them: HTTPS
+        // filtering that is on with an untrusted certificate is the same shape
+        // of problem as DNS filtering that is on with no listener, and this
+        // page already refuses to let a switch imply protection it is not
+        // delivering. Not a caveat *on* the row, though, because unlike the DNS
+        // case the cure is not on another page — it is the two rows below.
+        //
+        // `AdwPreferencesPage` has no insert-at-index, so a group's position is
+        // its `add` order; with one group of six switches above it, this is as
+        // close to the row as the widget allows.
+        let certificate = CertificateView::new(&self.toasts);
+        page.add(certificate.widget());
+        self.certificate.replace(Some(certificate));
+
         self.apply(config);
         page
     }
@@ -280,6 +336,19 @@ impl ProtectionPage {
                 }
             }
         }
+
+        // Repainted from every reading, and deliberately **not** counted.
+        //
+        // The trust check reads three files elsewhere on the machine, so a
+        // change in it is not an external edit to `proxy.yaml` and must not
+        // raise the reconcile toast (`architecture.md` §3). The two inputs it
+        // takes from the config are stashed first, so the focus re-check can
+        // repaint without re-reading the file.
+        self.certificate_inputs.replace((
+            config.toggle(Toggle::HttpsFiltering),
+            config.certificate_name().to_string(),
+        ));
+        self.recheck_certificate();
 
         moved
     }

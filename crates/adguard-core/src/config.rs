@@ -248,6 +248,23 @@ impl Config {
         self.str_at(key::PROXY_MODE)
     }
 
+    /// The name AdGuard gives the CA it signs filtered connections with, which
+    /// is also the name of the file it writes (see
+    /// [`crate::paths::certificate`]).
+    ///
+    /// Falls back to the CLI's own seeded default rather than to `None`,
+    /// because every caller would have to make the same substitution and the
+    /// alternative — reporting "no certificate" for a config that merely omits
+    /// a cosmetic key — points the user at a step they have already taken. An
+    /// empty or blank value falls back too: `<data dir>/.pem` is a path nothing
+    /// will ever be at.
+    pub fn certificate_name(&self) -> &str {
+        self.str_at(key::ROOT_CERTIFICATE_NAME)
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .unwrap_or(crate::trust::DEFAULT_CERTIFICATE_NAME)
+    }
+
     /// Whether DNS filtering, if switched on, would actually do anything.
     ///
     /// In `manual` proxy mode the local DNS proxy only listens when
@@ -405,6 +422,13 @@ pub mod key {
     // `dns_filtering.enabled = false` and reports `Config has been updated`.
     pub const HTTPS_ECH: &str = "https_filtering.encrypted_client_hello";
     pub const FILTER_SECURE_DNS_MODE: &str = "https_filtering.filter_secure_dns_mode";
+
+    /// Read, never written. It names the CA on disk as well as the certificate,
+    /// so writing it would leave the trust check looking for a file that only a
+    /// regeneration will ever produce — and `configure` is the only thing that
+    /// generates one. The first-run assistant leaves it alone for the same
+    /// reason (`model::SETUP`).
+    pub const ROOT_CERTIFICATE_NAME: &str = "https_filtering.root_certificate_name";
 
     // --- the Advanced page ---
     pub const LISTEN_ADDRESS: &str = "listen_address";

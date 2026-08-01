@@ -643,7 +643,9 @@ The absent-id refusal is the one a UI will actually hit: two windows open, or a 
 
   It leaves a complete 220-line `proxy.yaml` with all 105 of its upstream comments — the same shape as a real install's — plus `user.txt`, `dns_user.txt`, `https_exclusions.txt`, `browsers.yaml` and the CA certificate. Ordinary `config set` works immediately afterwards and is as surgical as ever.
 
-  **One prompt is skipped in silence.** *"Do you want to install the certificate on the system?. You will need to enter your password to confirm"* is the only one with no no-TTY warning and no key — it is a privileged step, and it simply does not happen. So the seeded state is HTTPS filtering **on** with its CA outside the system trust store. That is a fact for the UI to surface, not to paper over; §8 rules out installing it for the user.
+  **One prompt is skipped in silence.** *"Do you want to install the certificate on the system?. You will need to enter your password to confirm"* is the only one with no no-TTY warning and no key — it is a privileged step, and it simply does not happen. So the seeded state is HTTPS filtering **on** with its CA outside the system trust store. That is a fact for the UI to surface, not to paper over; §8 rules out installing it for the user, and now also says what the UI shows instead.
+
+  And the CA it leaves is not necessarily a new one: against a directory holding a copied `adguard.conf` it comes back byte-identical to the source machine's, which is measured at the end of §8.
 
   **It is licence-gated.** Unlicensed it exits **1** with the usual complaint and usage dump on stderr — and seeds the file *anyway*, before reaching the gate, but without the CA. Activate first.
 
@@ -739,6 +741,71 @@ $ ls ~/.local/opt/adguard-cli/adguard_root_helper
 So the helper path must be taken from the **canonicalised** binary path. Joining `cli_binary().parent()` finds nothing here, and "nothing" is indistinguishable from "AdGuard is not installed" unless the code is careful to say which.
 
 The same applies to reading the three properties: follow symlinks. `stat` without `-L` reports the *link's* mode — `lrwxrwxrwx`, uid whatever — so a helper reached through a symlink would read as world-writable and not root-owned regardless of what it points at. Rust's `fs::metadata` follows; `fs::symlink_metadata` does not.
+
+### The certificate: AdGuard ships the installer too
+
+The second privileged step, and it resolves the same way as the first. §7 records that `configure` generates the CA and then skips its own *"Do you want to install the certificate on the system?"* prompt in silence — so every install this app sets up ends with HTTPS filtering on and the CA untrusted, and something has to say so.
+
+**AdGuard's own manual-install route is a script beside the binary**, named in the strings next to the symbol that builds the command:
+
+```text
+get_manual_install_script
+install_cert.sh
+ -f "{}"
+"{}" -c "{}"{}
+Cert installer not exist
+```
+
+So the command to show is `"<path>/install_cert.sh" -c "<path>/AdGuard CLI CA.pem"`, quotes included — AdGuard's own format string, and the quoting is load-bearing because the certificate is named after `https_filtering.root_certificate_name`, whose seeded default has two spaces in it. `-f "<profile>"` adds a Firefox profile and the GUI does not use it.
+
+The script is a sibling of the *resolved* binary, exactly like the root helper, and it is shipped `-rwxr-x---` — owner-only, which is enough, since the owner is who runs it:
+
+```console
+$ ls -la ~/.local/opt/adguard-cli/{install_cert.sh,certutil}
+-rwxr-x--- 1 potworny potworny    7154 May 27 15:21 install_cert.sh
+-rwxr-xr-x 1 potworny potworny 4865856 May 27 15:21 certutil
+```
+
+**It elevates itself**, which is why nothing here needs to: `sudo_command='sudo'` when `$EUID` is not 0, and every privileged line runs through that variable. It also does the browser stores with the `certutil` beside it — Firefox profiles from `profiles.ini`, Chrome and Chromium from `~/.pki/nssdb` — which the GUI's check cannot see and must therefore not imply.
+
+Four facts from the script and from `update-ca-certificates` decide the shape of the check:
+
+| Measured | Consequence |
+| --- | --- |
+| The anchor directory is the first of `/usr/local/share/ca-certificates`, `/usr/share/pki/trust/anchors`, `/etc/pki/ca-trust/source/anchors`, `/etc/ca-certificates/trust-source/anchors` that exists, and `$SYSTEM_CERT_DIR` overrides the search | The check reads the same list in the same order and honours the same variable, or it reports on a different place from the one the command writes to. Only the first exists on Ubuntu |
+| The installed copy is `<certificate name>.crt` — `CERT_NAME=$(basename "${CERT_PATH}" .pem)`, then `${SYSTEM_CERT_DIR}/${CERT_NAME}.crt` | Look for `.crt`, not the `.pem` the file is called everywhere else. `update-ca-certificates` scans `find -L "$LOCALCERTSDIR" -type f -name '*.crt'` and ignores anything else in silence |
+| The script's idempotence check is `if [ ! -f "${SYSTEM_CERT_PATH}" ]`, else `echo "Certificate already exists in system trust store."` | It tests the **path**, not the contents. A CA that was regenerated after being installed leaves a file of the right name holding the wrong certificate, and re-running the installer reports success without replacing it. The check compares bytes and reports that state separately, because it is the one AdGuard's own tooling will not repair |
+| `update-ca-certificates` appends whole PEM bodies to `/etc/ssl/certs/ca-certificates.crt` and symlinks `$(basename … .crt \| sed -e 's/ /_/g' -e 's/[()]/=/g' -e 's/,/_/g').pem` beside it | The bundle carries **no names at all**. `grep -c AdGuard /etc/ssl/certs/ca-certificates.crt` returns `0` on a machine where the certificate *is* trusted — measured here. Membership has to be decided on the certificate's own base64 body |
+
+The reading this machine gives, which is the fully-installed one:
+
+```console
+$ ls -la /usr/local/share/ca-certificates/ /etc/ssl/certs/AdGuard_CLI_CA.pem
+-rw-r--r-- 1 root root 1143 Jul 12 08:47 'AdGuard CLI CA.crt'
+lrwxrwxrwx 1 root root   51 Jul 12 08:47 /etc/ssl/certs/AdGuard_CLI_CA.pem -> '/usr/local/share/ca-certificates/AdGuard CLI CA.crt'
+$ grep -c AdGuard /etc/ssl/certs/ca-certificates.crt
+0
+```
+
+**Generation is not measured, deliberately.** `adguard-cli cert` — *"Generate a certificate for HTTPS filtering"* — is the command for a data directory with no CA, and the GUI shows it, but nobody has run it: it offers to install into the **system** trust store, which is a machine-wide change no test here is entitled to make, and it is unmeasured whether it reuses or replaces an existing CA. The UI therefore only ever *names* it, in AdGuard's own words, and never claims what it will do to a certificate that already exists.
+
+### The CA travels in `adguard.conf`, and so does the licence
+
+New, and found by driving the first-run assistant against the sandbox `building.md` §3 describes — a fresh directory holding nothing but a copied `adguard.conf`. After `configure`, the CA that appeared was **not a new one**:
+
+```console
+$ cmp /tmp/firstrun/adguard-cli/'AdGuard CLI CA.pem' ~/.local/share/adguard-cli/'AdGuard CLI CA.pem' && echo identical
+identical
+$ openssl x509 -in /tmp/firstrun/adguard-cli/'AdGuard CLI CA.pem' -noout -dates
+notBefore=Jul 11 06:47:06 2026 GMT
+```
+
+Byte-identical, same SHA-256 fingerprint, and dated three weeks before the run that produced it. `adguard.conf` is a single 3096-byte line of opaque ASCII with no PEM markers in it, so nothing here says *how* — only that the certificate is reproduced from that file rather than generated, since it was the only file in the directory.
+
+Two consequences, and the second is the one that matters:
+
+- §7's *"leaves … the CA certificate"* is true but reads as though the wizard makes one. On a machine that has ever had a licence in that directory, it restores one.
+- **Copying `adguard.conf` into a sandbox carries the certificate as well as the licence key** — and HTTPS filtering in that sandbox works against a CA the system already trusts, which means the file necessarily carries the CA's *private key* too. `building.md` §3's instruction to delete the directory afterwards was written about a licence key. It is now about rather more than that.
 
 ---
 

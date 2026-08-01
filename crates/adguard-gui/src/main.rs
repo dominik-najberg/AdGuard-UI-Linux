@@ -6,6 +6,7 @@
 //! measured CLI behaviour the wrapper encodes.
 
 mod advanced;
+mod certificate;
 mod dns;
 mod filters;
 mod protection;
@@ -219,7 +220,7 @@ fn start(
         Ok(cli) => {
             let view = main_view(&cli);
             window.set_content(Some(&view.root));
-            connect_helper_recheck(&window, &view);
+            connect_focus_rechecks(&window, &view);
             Ok(view)
         }
         Err(err) => {
@@ -288,7 +289,7 @@ fn install_main_view(
 ) {
     let view = main_view(cli);
     window.set_content(Some(&view.root));
-    connect_helper_recheck(window, &view);
+    connect_focus_rechecks(window, &view);
 
     if let Err(reason) = connect_tray(app, window, &view) {
         eprintln!("adguard-ui: continuing without a tray icon ({reason})");
@@ -599,9 +600,11 @@ fn main_view(cli: &Cli) -> MainView {
     }
 }
 
-/// Re-read AdGuard's root-helper check whenever the window regains focus.
+/// Re-read the two checks that live outside `proxy.yaml` whenever the window
+/// regains focus: AdGuard's root helper, and whether its certificate is
+/// trusted.
 ///
-/// The user's way out of the unmet state is a `sudo` command they run in a
+/// The user's way out of either unmet state is a command they run in a
 /// terminal, so the moment they come back to this window is exactly the moment
 /// the answer has changed — and hunting for a refresh button to be told so
 /// would make the instruction feel like it had not worked
@@ -609,12 +612,16 @@ fn main_view(cli: &Cli) -> MainView {
 ///
 /// `is-active` rather than a focus event on the widget: the check is about the
 /// window as a whole, and the row the user needs to see may not be the one with
-/// the keyboard focus. It fires on losing focus too, which costs one `stat`.
-fn connect_helper_recheck(window: &adw::ApplicationWindow, view: &MainView) {
+/// the keyboard focus. It fires on losing focus too, which costs one `stat` and
+/// three small reads — both checks are re-read rather than cached, and both are
+/// cheap enough to do on the main loop for that reason.
+fn connect_focus_rechecks(window: &adw::ApplicationWindow, view: &MainView) {
     let advanced = view.advanced.clone();
+    let protection = view.protection.clone();
     window.connect_is_active_notify(move |window| {
         if window.is_active() {
             advanced.recheck_helper();
+            protection.recheck_certificate();
         }
     });
 }

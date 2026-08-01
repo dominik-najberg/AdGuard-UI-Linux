@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 
 const BINARY: &str = "adguard-cli";
 const ROOT_HELPER: &str = "adguard_root_helper";
+const CERT_INSTALLER: &str = "install_cert.sh";
 const DATA_SUBDIR: &str = "adguard-cli";
 const CONFIG_FILE: &str = "proxy.yaml";
 
@@ -60,12 +61,52 @@ pub fn cli_binary() -> Option<PathBuf> {
 /// what its mode is, is [`crate::helper::RootHelper`]'s question. `None` means
 /// only that the CLI itself could not be located.
 pub fn root_helper() -> Option<PathBuf> {
+    beside_binary(ROOT_HELPER)
+}
+
+/// AdGuard's own certificate installer, beside the **resolved** binary.
+///
+/// The script the CLI names as its manual-install route — `install_cert.sh`,
+/// which appears in the binary's strings next to `get_manual_install_script`
+/// (see [`crate::trust`]). It copies the CA into the system's anchor directory,
+/// rebuilds the trust store and adds the certificate to Firefox and Chrome with
+/// the `certutil` shipped beside it, elevating itself with `sudo` on the way.
+///
+/// Found the same way as [`root_helper`] and for the same measured reason: the
+/// entry on `$PATH` is a symlink on the reference machine, and the installer is
+/// a sibling of the real file rather than of the link.
+///
+/// Returns the path whether or not anything is there. `None` means only that
+/// the CLI itself could not be located.
+pub fn cert_installer() -> Option<PathBuf> {
+    beside_binary(CERT_INSTALLER)
+}
+
+/// AdGuard's data directory holds the CA it generates for HTTPS filtering,
+/// named after the `https_filtering.root_certificate_name` setting.
+///
+/// The naming rule is AdGuard's, and it is measured rather than assumed: the
+/// binary composes the DER copy's path as `{}/{}.cer` and the file on disk is
+/// `SSL/AdGuard CLI CA.cer`, against a config whose `root_certificate_name` is
+/// `AdGuard CLI CA`. The PEM this returns is the same name in the data
+/// directory itself, which is where `certificates_cache: '.'` puts it.
+///
+/// Note the certificate is *named* by a setting the user can change, so a
+/// caller with a [`crate::Config`] in hand should pass
+/// [`crate::Config::certificate_name`] rather than a constant — a renamed CA is
+/// otherwise indistinguishable from an install that never generated one.
+pub fn certificate(name: &str) -> Option<PathBuf> {
+    Some(data_dir()?.join(format!("{name}.pem")))
+}
+
+/// A file shipped alongside the **resolved** `adguard-cli` binary.
+fn beside_binary(name: &str) -> Option<PathBuf> {
     let binary = cli_binary()?;
     // `canonicalize` needs the target to exist, which it does — `cli_binary`
     // only returns paths that passed `is_file`. Falling back to the unresolved
     // path keeps a non-symlink install working if it ever failed.
     let resolved = std::fs::canonicalize(&binary).unwrap_or(binary);
-    Some(resolved.parent()?.join(ROOT_HELPER))
+    Some(resolved.parent()?.join(name))
 }
 
 /// AdGuard CLI's data directory: config, databases, logs, certificates.

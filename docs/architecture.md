@@ -147,7 +147,7 @@ An `AdwApplicationWindow` with `AdwNavigationSplitView`, plus `AdwToastOverlay` 
 | View | Contents | Backing |
 | --- | --- | --- |
 | **Status** | Hero panel: protection on/off, one primary action, restart; three at-a-glance figures; HTTP + SOCKS5 endpoints; licence state | `status`, `license`, plus `proxy.yaml` and `agflm_*.db` for the figures |
-| **Protection** | `AdwSwitchRow`s: ad blocking, HTTPS filtering, stealth mode, DNS filtering, Safe Browsing, CRLite | `proxy.yaml` → `config set` |
+| **Protection** | `AdwSwitchRow`s: ad blocking, HTTPS filtering, stealth mode, DNS filtering, Safe Browsing, CRLite; the certificate-trust check under them | `proxy.yaml` → `config set`, plus the system trust store (§6) |
 | **Filters** | `AdwPreferencesGroup` per `filter_group`, switch per filter, custom-filter add | `agflm_standard.db` → `filters …` |
 | **DNS** | DNS filter list, user rules, upstream/fallback/bootstrap servers, listen port | `agflm_dns.db`, `dns_filtering.*` |
 | **Advanced** | Ports, listen address, auth, outbound proxy, worker threads, log level | `proxy.yaml` → `config set` |
@@ -174,6 +174,7 @@ Notes that shape the widgets:
   A **confirmation, not an undo.** Custom ids are never reused: a list removed and re-fetched comes back as a *new* row, so anything holding an id across a removal holds a dangling reference. There is nothing to offer an undo against, which is what makes the dialog the only honest place to put the decision. It names the URL rather than only the title, because a list installed without a `! Title:` header has no name of its own and the URL is the sole thing that can bring it back — and it points at the switch, since "I wanted it off, not gone" is the mistake being guarded against.
 
   **Verified from the database, never from the confirmation.** `Filter [ID: …] removed` prints at exit 0 whatever happened. The check is the mirror of install's: there, a row that was not there before; here, a row that is not there after. An unreadable catalogue is reported as neither outcome — claiming a deletion we cannot see would be the worst direction to guess in.
+- **A switch that reads on and cannot work is marked, wherever the reason lives.** DNS filtering without a listen port is one; HTTPS filtering with an untrusted certificate is the other, and it is worse, because the seeded state of *every* install is exactly that (contract §7). The Protection page carries the certificate check as a group directly under the switches, and the first-run assistant carries the same group under its own HTTPS question — the assistant because that screen is the moment the state is created, and the page because it is where a user goes back to. The rows go away entirely once the certificate is trusted, and never appear while HTTPS filtering is off. §6 has the design; the point here is that the two cases are treated the same way and neither is allowed to be silent.
 - **Distinguish "off" from "unknown".** A key that is absent, or holds something that is not a boolean, renders as an insensitive row reading *unavailable* — never as off. Claiming ad blocking is disabled when we simply could not read the setting is the more dangerous of the two errors.
 - **First run is two movements, not one: seed, then set.** This bullet used to read "an `AdwNavigationView` assistant issuing discrete `config set` calls", which measurement retired — until `proxy.yaml` exists, `config set` refuses every real key, and nothing but `configure` creates that file (contract §5). So the assistant runs `configure` **once**, on an explicit press, and only ever when the file is absent; everything after that is the ordinary write path. The guard lives in `Cli::configure` beside the spawn rather than beside the button, because the branch it prevents resets the user's whole configuration and a guard next to a call site is one someone can add a second call site around.
 
@@ -191,9 +192,11 @@ Set the GTK application ID, the `.desktop` filename, and `StartupWMClass` to the
 
 ## 6. Privileged operations
 
-`auto` proxy mode is in scope for v1. **This application performs no privileged operation and ships no privileged component** — no helper binary, no polkit action, no `pkexec` call, no setuid bit.
+Two things this application touches need root, and it takes neither: `auto` proxy mode, and installing AdGuard's certificate into the system trust store. **This application performs no privileged operation and ships no privileged component** — no helper binary, no polkit action, no `pkexec` call, no setuid bit.
 
-That is possible because AdGuard already ships the escalation path, which an earlier revision of contract §8 missed. `adguard-cli` gates auto mode on `adguard_root_helper` being `owned_by_root`, `has_suid` and `is_executable`, and when the check fails it names the fix itself: `sudo <path>/adguard_root_helper -s`. Once that has run, switching mode is an ordinary unprivileged `config set proxy_mode auto`.
+That is possible because AdGuard already ships the escalation path for both — a fact an earlier revision of contract §8 missed for the first of them, and which turned out to hold for the second as well.
+
+The rest of this section is auto mode; the certificate has a subsection of its own at the end, because the two are the same design applied twice and the second is the one every install meets. `adguard-cli` gates auto mode on `adguard_root_helper` being `owned_by_root`, `has_suid` and `is_executable`, and when the check fails it names the fix itself: `sudo <path>/adguard_root_helper -s`. Once that has run, switching mode is an ordinary unprivileged `config set proxy_mode auto`.
 
 Design:
 
@@ -211,7 +214,21 @@ It also means the unmet state has to be **rendered**, not merely prevented. A te
 
 The corollary is worth stating for anyone tempted to add one later: a root-invoked helper of ours would have to be explicit about which user's config it edits — `adguard-cli` and its data live under `~/.local`, so it would need the target `$HOME`/UID passed explicitly and would have to refuse any path outside that user's data dir. Getting that wrong is a local privilege-escalation bug. Not writing the helper is how this project avoids owning that problem.
 
-`data/io.github.dominik-najberg.AdGuardUI.policy` was deleted with this work. It declared three polkit actions against `/usr/libexec/adguard-ui-helper`, a binary that was never written and now never will be, and its own header still asserted that AdGuard "ships no polkit policy … so there is nothing to reuse" — the conclusion contract §8 retracted. Nothing installed it; `building.md` §4 says so and now says how to remove it if an older checkout did.
+### The certificate is the same shape of problem
+
+HTTPS filtering signs every connection it inspects with a CA generated on this machine, and until that CA is in the system trust store the filtering it enables breaks the first HTTPS site the user opens. `configure` generates it and then skips its own install prompt in silence, because that step needs a password and there is no TTY (contract §7) — so **every install this application sets up ends in the unmet state**, which makes it the least hypothetical case in this section.
+
+It resolves exactly like auto mode, and for the same reason: AdGuard ships the installer. `install_cert.sh`, beside the resolved binary, elevates itself with `sudo`, copies the certificate into the system's anchor directory, rebuilds the trust store, and adds the certificate to Firefox and Chrome with the `certutil` shipped next to it. So:
+
+1. **Detect.** `trust::CaTrust` reads three files and reports three facts — the certificate exists, a byte-identical copy is anchored, and the bundle carries it — in the order the machine applies them, so a user who ran the installer and still has broken HTTPS learns which step did not take. Every path is a parameter, with `$SYSTEM_CERT_DIR` (AdGuard's own variable) and `$ADGUARD_CA_BUNDLE` (ours) overriding the search. That is not symmetry for its own sake: on the reference machine the certificate **is** trusted, so here it is the *unmet* branches that would otherwise be unreachable — the mirror image of the root helper, where the met branch was the unreachable one.
+2. **Instruct.** The Protection page carries the rows, directly under the switch they qualify, and the first-run assistant carries them too — that screen is where the state is created. AdGuard's own command, a copy button, no way to run it from the app, and a re-check when the window regains focus.
+3. **There is no third step.** Unlike auto mode there is nothing for the app to write afterwards: the trust store is the whole of it, and once the user has run the command the rows disappear.
+
+Four unmet states rather than one, because the fixes differ: no certificate at all (`adguard-cli cert`), not installed (the installer), installed but the trust store not rebuilt (`sudo update-ca-certificates`), and a **different** certificate already occupying the name. That last one is the reason the check compares bytes instead of asking whether a path exists: AdGuard's installer tests for the path and stops, reporting success, so a regenerated CA leaves a state its own tooling will not repair and a name-only check would call trusted (contract §8).
+
+**What the check cannot see, the wording admits.** Firefox and Chrome keep their own NSS databases and read nothing from the system store; the installer covers them and this check does not. So the rows say the machine trusts the certificate, never that every browser on it does.
+
+`data/io.github.dominik-najberg.AdGuardUI.policy` was deleted with the auto-mode work. It declared three polkit actions against `/usr/libexec/adguard-ui-helper`, a binary that was never written and now never will be, and its own header still asserted that AdGuard "ships no polkit policy … so there is nothing to reuse" — the conclusion contract §8 retracted. Nothing installed it; `building.md` §4 says so and now says how to remove it if an older checkout did.
 
 ---
 
@@ -224,6 +241,8 @@ The corollary is worth stating for anyone tempted to add one later: a root-invok
 Userscripts are out because there is only one. `userscripts list` returns a single entry, `adguard-extra`, and `proxy.yaml` says in AdGuard's own words that only AdGuard Extra is supported; with installation deferred, the feature is one switch for one script that ships pre-enabled. A sidebar page for that is navigation without content. This section is the scope authority — §5 and `handoff.md` no longer list a Userscripts view, and if the upstream ever supports more, this is the decision to revisit.
 
 Ship the tray + core controls first; it is the part that replaces day-to-day terminal use.
+
+**Added after v1 closed:** the certificate-trust check (§6). It is not a scope change so much as the other half of a v1 feature — HTTPS filtering was in from the start, and shipping it without saying whether its certificate is trusted left every install in a state the app could see and would not mention.
 
 Status: Status, Protection, Filters (HTTP), DNS, Advanced and Stealth are done; both filter pages install custom lists by URL (§5); licence activation lives on the Status page; the first-run assistant seeds an unconfigured install and hands the window to the pages when it is finished (§5); the tray carries start/stop plus the six Protection toggles as quick toggles (§4); the config monitor reports an external edit with a toast, gated on a row the user can see having moved (§3); the Advanced page carries the proxy mode with AdGuard's root-helper check beside it (§6); and a custom list can be removed, behind a confirmation, on both filter pages. **v1 is complete.**
 
