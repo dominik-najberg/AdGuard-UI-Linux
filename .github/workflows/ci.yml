@@ -1,0 +1,88 @@
+# Build the workspace and run the default test suite on a machine that is not
+# the maintainer's. That is the whole point of it: `cargo test --workspace`
+# already runs locally before every commit, and the one claim a local run
+# cannot make is that this builds and passes somewhere clean.
+#
+# Three things this deliberately does NOT do, each for a reason written down
+# elsewhere in the repo:
+#
+#   * No `cargo fmt --check`. The tree is hand-formatted and that check has
+#     been dirty since the first commit — the measured-behaviour tables in
+#     config.rs, cli.rs and model.rs do not survive rustfmt (docs/handoff.md
+#     §4). A gate on it would fail every run for a reason nobody intends to fix.
+#   * No `--ignored`. Four suites are excluded from a plain `cargo test`
+#     because they invoke the real `adguard-cli`; two of them mutate the
+#     configuration of the machine they run on (docs/building.md §3). They are
+#     for a developer at a keyboard, never for an unattended runner.
+#   * No clippy gate. Its warning count on this tree is unmeasured, so
+#     `-D warnings` would be a cleanup job disguised as a green checkmark.
+#
+# The `*_live` suites need no special handling: they skip rather than fail when
+# AdGuard CLI is absent, which is every runner.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A second push to the same branch makes the first run's answer irrelevant.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    # Not the runner's own image: `ubuntu-latest` was Ubuntu 24.04 when this
+    # was written, which ships libadwaita 1.5, and this workspace takes the
+    # crate's `v1_7` feature — so a native run fails at build time on a toolkit
+    # that is simply too old. The container pins the distribution the
+    # application is developed against (docs/building.md §1) and keeps the job
+    # honest whichever way the runner label moves later.
+    container: ubuntu:26.04
+
+    steps:
+      # Before checkout, because a container image this bare has no git: the
+      # checkout action would silently fall back to downloading a tarball, and
+      # `git status` in a later step would then describe nothing.
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential pkg-config libgtk-4-dev libadwaita-1-dev \
+            ca-certificates curl git
+          pkg-config --modversion gtk4 libadwaita-1
+
+      - uses: actions/checkout@v4
+
+      # rustup rather than the distribution's cargo: the gtk4 crates expect a
+      # newer toolchain than Ubuntu packages (docs/building.md §1). The floor is
+      # `rust-version` in Cargo.toml, currently 1.85.
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Cargo version
+        run: cargo --version && rustc --version
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-
+
+      # `--locked` on both: Cargo.lock is committed, and a run that quietly
+      # resolves a different dependency set is not testing what was pushed.
+      - name: Build
+        run: cargo build --workspace --locked
+
+      - name: Test
+        run: cargo test --workspace --locked

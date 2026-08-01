@@ -263,10 +263,32 @@ mod tests {
         );
     }
 
+    /// The two tests below write a file and assert it is **not** root-owned,
+    /// which is false when the suite itself runs as root: the file is then
+    /// owned by root because the process that created it is. That is not a
+    /// hypothetical — a container runs as root by default, and CI is a
+    /// container (`.github/workflows/ci.yml`), where these two were the only
+    /// failures on an otherwise green run.
+    ///
+    /// Skipping is the same answer the cases above give when `/bin/ls` or
+    /// `/etc/hostname` is absent: the property under test cannot be reproduced
+    /// here, and an assertion made anyway would be describing the runner
+    /// rather than `inspect`. The met branch is unaffected — it reads
+    /// `/usr/bin/passwd`, whose ownership belongs to nobody's test process.
+    fn running_as_root() -> bool {
+        // SAFETY: `geteuid` reads a process attribute, takes no arguments and
+        // cannot fail. It is `unsafe` only because it is an extern fn.
+        unsafe { libc::geteuid() == 0 }
+    }
+
     /// A file owned by this user, executable, no suid — the shape AdGuard's
     /// helper actually ships in, reproduced without naming it.
     #[test]
     fn a_user_owned_executable_is_missing_the_two_that_matter() {
+        if running_as_root() {
+            eprintln!("skipping: running as root, so a file this test writes is root-owned");
+            return;
+        }
         let dir = std::env::temp_dir().join("adguard-ui-helper-test");
         let _ = fs::create_dir_all(&dir);
         let path = dir.join("stand-in");
@@ -292,6 +314,10 @@ mod tests {
     /// Not executable either — every property missing.
     #[test]
     fn a_plain_user_owned_file_is_missing_all_three() {
+        if running_as_root() {
+            eprintln!("skipping: running as root, so a file this test writes is root-owned");
+            return;
+        }
         let dir = std::env::temp_dir().join("adguard-ui-helper-test");
         let _ = fs::create_dir_all(&dir);
         let path = dir.join("not-a-program");

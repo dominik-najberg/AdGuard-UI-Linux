@@ -28,6 +28,12 @@ install -Dm755 "$REPO/target/release/$NAME" "$STAGE/bin/$NAME"
 strip --strip-unneeded "$STAGE/bin/$NAME"
 cp -r "$REPO/data" "$STAGE/data"
 
+# The .deb points its copyright file at /usr/share/common-licenses/GPL-3, which
+# Debian policy provides for and a tarball has no equivalent of: this one may be
+# carried to a machine that has no such directory. GPL-3.0-or-later §4 wants a
+# copy of the licence conveyed with the program, so it travels in the payload.
+install -Dm644 "$REPO/LICENSE" "$STAGE/LICENSE"
+
 install -Dm644 /dev/stdin "$STAGE/README" <<EOF
 AdGuard UI $VERSION ($ARCH)
 

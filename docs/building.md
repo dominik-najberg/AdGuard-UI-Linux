@@ -208,6 +208,24 @@ cargo test -p adguard-core --test config_mutate -- --ignored --nocapture
 
 The `*_live` suites are safe and run by default, and **skip** rather than fail when AdGuard CLI is not installed. `config_live` and `filters_live` read the real `proxy.yaml` and filter databases. `license_live` is the one that shells out — `adguard-cli license`, read-only, ~20 ms — because the licensed three-line reading cannot be captured in a sandbox: a sandbox is unlicensed by construction. It skips again when this install is not licensed, and it is written so that no assertion message can print the key.
 
+### Continuous integration
+
+`.github/workflows/ci.yml`, added 1 August 2026: `cargo build --workspace --locked` and `cargo test --workspace --locked` on push to `main`, on pull requests, and on demand. It runs no `cargo fmt --check` (§4 of `handoff.md` — the tree is hand-formatted and that check is deliberately dirty), no clippy gate, and never `--ignored`. The file says so at the top, so that nobody adds one of them back as an obvious omission.
+
+**It runs in an `ubuntu:26.04` container rather than on the runner image.** `ubuntu-latest` was Ubuntu 24.04 when this was written, which ships **libadwaita 1.5** against a workspace that takes the crate's `v1_7` feature: a native job does not fail a test, it fails to build at all. The container also pins the distribution §1 describes, so a green run means what this document says it means.
+
+**Two tests had to change to survive it, and the reason is worth keeping.** A container runs as **root** by default, so a file a test writes into `/tmp` is *root-owned* — which is the one thing `helper.rs`'s two user-owned cases exist to assert the absence of. They failed on the first clean run and nothing local could have predicted it: on a developer's machine the premise is true by construction. Both now skip when `geteuid() == 0`, printing why, which is the same answer their neighbours already give when `/bin/ls` or `/etc/hostname` is missing. The met case is unaffected — it reads `/usr/bin/passwd`, which no test process owns.
+
+That is the whole argument for having CI on a project with one maintainer: not that the suite might break, but that a suite passing on the machine it was written on says nothing about a machine it was not.
+
+The workflow can be rehearsed locally, which is how the above was found rather than discovered on a push:
+
+```bash
+docker run --rm -v "$PWD:/work" -w /work ubuntu:26.04 bash -c 'apt-get update -qq && apt-get install -y --no-install-recommends build-essential pkg-config libgtk-4-dev libadwaita-1-dev ca-certificates curl >/dev/null && curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal >/dev/null && . "$HOME/.cargo/env" && cargo test --workspace --locked'
+```
+
+Copy the tree somewhere disposable first, or pass a `target/` the container can have: it builds as root and leaves root-owned artifacts behind in whatever directory it is given, which the next local `cargo` cannot remove.
+
 ### Driving the GUI against a fake config
 
 The same `$XDG_DATA_HOME` trick works on the app, which is the only practical way to see how a page renders against a config you would never create on purpose — a port holding a float, a key missing outright, a value outside its enum:
@@ -281,6 +299,38 @@ ffmpeg -f x11grab -video_size 1000x820 -i :99 -frames:v 1 -y /tmp/shot.png
 Make the virtual screen taller than the window if you want a whole `AdwPreferencesPage` in one frame; there is no way to scroll without `xdotool`, which is not installed here.
 
 **Unset `DISPLAY` before any of this, and know what it looks like when you forget.** A GNOME session exports `DISPLAY=:0`, and a harness that starts `Xvfb :99` without exporting `DISPLAY=:99` into the app's own environment hands the app the *real* display instead — so the window opens on the desktop through Xwayland while `ffmpeg -i :99` grabs an empty screen. The frame comes back black with nothing in it but the X cursor, which reads exactly like a window that failed to open. The AT-SPI walk is no help in spotting it: the accessibility bus is on the session bus and does not care which X server drew anything, so every probe still passes. `env -u DISPLAY -u WAYLAND_DISPLAY` on the way in, and `export DISPLAY=:99` inside.
+
+### Screenshots for the README
+
+`docs/screenshots/` was captured this way on 1 August 2026, one frame per page, and the recipe is worth keeping because two of its four steps are not obvious.
+
+Select the page over AT-SPI as above, then grab with `-draw_mouse 0` — without it the X root cursor lands in the middle of the frame, which on a 1000×1400 screen is somewhere in the middle of the page.
+
+**The window is 880×720 and no window manager is present to resize it**, so a page taller than that is cut off and there is nothing to scroll with. This is the `xdotool` trap again in its third shape: resizing does not need a window manager either, it needs `XMoveResizeWindow`, and with no WM present nothing arbitrates the request. The same twenty lines as `xfocus`, with one call changed:
+
+```c
+/* xresize.c — cc -O1 -o xresize xresize.c -lX11 */
+#include <X11/Xlib.h>
+#include <stdlib.h>
+#include <stdio.h>
+
+int main(int argc, char **argv) {
+    if (argc < 4) { fprintf(stderr, "usage: xresize <window-id> <w> <h>\n"); return 2; }
+    Display *d = XOpenDisplay(NULL);
+    if (!d) { fprintf(stderr, "xresize: cannot open display\n"); return 1; }
+    XMoveResizeWindow(d, (Window) strtoul(argv[1], NULL, 0), 0, 0,
+                      (unsigned) atoi(argv[2]), (unsigned) atoi(argv[3]));
+    XSync(d, False);
+    XCloseDisplay(d);
+    return 0;
+}
+```
+
+Resize once after the window maps, re-read the geometry from `xwininfo` afterwards rather than assuming the request was honoured, and crop each frame to it.
+
+**Three values in those frames belong to this machine and none of them may be committed**: the licence owner's e-mail and the four unmasked characters of the key, both on the Status page, and the Stealth page's custom `X-Forwarded-For` address. `handoff.md` §4's redactor covers a *terminal* dump and does nothing for a PNG. Repaint them instead — Noto Sans at 11 px for a row subtitle and 13 px for an entry-row value is what the app rendered with here, since that is what Cantarell resolves to on this machine, so a placeholder drawn that way is indistinguishable from a real row.
+
+The unmet certificate, root-helper and browser-integration groups are invisible on this machine, so a screenshot of them needs the overrides above — but check what the *command* row ends up saying before shipping the frame. Pointing `$ADGUARD_ROOT_HELPER` at `/bin/true` renders `sudo /bin/true -s`, which is a real rendering of a fake install and reads as a real instruction.
 
 ### Taking focus away and giving it back
 
@@ -431,7 +481,9 @@ Six things the two scripts do that are worth knowing before changing them:
 
 **There is no `Depends: adguard-cli`, and there cannot be.** No such apt package exists — AdGuard CLI is a third-party install under `$HOME`, and `dpkg` resolves dependencies only against installed packages, so naming it would make the `.deb` uninstallable on every machine. The requirement is declared where a user will actually meet it: in the package description, in the tarball's README, and at runtime, where `paths::cli_binary` returns `None` and `main.rs`'s `missing_cli_view` renders an explanation instead of crashing — which is what "fail with a clear message" meant, and it was already true before there was anything to package.
 
-Two things the packaging does **not** do, on purpose. It ships no `LICENSE` file, because the repository has none — `Cargo.toml` declares `GPL-3.0-or-later` and the `.deb`'s `copyright` points at `/usr/share/common-licenses/GPL-3`, which is correct for Debian and Ubuntu and is not a substitute for adding the text to the repository. And it writes no `changelog.Debian.gz`: Debian policy wants one for an archive upload, and this package is not built for an archive.
+**The two packages carry the licence differently, and that is deliberate.** The repository has held `LICENSE` — the verbatim GPLv3, byte-identical to `/usr/share/common-licenses/GPL-3` — since 1 August 2026. The `.deb` still ships no copy of it: its `copyright` file points at that system path, which is what Debian policy asks for and what every package on the machine already does. The tarball ships the file itself, because it is the one route by which this build reaches a machine whose `/usr/share/common-licenses` may not exist, and GPL-3.0-or-later §4 wants a copy conveyed with the program rather than a reference to one.
+
+One thing the packaging still does **not** do, on purpose: it writes no `changelog.Debian.gz`. Debian policy wants one for an archive upload, and this package is not built for an archive.
 
 ---
 

@@ -65,7 +65,13 @@ Nothing is queued, and that is the honest answer rather than a gap in this docum
 - **Stop.** v1 and the three post-v1 checks are done and verified. A session that adds nothing is a legitimate outcome for a project in this state.
 - **§3 item 6, the activation success leg** — the only functional gap left, and **the owner's call, not an agent's**: it needs a real account and spends a device slot.
 - **The v2 backlog** in `architecture.md` §7: live blocked-request stats, userscripts, HAR capture, the `speed` benchmark UI, import/export, full advanced-settings parity. Each is out for a recorded reason; read the reason before reopening it.
-- **Two things nobody has decided.** The repo has no `README.md` — `building.md` is thorough and the tarball ships one, but a reader landing on the repository gets nothing — and there is no CI. Neither is a gap in the product; both are the kind of thing to ask about rather than assume.
+- **Both of the things nobody had decided were settled on 1 August 2026**, by the project owner, and neither is open any more.
+
+  **`README.md` is written**, with seven screenshots in `docs/screenshots/` captured by the recipe now in `building.md` §3. Two things to know before regenerating any of them: the Status and Stealth frames carry **placeholder** values repainted over this machine's own, and the unmet-prerequisite frame is a real rendering against sandbox paths, which the README says plainly rather than leaving a reader to assume this machine is misconfigured. `LICENSE` is in too — the verbatim GPLv3, byte-identical to `/usr/share/common-licenses/GPL-3`, which the tarball now ships and the `.deb` still points at rather than duplicating (`building.md` §5).
+
+  **CI is `.github/workflows/ci.yml`**: build and the default test suite, on push to `main` and on pull requests. No `fmt`, no clippy, never `--ignored` — the file explains each omission so none of them reads as an oversight. It runs in an `ubuntu:26.04` container because `ubuntu-latest` ships libadwaita 1.5 and this workspace needs 1.7.
+
+  **It found two failures on its first clean run, which is the whole argument for it.** A container runs as root, so a file a test writes is root-owned — and `helper.rs` has two cases whose entire premise is a file that is *not*. On a developer's machine that premise is true by construction, so nothing local could have caught it. Both now skip at `geteuid() == 0`, the same way their neighbours skip when `/bin/ls` is absent. The suite is still 218 passing here; in CI, two of them assert nothing and say so.
 
 ### What no session does without being asked
 
