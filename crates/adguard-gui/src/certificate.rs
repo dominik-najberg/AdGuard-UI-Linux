@@ -118,9 +118,15 @@ impl CertificateView {
             .then(|| CaTrust::detect(certificate_name))
             .flatten();
 
-        // The installer's own absence belongs in the snapshot: a check that has
-        // not moved can still want a different command row than last time.
-        let snapshot = format!("{check:?} installer={:?}", self.installer);
+        // The remedy is computed before the snapshot, and goes into it, because
+        // it does not follow from the check alone: it stats the installer and
+        // may look up the CLI binary, and either can appear or vanish while the
+        // window is open — a reinstall of AdGuard CLI is exactly the case, and
+        // it is one this row would otherwise keep denying long after it stopped
+        // being true. Snapshotting the check alone would have made the guard
+        // suppress precisely the repaint worth making.
+        let remedy = check.as_ref().and_then(|trust| self.remedy(trust));
+        let snapshot = format!("{check:?} {remedy:?}");
         if self.painted.borrow().as_deref() == Some(snapshot.as_str()) {
             return;
         }
@@ -141,7 +147,7 @@ impl CertificateView {
         self.group.set_visible(true);
         self.status.set_subtitle(&self.explain(&trust));
 
-        match self.remedy(&trust) {
+        match remedy {
             Some(remedy) => {
                 self.command.set_visible(true);
                 self.command.set_subtitle(&remedy.command);
@@ -264,6 +270,10 @@ impl CertificateView {
 }
 
 /// A command to show, and the sentence that says what it does.
+///
+/// `Debug` because it goes into the repaint snapshot: what the rows will say
+/// is what has to be compared, not what the check found.
+#[derive(Debug)]
 struct Remedy {
     command: String,
     description: &'static str,
