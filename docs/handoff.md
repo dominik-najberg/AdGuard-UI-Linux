@@ -1,6 +1,6 @@
 # Handoff
 
-The entry point for a new session on this project. **§0 is what to run and read before touching anything**; §1 is what exists, §2 what was decided, §3 what is still open, §4 what will bite you. Everything here is current as of **1 August 2026**, against `d6c6b4a`, and measured on the machine §0 describes.
+The entry point for a new session on this project. **§0 is what to run and read before touching anything**; §1 is what exists, §2 what was decided, §3 what is still open, §4 what will bite you. Everything here is current as of **1 August 2026**, against **`v1.0.0`**, and measured on the machine §0 describes.
 
 ---
 
@@ -8,12 +8,15 @@ The entry point for a new session on this project. **§0 is what to run and read
 
 ### The state of play, in three sentences
 
-**v1 is complete** (`architecture.md` §7), and so are the three checks added after it closed — certificate trust, the root helper, and browser integration — plus packaging. **218 tests pass and 44 are `#[ignore]`d**, and every page can be opened and read without a display, so "it renders" is provable here rather than assertable — within the limits §4 sets out, the sharpest being that an `AdwSpinRow` is absent from the accessibility tree entirely, so any page with a number row is only half-read by a walk. **Nothing is queued:** `overnight-plan.md` is archived, no other plan file is live, and the next piece of work is a decision rather than a pickup.
+**v1 is complete** (`architecture.md` §7), and so are the three checks added after it closed — certificate trust, the root helper, and browser integration — plus packaging. **v1.0.0 is released**: tagged, with both packages and their checksums attached to the GitHub release by [`.github/workflows/release.yml`](../.github/workflows/release.yml), and `CHANGELOG.md` is what its notes are read from — `building.md` §5, *Cutting a release*, is the procedure. **218 tests pass and 44 are `#[ignore]`d**, and every page can be opened and read without a display, so "it renders" is provable here rather than assertable — within the limits §4 sets out, the sharpest being that an `AdwSpinRow` is absent from the accessibility tree entirely, so any page with a number row is only half-read by a walk. **Nothing is queued:** `overnight-plan.md` is archived, no other plan file is live, and the next piece of work is a decision rather than a pickup.
+
+**The repository was private when 1.0.0 was tagged**, which is the one thing about this release that is not a property of the tree: a release on a private repository is downloadable by the owner and by nobody else, and the three GitHub URLs in the AppStream file are unreachable for exactly the same reason (`appstreamcli validate` reports them, and will stop the moment the repository is public). Publishing is the owner's call, not an agent's, and nothing here has changed the visibility.
 
 ### Ground truth before writing a line
 
 ```bash
-git log --oneline -1        # d6c6b4a or later
+git log --oneline -1        # the v1.0.0 tag or later
+git describe --tags         # v1.0.0, or v1.0.0-<n>-g<sha> once work has landed on top
 git status --porcelain      # must be empty
 cargo test --workspace      # 218 pass, 44 ignored
 sha256sum ~/.local/share/adguard-cli/proxy.yaml
@@ -62,7 +65,8 @@ One binary, `adguard-ui`, serves the window and the tray; `adguard-tray` is a li
 
 Nothing is queued, and that is the honest answer rather than a gap in this document. In the order I would consider them:
 
-- **Stop.** v1 and the three post-v1 checks are done and verified. A session that adds nothing is a legitimate outcome for a project in this state.
+- **Stop.** v1 and the three post-v1 checks are done, verified and released. A session that adds nothing is a legitimate outcome for a project in this state.
+- **Make the repository public**, if a release is meant to reach anyone. It is the whole difference between 1.0.0 being tagged and 1.0.0 being available, it is a one-way door in the sense that matters — a public commit history cannot be recalled — and it is the owner's decision. Nothing else in this document depends on it.
 - **§3 item 6, the activation success leg** — the only functional gap left, and **the owner's call, not an agent's**: it needs a real account and spends a device slot.
 - **The v2 backlog** in `architecture.md` §7: live blocked-request stats, userscripts, HAR capture, the `speed` benchmark UI, import/export, full advanced-settings parity. Each is out for a recorded reason; read the reason before reopening it.
 - **Both of the things nobody had decided were settled on 1 August 2026**, by the project owner, and neither is open any more.
@@ -185,6 +189,7 @@ That subsection also carries the correction worth reading before trusting anythi
 | Root helper | Done. `gui/root_helper.rs`, one widget behind two screens — the Advanced page under the mode row it gates, and the first-run assistant, because every install this app completes ends unmet. The Status page carries the symptom instead, as one line under the HTTP endpoint, re-read on its existing 2 s poll rather than on focus. `architecture.md` §6. |
 | Browser integration | Done. Six manifest locations, four states — ready, missing, stale, unreadable — on the Protection page below the certificate group, with `install-browser-integration` and a copy button. Browsers that are not installed are not reported; the command is withheld when `adguard_cli_nm` is absent. `architecture.md` §6, contract §12. |
 | Packaging | Done. `make deb`, `make tarball`, `make package`. Neither needs root; `Depends:` is derived by `dpkg-shlibdeps` rather than written down. `building.md` §5. |
+| Release | Done, at **1.0.0**. A `v*` tag builds both packages in an `ubuntu:26.04` container, checksums them and attaches them to a GitHub release whose notes are the matching `CHANGELOG.md` section; the workflow refuses a tag that disagrees with `Cargo.toml`. `workflow_dispatch` runs the build and stops before publishing, which is how it is exercised without tagging. `building.md` §5. |
 
 Userscripts are **out of v1** — `architecture.md` §7 has the reasoning.
 

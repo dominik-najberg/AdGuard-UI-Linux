@@ -23,16 +23,50 @@
 
   <launchable type="desktop-id">io.github.dominik-najberg.AdGuardUI.desktop</launchable>
 
+  <url type="homepage">https://github.com/dominik-najberg/AdGuard-UI-Linux</url>
+  <url type="bugtracker">https://github.com/dominik-najberg/AdGuard-UI-Linux/issues</url>
+  <url type="vcs-browser">https://github.com/dominik-najberg/AdGuard-UI-Linux</url>
+
+  <developer id="io.github.dominik-najberg">
+    <name>Dominik Najberg</name>
+  </developer>
+
+  <!--
+    Empty, and that is the OARS way of saying "nothing to declare" rather than
+    an unfinished element: a rating with no attributes is a positive statement
+    that none of the categories apply. A software centre showing this without
+    one reports the age suitability as unknown.
+  -->
+  <content_rating type="oars-1.1" />
+
   <supports>
     <control>pointing</control>
     <control>keyboard</control>
     <control>touch</control>
   </supports>
 
+  <!--
+    One entry, and the 0.1.0 that used to sit here is gone rather than kept as
+    history. It described a scaffold that was never tagged, never packaged and
+    never left this machine, so listing it would have told a software centre
+    about a release nobody could ever have installed. The first release of this
+    application is its first release.
+  -->
   <releases>
-    <release version="0.1.0" type="development">
+    <release version="1.0.0" type="stable" date="2026-08-01">
+      <url type="details">https://github.com/dominik-najberg/AdGuard-UI-Linux/releases/tag/v1.0.0</url>
       <description>
-        <p>Initial scaffold: proxy status display and lifecycle control.</p>
+        <p>First release. The whole of AdGuard CLI's day-to-day operation, without the terminal:</p>
+        <ul>
+          <li>Proxy status, start, stop and restart, with the licence and the proxy endpoints.</li>
+          <li>The six protection modules, and the 26 stealth settings behind them.</li>
+          <li>Filter lists from AdGuard's own catalogue, plus custom lists installed and removed by URL.</li>
+          <li>A DNS page: the DNS filter catalogue, your own rules, the servers and the listen port.</li>
+          <li>Advanced settings: proxy mode, ports, listen address, authentication, outbound proxy and logging.</li>
+          <li>A tray icon carrying start, stop and the protection toggles.</li>
+          <li>A first-run assistant for a machine where AdGuard has never been configured.</li>
+          <li>Checks for the three things AdGuard needs outside its configuration — a trusted certificate, its root helper, and browser integration — each paired with AdGuard's own command to fix it.</li>
+        </ul>
       </description>
     </release>
   </releases>

@@ -21,7 +21,15 @@ AdGuard CLI is a third-party install under `$HOME`, so no package can declare a 
 
 ## Install
 
-Build a package and install it — building needs no root, only the install step does:
+Every release carries a `.deb` and a tarball for `~/.local`, built in a clean `ubuntu:26.04` container and listed with their checksums in `SHA256SUMS`:
+
+```bash
+sudo apt-get install ./adguard-ui_1.0.0_amd64.deb
+```
+
+[**Releases**](https://github.com/dominik-najberg/AdGuard-UI-Linux/releases) · [`CHANGELOG.md`](CHANGELOG.md). `apt-get install ./file.deb` rather than `dpkg -i`, because apt resolves the dependencies the package declares; the path has to start with `./` or apt looks the name up in the archive instead. The tarball is the unprivileged route: extract it and run its `install.sh`, which writes under `~/.local` and never asks for a password.
+
+Or build the package yourself — building needs no root, only the install step does:
 
 ```bash
 make install

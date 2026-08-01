@@ -440,7 +440,7 @@ Both recommended routes are built. Neither script needs root, and neither instal
 make package
 ```
 
-That leaves `target/package/adguard-ui_0.1.0_amd64.deb` (2.4 MB) and `adguard-ui-0.1.0-x86_64.tar.gz` (3.0 MB — gzip against the `.deb`'s zstd, and it carries the whole `data/` tree). `make deb` and `make tarball` build one each; the work is in `packaging/deb.sh` and `packaging/tarball.sh`, which carry the reasoning per step.
+That leaves `target/package/adguard-ui_1.0.0_amd64.deb` (2.4 MB) and `adguard-ui-1.0.0-x86_64.tar.gz` (3.0 MB — gzip against the `.deb`'s zstd, and it carries the whole `data/` tree). `make deb` and `make tarball` build one each; the work is in `packaging/deb.sh` and `packaging/tarball.sh`, which carry the reasoning per step.
 
 To put the `.deb` on this machine rather than just build it:
 
@@ -483,7 +483,38 @@ Six things the two scripts do that are worth knowing before changing them:
 
 **The two packages carry the licence differently, and that is deliberate.** The repository has held `LICENSE` — the verbatim GPLv3, byte-identical to `/usr/share/common-licenses/GPL-3` — since 1 August 2026. The `.deb` still ships no copy of it: its `copyright` file points at that system path, which is what Debian policy asks for and what every package on the machine already does. The tarball ships the file itself, because it is the one route by which this build reaches a machine whose `/usr/share/common-licenses` may not exist, and GPL-3.0-or-later §4 wants a copy conveyed with the program rather than a reference to one.
 
-One thing the packaging still does **not** do, on purpose: it writes no `changelog.Debian.gz`. Debian policy wants one for an archive upload, and this package is not built for an archive.
+One thing the packaging still does **not** do, on purpose: it writes no `changelog.Debian.gz`. Debian policy wants one for an archive upload, and this package is not built for an archive. `CHANGELOG.md` in the repository root is the one changelog, and the release workflow below reads the notes for a release out of it.
+
+### Cutting a release
+
+A release is a tag. Everything else — building both packages in a clean container, checksumming them, writing the release page and attaching them to it — is [`.github/workflows/release.yml`](../.github/workflows/release.yml), which runs on any tag matching `v*`.
+
+Four things happen before the tag, and all four are on the machine, not on the runner:
+
+```bash
+cargo test --workspace --locked                 # 218 pass, 44 ignored
+make package                                    # both packages build here first
+git status --porcelain                          # must be empty
+git log --oneline -1
+```
+
+1. **Bump the version in `Cargo.toml`** — `workspace.package.version`, which every crate inherits and both packaging scripts read, so it is the only place the number is written. `cargo update --workspace` then moves it into `Cargo.lock`, which is committed; a build with `--locked` fails against a stale one, and every step of the workflow uses `--locked`.
+2. **Write the `CHANGELOG.md` section**, headed `## <version> — <date>`. The workflow extracts that section verbatim as the release notes, matching on `## <version> ` with the trailing space, so the heading's shape is load-bearing. A version with no section is not an error — the workflow says so in its log and falls back to GitHub's generated commit list.
+3. **Add the release to `data/…metainfo.xml`**, which is what GNOME Software renders. It is the only other file carrying a version number, and it carries a description as well.
+4. **Then tag and push**, both, because a tag that never leaves the machine releases nothing:
+
+   ```bash
+   git tag -a v1.0.0 -m "AdGuard UI 1.0.0"
+   git push origin main --follow-tags
+   ```
+
+The workflow re-derives the version from `Cargo.toml` and **fails if the tag does not match it**. That check exists because the failure it prevents is silent: both packaging scripts name their output after `Cargo.toml`, so a `v1.0.1` tag on a tree that still says `1.0.0` would publish a release full of correctly built files named for the previous version.
+
+`workflow_dispatch` runs the same build and stops before publishing, leaving the packages as a run artifact. That is how this file gets exercised without tagging anything — a tag-triggered workflow is otherwise only testable by pushing a tag you then have to explain.
+
+**What a release contains**, and each name comes from the scripts above: `adguard-ui_<version>_<arch>.deb`, `adguard-ui-<version>-<arch>.tar.gz`, and `SHA256SUMS` over both. The `.deb`'s `Depends:` is derived inside the container by `dpkg-shlibdeps` against that container's libraries, which is why `dpkg-dev` is in the workflow's package list and why the derived floor is Ubuntu 24.04's glibc rather than the build machine's.
+
+**The maintainer field comes from git**, and on a runner there is no `user.name` to read — so `deb.sh` falls back to the last commit's author rather than writing `unknown <unknown@invalid>` into the control and copyright files of the package everybody downloads.
 
 ---
 

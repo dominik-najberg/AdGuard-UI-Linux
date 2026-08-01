@@ -1,0 +1,182 @@
+# Turn a `v*` tag into a GitHub release carrying the two packages
+# `docs/building.md` §5 describes, built somewhere clean rather than on the
+# maintainer's machine.
+#
+# It is `ci.yml` plus packaging plus publication, and the three deliberate
+# omissions there hold here for the same reasons: no `cargo fmt --check`, no
+# clippy gate, and never `--ignored` — those four suites drive the real
+# `adguard-cli` and two of them mutate the configuration of the machine they run
+# on (docs/building.md §3), which is not a thing to do on a runner.
+#
+# Two jobs, and the split is not decoration:
+#
+#   * `package` runs in an `ubuntu:26.04` container, because this workspace takes
+#     libadwaita's `v1_7` feature and the runner's own image is older — the same
+#     reason `ci.yml` gives.
+#   * `publish` runs on the runner itself, because that is where `gh` is
+#     installed. Doing it that way costs one artifact round trip and saves
+#     depending on a third-party action to attach a file to a release.
+#
+# `workflow_dispatch` builds the packages and stops, which is how this file gets
+# exercised without tagging anything: a tag-triggered workflow cannot be tested
+# by pushing a tag you then have to explain.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+# A release is not a thing to run twice at once, and unlike `ci.yml` the first
+# run's answer is not made irrelevant by the second — so no `cancel-in-progress`.
+concurrency:
+  group: release-${{ github.ref }}
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    container: ubuntu:26.04
+
+    steps:
+      # Before checkout, because a container image this bare has no git: the
+      # checkout action would silently fall back to downloading a tarball, and
+      # `packaging/deb.sh` reads the maintainer out of git.
+      #
+      # `dpkg-dev` is the one addition to `ci.yml`'s list, and it is what
+      # supplies `dpkg-shlibdeps` — without it deb.sh falls back to a written
+      # dependency list that ages (building.md §5). `binutils` for the `strip`
+      # both packaging scripts run; it comes with build-essential, and is named
+      # here so a change to that package does not quietly remove it.
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential binutils dpkg-dev pkg-config \
+            libgtk-4-dev libadwaita-1-dev ca-certificates curl git
+          pkg-config --modversion gtk4 libadwaita-1
+
+      - uses: actions/checkout@v4
+
+      # The checkout is owned by a different uid than the one this container
+      # runs as, which git refuses to look at. deb.sh reads the maintainer from
+      # `git config` and falls back to the last commit's author, and both of
+      # those are a bare `git` call away from failing on that refusal.
+      - name: Trust the checkout
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      # The tag is the claim; Cargo.toml is what every artifact is actually
+      # named after, since both packaging scripts read the version out of it.
+      # A `v1.0.1` tag on a tree that still says 1.0.0 would publish a release
+      # full of files named for the previous version, and nothing downstream
+      # would notice. Fail here instead.
+      - name: Check the tag against Cargo.toml
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)"
+          tag="${GITHUB_REF#refs/tags/}"
+          echo "Cargo.toml: $version, tag: $tag"
+          [ "v$version" = "$tag" ] || {
+              echo "release.yml: tag $tag does not match version $version in Cargo.toml" >&2
+              exit 1
+          }
+
+      # `--locked` on all three: Cargo.lock is committed, and a release that
+      # quietly resolved a different dependency set is not the tree that was
+      # tagged. The packaging scripts run `cargo build --release` themselves and
+      # inherit the lock file's authority the same way.
+      - name: Build
+        run: cargo build --workspace --locked
+
+      - name: Test
+        run: cargo test --workspace --locked
+
+      - name: Package
+        run: make package
+
+      # `dpkg-deb --info` and a listing, in the log, because the two things most
+      # worth reading after a package build are what `dpkg-shlibdeps` derived and
+      # whether the payload is the one intended — and after publication the log
+      # is the only place either can be checked without downloading the file.
+      - name: Describe what was built
+        run: |
+          ls -l target/package/
+          dpkg-deb --info target/package/*.deb
+          dpkg-deb --contents target/package/*.deb
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: packages
+          path: target/package/*.*
+          if-no-files-found: error
+
+  publish:
+    needs: package
+    runs-on: ubuntu-latest
+    # Only a tag gets published. A `workflow_dispatch` run stops at the artifact
+    # above, which is the whole point of allowing it.
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+
+    steps:
+      # For CHANGELOG.md — the release notes are the section already written
+      # there, rather than a second description of the same release maintained
+      # in a different file.
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: packages
+          path: packages
+
+      # Beside the packages, not instead of them: a checksum file is what makes
+      # a download from a release page checkable at all, and `sha256sum -c`
+      # wants exactly this format.
+      - name: Checksums
+        working-directory: packages
+        run: |
+          sha256sum ./*.deb ./*.tar.gz | sed 's| \./| |' > SHA256SUMS
+          cat SHA256SUMS
+
+      # The section for this version, from `## <version> — ` up to the next
+      # `## `. A tag whose version has no section publishes GitHub's generated
+      # commit list instead of an empty body, and says so in the log — an
+      # unwritten changelog entry should not be able to hold up a release.
+      - name: Release notes
+        id: notes
+        run: |
+          version="${GITHUB_REF#refs/tags/v}"
+          awk -v v="$version" '
+              $0 ~ "^## " v " " { inside = 1; next }
+              inside && /^## / { exit }
+              inside { print }
+          ' CHANGELOG.md > notes.md
+          if [ -s notes.md ]; then
+              echo "generate=" >> "$GITHUB_OUTPUT"
+          else
+              echo "release.yml: no CHANGELOG.md section for $version — generating notes" >&2
+              echo "generate=--generate-notes" >> "$GITHUB_OUTPUT"
+              : > notes.md
+          fi
+          cat notes.md
+
+      # `gh`, preinstalled on the runner, which is the reason this job is not in
+      # the container above. `--verify-tag` so a typo cannot create the tag it
+      # meant to release from.
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${GITHUB_REF#refs/tags/}"
+          gh release create "$tag" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "AdGuard UI $tag" \
+              --notes-file notes.md ${{ steps.notes.outputs.generate }} \
+              --verify-tag \
+              packages/*.deb packages/*.tar.gz packages/SHA256SUMS

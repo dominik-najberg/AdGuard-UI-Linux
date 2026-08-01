@@ -19,9 +19,21 @@ VERSION="$(sed -n 's/^version = "\(.*\)"$/\1/p' "$REPO/Cargo.toml" | head -1)"
 
 # The maintainer comes from git rather than from a constant, so a fork's
 # packages are not attributed to this repository's author.
+#
+# The fallback to the last commit's author is for the case this grew for: a CI
+# checkout has no `user.name` configured at all, and the release workflow builds
+# the package everybody actually downloads. Without it every published .deb
+# would name `unknown <unknown@invalid>` as its maintainer, in the control file
+# and in the copyright file both — which is worse than wrong, because it is the
+# field a user reads to find out who to report a bug to. `%an <%ae>` on the
+# commit being packaged is the same person by construction, and is already
+# public in the history the tag points at.
 MAINTAINER_NAME="$(git -C "$REPO" config user.name || true)"
 MAINTAINER_EMAIL="$(git -C "$REPO" config user.email || true)"
-MAINTAINER="${MAINTAINER_NAME:-unknown} <${MAINTAINER_EMAIL:-unknown@invalid}>"
+if [ -z "$MAINTAINER_NAME" ] && [ -z "$MAINTAINER_EMAIL" ]; then
+    MAINTAINER="$(git -C "$REPO" log -1 --format='%an <%ae>' 2>/dev/null || true)"
+fi
+MAINTAINER="${MAINTAINER:-${MAINTAINER_NAME:-unknown} <${MAINTAINER_EMAIL:-unknown@invalid}>}"
 
 TREE="$OUT/${NAME}_${VERSION}_${ARCH}"
 rm -rf "$TREE"
