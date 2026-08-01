@@ -472,7 +472,7 @@ cp ~/.local/share/adguard-cli/proxy.yaml ~/proxy.yaml.orig
 | [`adguard-cli.md`](adguard-cli.md) | Reference for the underlying CLI — commands, options, config keys |
 | [`cli-contract.md`](cli-contract.md) | **Measured** CLI behaviour as an automation target; read before writing wrapper code |
 | [`architecture.md`](architecture.md) | Design of the GUI: crates, data flow, UI structure, privilege model |
-| [`handoff.md`](handoff.md) | Current state, the next step, and the traps worth knowing before touching anything |
+| [`handoff.md`](handoff.md) | **Start here.** §0 is the entry point for a new session — ground truth to check, what state this machine is in, what to read, what is next and what nothing may do. Then current state, the open gaps, and the traps |
 | `building.md` | This file — prerequisites, running, tests, install, packaging |
 | `overnight-plan.md` | **Archived.** Its night is over and every item in it is done. Kept for §3, the standing stop list, and §4, the verification discipline — both of which apply to any session, not just an unattended one |
 

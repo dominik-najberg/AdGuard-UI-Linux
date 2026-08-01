@@ -1,13 +1,86 @@
 # Handoff
 
-> **Where the evening of 1 August 2026 stopped.** Two things landed after the
-> note below was written, and it did not cover either: **browser integration**
-> (`architecture.md` §6, contract §12) — the check that says whether AdGuard's
-> extension can actually reach the CLI — and, this session, the verification
-> that closes the oldest debt in §3.
->
-> **The `connect_is_active_notify` trigger is no longer unverified.** Both
-> entries below used to end "what is untested is the trigger, not the
+The entry point for a new session on this project. **§0 is what to run and read before touching anything**; §1 is what exists, §2 what was decided, §3 what is still open, §4 what will bite you. Everything here is current as of **1 August 2026**, against `d6c6b4a`, and measured on the machine §0 describes.
+
+---
+
+## 0. Starting a new thread
+
+### The state of play, in three sentences
+
+**v1 is complete** (`architecture.md` §7), and so are the three checks added after it closed — certificate trust, the root helper, and browser integration — plus packaging. **218 tests pass and 44 are `#[ignore]`d**, and every page can be opened and read without a display, so "it renders" is provable here rather than assertable — within the limits §4 sets out, the sharpest being that an `AdwSpinRow` is absent from the accessibility tree entirely, so any page with a number row is only half-read by a walk. **Nothing is queued:** `overnight-plan.md` is archived, no other plan file is live, and the next piece of work is a decision rather than a pickup.
+
+### Ground truth before writing a line
+
+```bash
+git log --oneline -1        # d6c6b4a or later
+git status --porcelain      # must be empty
+cargo test --workspace      # 218 pass, 44 ignored
+sha256sum ~/.local/share/adguard-cli/proxy.yaml
+```
+
+The config hash is `7b419727afde68a8e09cdc90382915d14daff4159ae2a0c85aa0b300d38af3f5`, and that file is 220 lines with no backup and no regeneration path short of `configure`. **A mismatch is a stop — and then a diff, not a conclusion.** The last one was a single line, `proxy_mode: 'manual'` → `'auto'`, changed by the owner on purpose through the feature that exists for it. Every `adguard-cli` invocation rewrites the file, and the running proxy moves its mtime without moving a byte, so neither a fresh timestamp nor a moved hash means what it looks like until it has been diffed against a known copy.
+
+Worth knowing before anything else surprises you — the proxy is very likely running, and not because a session started it:
+
+```bash
+ps -eo pid,lstart,cmd | grep -E "adguard-cli start|adguard_root_helper|adguard_cli_nm" | grep -v grep
+```
+
+### The machine this was all measured on
+
+| Fact | State here | What that costs a test |
+| --- | --- | --- |
+| `proxy_mode` | `auto`, root helper installed and running | The helper's **unmet** rendering is unreachable locally; `$ADGUARD_ROOT_HELPER` is the only route to it |
+| Certificate | Trusted, and `adguard.conf` reproduces the same CA | Unmet branches need `$ADGUARD_CA_BUNDLE`, `$SYSTEM_CERT_DIR`, `$ADGUARD_CERT_INSTALLER` |
+| Browser integration | Installed for five browsers; no Firefox profile, so Firefox is not reported | Unmet branches need `$ADGUARD_BROWSER_HOME` |
+| Licence | Active | A Status-page walk carries the owner's e-mail **and** key. Redact at the harness, on both patterns — §4 |
+
+The pattern is worth naming, because it is the reason every one of those paths is a parameter rather than a constant: **every check this application renders is in its met state on this machine**, so each one's interesting branch is reachable only through an override. A test that hard-codes a path is a test that can only ever see the boring answer.
+
+### Read in this order
+
+1. [`cli-contract.md`](cli-contract.md) — **measured** CLI behaviour, which the code depends on. §5 for anything touching config, §6 for filters, §7 for what needs a TTY, §8 for privilege, §12 for browser integration.
+2. [`architecture.md`](architecture.md) — §3 for refresh and reconcile, §4 for the process, tray and startup, §5 for the pages, §6 for detect-and-instruct, §7 for scope.
+3. [`building.md`](building.md) §3 — every verification recipe, including the headless ones and the focus round trip.
+4. **§4 of this file.** It is the longest section here and the one that saves the most time; most of it was paid for once already.
+
+### The three ways to run it
+
+```bash
+cargo run -p adguard-gui                                    # the real config, read-write
+XDG_DATA_HOME=/tmp/fake cargo run -p adguard-gui            # a sandbox config; writes land there
+env -u DISPLAY -u WAYLAND_DISPLAY xvfb-run -n 99 -s "-screen 0 1000x1400x24" \
+  dbus-run-session -- env GDK_BACKEND=x11 ./target/debug/adguard-ui   # headless, and driveable
+```
+
+One binary, `adguard-ui`, serves the window and the tray; `adguard-tray` is a library. The second line is how a page is seen against a configuration nobody would create on purpose, and the third is how anything gets *proved* — `building.md` §3 has the AT-SPI walk, the frame grab and the focus round trip that go with it. The overrides in the table above compose with all three.
+
+**The third line is for looking, not for driving.** `xvfb-run` keeps its `MIT-MAGIC-COOKIE` in a directory only its own child can read, so an `ffmpeg -i :99` or an AT-SPI probe started from outside it finds nothing and fails as though the window never opened. A run you intend to *drive* starts `Xvfb :99` directly and puts the app and the probe inside one `dbus-run-session` — §4, and `building.md` §3.
+
+### What to do next
+
+Nothing is queued, and that is the honest answer rather than a gap in this document. In the order I would consider them:
+
+- **Stop.** v1 and the three post-v1 checks are done and verified. A session that adds nothing is a legitimate outcome for a project in this state.
+- **§3 item 6, the activation success leg** — the only functional gap left, and **the owner's call, not an agent's**: it needs a real account and spends a device slot.
+- **The v2 backlog** in `architecture.md` §7: live blocked-request stats, userscripts, HAR capture, the `speed` benchmark UI, import/export, full advanced-settings parity. Each is out for a recorded reason; read the reason before reopening it.
+- **Two things nobody has decided.** The repo has no `README.md` — `building.md` is thorough and the tarball ships one, but a reader landing on the repository gets nothing — and there is no CI. Neither is a gap in the product; both are the kind of thing to ask about rather than assume.
+
+### What no session does without being asked
+
+The full list is `overnight-plan.md` §3, which is archived but still in force, and §4 there is the verification discipline. The three that would do real damage:
+
+- **`adguard-cli configure` against a directory that already has a `proxy.yaml`.** It resets the user's whole configuration and there is no prompt to decline at with stdin closed. `Cli::configure` guards this; do not add a second call site around the guard.
+- **`sudo`, `pkexec`, or a suid bit on anything.** This application ships no privileged component and there is a section explaining why (`architecture.md` §6).
+- **`cargo test --test config_mutate` / `--test filters_mutate`, or a filter installed into the real catalogue.** They drive the user's real install. Sandbox everything: `Cli::with_xdg_data_home`, and §4 below.
+
+---
+
+**What the last sessions found, and it is still true.** Kept because each of these cost something to learn and none of it is recoverable from the code:
+
+> **The `connect_is_active_notify` trigger is no longer unverified.** Two
+> entries in §3 used to end "what is untested is the trigger, not the
 > re-check", on the grounds that taking focus from an Xvfb window needs
 > `xdotool` and there is none here. That was wrong, and it stood for three
 > features and about a week. There is no window manager on the Xvfb display, so
@@ -15,23 +88,8 @@
 > installed, and twenty lines of C do it. The recipe is `building.md` §3, and
 > the whole of §3's "not verified" wording is gone rather than softened.
 >
-> **Nothing was left open by this session.** What remains open is what was open
-> before it and is still not an agent's to take: the activation success leg
-> (§3 item 6). It needs a real account and spends a device slot.
->
-> **The machine underneath the docs has moved, and the old hash was the alarm
-> rather than the problem.** `proxy.yaml` now hashes to `7b419727…`, not the
-> `c4b58ce8…` pinned in `overnight-plan.md` §1 across four sessions. The entire
-> difference is `proxy_mode: 'manual'` → `'auto'`, made by the owner through the
-> feature that exists for it — the root helper is installed and running here
-> now, so **the unmet rendering of that check is no longer reachable locally**
-> without `$ADGUARD_ROOT_HELPER`, exactly as the certificate's already was not.
-> Diff before drawing a conclusion from a moved hash: the file is rewritten by
-> every `adguard-cli` invocation, and the running proxy moves its mtime without
-> moving a byte.
->
-> Two things from the verification worth carrying forward, both about the shape
-> of the proof rather than the result:
+> Two things from that verification worth carrying forward, both about the
+> shape of the proof rather than the result:
 >
 > - **A phase that must change nothing has to come first, or the run proves
 >   nothing.** Write the manifest, walk the page, assert the walk is
@@ -73,7 +131,7 @@
 >   and only the frame grab — black, with an X cursor — gives it away.
 >   `building.md` §3 now says so.
 >
-> Three from the night before, still true:
+> Three from the overnight run of 31 July, still true:
 >
 > - The Status page's module figure is **repainted but not counted** by the
 >   reconcile, because it is derived from the keys Protection owns and so moves
@@ -87,7 +145,7 @@
 >   — which is why removal is confirmed up front rather than offered as an undo
 >   afterwards (contract §6).
 
-Working state as of 1 August 2026. The overnight run of the 31st closed the config monitor, the CLI timeout, the lapsed-licence mapping, the Stealth page and the `dns_filtering` dependency caveat; the session after it built **licence activation**, then the **DNS page**, then the **first-run assistant** — the first page here that exists for a machine where AdGuard has never been configured at all — then **custom filter install by URL**, then **certificate trust** and **packaging**, and last **browser integration**, which is the only check in this application whose answer can be invalidated by something that has nothing to do with AdGuard. Read [`cli-contract.md`](cli-contract.md) and [`architecture.md`](architecture.md) first — the contract doc records measured CLI behaviour and the code depends on it. §5 of the contract is the part that matters for anything touching config; §4 of architecture.md is the part that matters for anything touching the tray or the way the process starts.
+**How it got here**, for anyone reading the commit log and wondering what the shape of a session on this project is. The overnight run of 31 July closed the config monitor, the CLI timeout, the lapsed-licence mapping, the Stealth page and the `dns_filtering` dependency caveat; the session after it built **licence activation**, then the **DNS page**, then the **first-run assistant** — the first page here that exists for a machine where AdGuard has never been configured at all — then **custom filter install by URL**, then **certificate trust** and **packaging**, then **browser integration**, which is the only check in this application whose answer can be invalidated by something that has nothing to do with AdGuard, and last the **focus-trigger verification** in §3 item 5. One feature per session, each with its measurements written into the contract before the code that depends on them.
 
 **If you are touching the filter pages**, the fact in contract §6 most likely to change a decision is this: **AdGuard checks only whether what it downloaded *begins* with HTML.** That catches a link answering 200 with an error page, and nothing else. JSON, prose, the wrong plain-text file and an empty response all install as filter lists holding no rules, report success, and leave a switch reading *on* over something that filters nothing. The Filters page says so in the group description because no other part of this UI ever could.
 
@@ -124,13 +182,7 @@ That subsection also carries the correction worth reading before trusting anythi
 
 Userscripts are **out of v1** — `architecture.md` §7 has the reasoning.
 
-Run it:
-
-```bash
-cargo run -p adguard-gui
-```
-
-One binary, `adguard-ui`, serves the window and the tray. `adguard-tray` is a library. Seeing the icon needs a real session plus an AppIndicator extension — see `building.md`.
+The three ways to run it are in §0. Seeing the **tray icon** needs a real session plus an AppIndicator extension, which no headless recipe supplies — `building.md` §2 has that one.
 
 Three things about startup are worth knowing before touching `main.rs`. The UI is built by the **first** activation and kept, so a later one presents that window instead of building a rival with its own poll timer and tray. The application takes `HANDLES_COMMAND_LINE`, so `--background` reaches the instance that acts on it rather than being parsed and dropped by the launching process. And under `--background` a tray that will not register is **fatal** — the inverse of the rule everywhere else, because there is no window to fall back to. `architecture.md` §4 has the reasoning.
 
