@@ -273,11 +273,15 @@ All three read themselves again from **one** `connect_is_active_notify` closure 
 
 ---
 
-## 7. v1 scope
+## 7. Scope
+
+This section is the scope authority for both milestones, and every other document defers to it. It was titled *v1 scope* from a time when there was nothing else; the v1 half below is closed, and the v2 half was decided by the project owner on **2 August 2026** — the day the repository went public, and the day after 1.0.0 was tagged.
+
+### v1 — closed
 
 **In:** status + lifecycle control, protection toggles, filter enable/disable with the SQLite-backed catalogue, custom filter install by URL, tray icon with quick toggles, first-run assistant, licence activation, the DNS page including its listen port, and the auto-mode switch — the last as detection and instruction, never as an escalation of our own, alongside the root-helper check it shares that treatment with (§6).
 
-**Out (v2):** live blocked-request stats (needs log tailing; format undocumented and unstable — contract §9), **userscripts entirely**, HAR capture, `speed` benchmark UI, import/export, full advanced-settings parity.
+**Out:** live blocked-request stats (needs log tailing; format undocumented and unstable — contract §9), **userscripts entirely**, HAR capture, `speed` benchmark UI, import/export, full advanced-settings parity. Those six were carried as *Out (v2)* for as long as v2 was a label rather than a milestone; where each of them actually landed is below.
 
 Userscripts are out because there is only one. `userscripts list` returns a single entry, `adguard-extra`, and `proxy.yaml` says in AdGuard's own words that only AdGuard Extra is supported; with installation deferred, the feature is one switch for one script that ships pre-enabled. A sidebar page for that is navigation without content. This section is the scope authority — §5 and `handoff.md` no longer list a Userscripts view, and if the upstream ever supports more, this is the decision to revisit.
 
@@ -288,6 +292,34 @@ Ship the tray + core controls first; it is the part that replaces day-to-day ter
 **Also added after v1 closed:** the browser-integration check (§6). The same argument, arrived at from the opposite direction — not a state this app creates, but one it is uniquely placed to explain, because the extension's own report of it names `adguard-cli` and sends the user looking at everything except the missing file. Nothing else in the toolchain says it: the installer reports success without writing anything, and a browser installed afterwards is silently left out (contract §12).
 
 Status: Status, Protection, Filters (HTTP), DNS, Advanced and Stealth are done; both filter pages install custom lists by URL (§5); licence activation lives on the Status page; the first-run assistant seeds an unconfigured install and hands the window to the pages when it is finished (§5); the tray carries start/stop plus the six Protection toggles as quick toggles (§4); the config monitor reports an external edit with a toast, gated on a row the user can see having moved (§3); the Advanced page carries the proxy mode with AdGuard's root-helper check beside it (§6); and a custom list can be removed, behind a confirmation, on both filter pages. **v1 is complete.**
+
+### v2 — open
+
+**In:** HAR capture, full advanced-settings parity, import/export.
+
+**Out:** live blocked-request stats — **its own milestone, behind a spike**; userscripts, re-checked 2 August 2026 and unchanged; the `speed` benchmark UI, unmeasured.
+
+Decided by the project owner on 2 August 2026. Three of v1's six *Out* items move in, three do not, and each of the three that stay out has a reason below rather than an inheritance from the line above. Nothing is queued: this is scope, and [`v2-plan.md`](v2-plan.md) §1 still governs how a session starts.
+
+The three chosen share a property worth naming. **None introduces a new way of knowing things** — all three are `config set` writes and file reads, verified the way everything else here is verified. Live stats is the one that is not, which is the argument for separating it rather than a complaint about it.
+
+**HAR capture overturns a reason that is still in the contract, and this is where that is done** rather than in the code that would depend on it. Contract §9 calls full HAR dumps *too heavy for an always-on UI*, which is a correct statement about an always-on capture and not about a switch: `har_writer.enabled` is `false` in a stock `proxy.yaml`, and the feature is off until someone turns it on for a debugging session. What the objection actually requires is that the row say what leaving it on costs — the same voice §6's certificate and helper rows use for what a command will do. Mechanically it is an Advanced-page group and nothing more: two keys, `enabled` (bool) and `location` (string), through the same `config set` path as every other switch. Measured 2 August 2026 against this machine's `proxy.yaml` lines 202–204, where `config show` folds the section to `har_writer: <folded> disabled`.
+
+One measured detail no plan carried: **the stock `location` is `'.'`** — a relative path, resolved against the proxy's working directory rather than the user's. A UI that offers capture without resolving it writes dumps where the user cannot find them, so the row shows an absolute path or the item does not ship.
+
+**Full advanced-settings parity is a specification before it is rows, and the specification is the first task.** Nobody has written down what is missing; the enumeration — walk `proxy.yaml`'s keys against what the Advanced and Stealth pages render — *is* the work before any row is added, and it is not code. Expect the gap to be smaller than "parity" sounds and expect part of it to be keys that should stay unrendered. Contract §5 records that nothing enforces dependencies between settings, so a key whose effect depends on another says so on its row; the Advanced page already does this for several, and that pattern is the one to extend rather than a new mechanism.
+
+**Import/export is in, and the collision is the design.** Measured 2 August 2026 on 1.4.13: `import-settings` takes `-i,--input` and it is **REQUIRED**; `export-settings` and `export-logs` take `-o,--output`, optional, "Can be a directory"; all three artifacts are **zip**. Two things make it bigger than that command list. `import-settings` overwrites the whole configuration, with no undo but a prior export — so it takes the confirmation discipline custom-filter removal got (§5), an `AdwAlertDialog` naming what is about to be replaced. And it is **the only thing besides `configure` that can create `proxy.yaml`** (contract §5), which puts it in direct collision with the first-run assistant, whose entire trigger is that file's absence: an unconfigured install offered an import is a second path through first run. **That interaction is designed before either half is built**, not discovered by whoever reaches it second.
+
+`export-logs` bundles `app.log`, `proxy.log` and `access.log`. Those are a record of what the user browsed — contract §9 shows an `access.log` line — so the button says what is in the bundle, in the same voice as the rest of §6.
+
+**Live blocked-request stats is out of v2 and is its own milestone, behind a spike.** The objection is its *kind*, not its cost. Contract §9 records that there is no push or event mechanism, so a live view must tail a format that is undocumented and unstable across versions, whose detail varies with `log_level`, and which nothing rotates — `proxy.log` was already 8 MB. Every other reading in this application is a fact checked against a file or a database, and *verify, don't trust* (§3) is the rule the whole design rests on; a tailer over that format would be the first feature here whose correctness cannot be checked against anything. **The spike decides whether there is a feature at all**: how the format moves across a version bump, what `log_level` elides, and what a reader sees when the file is rotated or truncated underneath it. Folding it into a mixed v2 would make the milestone hostage to the one item that might not be buildable.
+
+**Userscripts stays out, and now carries the date of its re-check rather than the old reasoning silently.** Re-checked 2 August 2026 against `adguard-cli` 1.4.13: `userscripts list` exits 0 and returns a single entry — id `adguard-extra`, title *AdGuard Extra*, marked `[x]`, already enabled. Unchanged, so the paragraph above stands: one switch for one script that ships pre-enabled is navigation without content. It is one command, so re-check it again when `adguard-cli` moves; if the upstream ever supports more, this is still the decision to revisit.
+
+**The `speed` benchmark UI stays out because it is unmeasured**, which is a statement about the order of work and not about the feature. `--json` would make it the least risky parse in the backlog — this project does not parse human output anywhere it can avoid it, and contract §6 is the standing example — but how long it runs, what it does with no proxy running, and whether it is interruptible are all unknown. **A benchmark that cannot be cancelled is a modal that cannot be closed.** Measure those three into the contract and it becomes a candidate; it does not become one before.
+
+**The activation success leg is not v2's** (`handoff.md` §3 item 6). It needs a real account and completing an activation spends a device slot, and the owner left it open on 2 August 2026, in the same decision that set this scope. Opening v2 did not open it.
 
 ---
 

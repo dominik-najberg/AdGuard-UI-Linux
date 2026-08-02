@@ -554,10 +554,10 @@ cp ~/.local/share/adguard-cli/proxy.yaml ~/proxy.yaml.orig
 | --- | --- |
 | [`adguard-cli.md`](adguard-cli.md) | Reference for the underlying CLI — commands, options, config keys |
 | [`cli-contract.md`](cli-contract.md) | **Measured** CLI behaviour as an automation target; read before writing wrapper code |
-| [`architecture.md`](architecture.md) | Design of the GUI: crates, data flow, UI structure, privilege model |
+| [`architecture.md`](architecture.md) | Design of the GUI: crates, data flow, UI structure, privilege model. **§7 is the scope authority for both milestones** — v1 closed, v2 open |
 | [`handoff.md`](handoff.md) | **Start here.** §0 is the entry point for a new session — ground truth to check, what state this machine is in, what to read, what is next and what nothing may do. Then current state, the open gaps, and the traps |
 | `building.md` | This file — prerequisites, running, tests, install, packaging |
-| [`v2-plan.md`](v2-plan.md) | **Live.** What v2 is and what it is not. Queues no code: its first task is the scope decision `architecture.md` §7 has never carried. Pins nothing that moves — ground truth stays in `handoff.md` §0 |
+| [`v2-plan.md`](v2-plan.md) | **Live.** The reasoning behind v2's scope and the standing rules for working under it — *not* the scope itself, which moved to `architecture.md` §7 when this file's own §2 was carried out on 2 August 2026. Still queues no code. Pins nothing that moves — ground truth stays in `handoff.md` §0 |
 | `overnight-plan.md` | **Archived.** Its night is over and every item in it is done. Kept for §3, the standing stop list, and §4, the verification discipline — both of which apply to any session, not just an unattended one |
 
 The scripts under `packaging/` are the eighth piece of documentation, and are written to be read: each step says why it is that shape, and §5 above says what the two of them are for.

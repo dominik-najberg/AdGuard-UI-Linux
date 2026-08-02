@@ -3,9 +3,15 @@
 **Live as of 2 August 2026, against `v1.0.0`.** This is the queued work: the
 owner opened v2 the day 1.0.0 was released and the repository went public.
 [`handoff.md`](handoff.md) is still the state of the project and §0 there is
-still the entry point — this file says only what v2 is and what it is not, and
-it is the first plan file to be live since [`overnight-plan.md`](overnight-plan.md)
-was archived.
+still the entry point, and this is still the first plan file to be live since
+[`overnight-plan.md`](overnight-plan.md) was archived.
+
+**What this file no longer is: the answer to what v2 contains.** It said so
+until its own §2 was carried out, later the same day —
+[`architecture.md`](architecture.md) §7 now has a *v2 — open* half and is the
+scope authority for both milestones. This file is the reasoning behind that
+decision and the standing rules for working under it; §7 is what v2 *is*. Where
+they disagree, §7 wins.
 
 **It deliberately pins nothing that moves.** No test count, no `proxy.yaml`
 hash, no commit sha. The archived plan carried all three and all three went
@@ -26,33 +32,49 @@ shortcut through it.
 
 ---
 
-## 2. The first task is not code
+## 2. ~~The first task is not code~~ — done, 2 August 2026
 
-[`architecture.md`](architecture.md) §7 is titled *v1 scope* and it is the scope
-authority every other document defers to. Its only statement about v2 is a
-single *Out (v2)* line naming six items. **Write §7's v2 half before a line of
-v2 code lands.**
+**Answered.** [`architecture.md`](architecture.md) §7 now carries a *v2 — open*
+half, it is retitled *Scope*, and the decision in it is the project owner's,
+taken 2 August 2026. **v2 = HAR capture + full advanced-settings parity +
+import/export**; live stats is its own milestone behind a spike, userscripts is
+out with the date of its re-check, and the `speed` UI is out until it is
+measured. §7 is the authority; §3 below is the input that fed it and is kept for
+the reasoning, not as a live list.
 
-Two reasons, and the second is the load-bearing one:
+The section is left here because the *rule* it states outlives the task, and it
+is the one most likely to be skipped by the next session doing everything else
+right:
 
 - The project's convention is decision-first, and `handoff.md` §1 describes v1 as
   one feature per session "each with its measurements written into the contract
   before the code that depends on them". `overnight-plan.md` §4 states the same
   rule as a rule. Scope is the same shape of thing one level up.
-- **Four of the six items are out for reasons that are still on the page.** A
+- **Four of the six items were out for reasons that were still on the page.** A
   session that starts implementing has not reopened those reasons; it has
   skipped them. Read the reason, then either overturn it in writing or leave the
   item out.
 
-§7 also needs its title changed. It has been *v1 scope* since a time when there
-was nothing else, and it is now the scope authority for two milestones.
+One of the three that moved in required exactly that, and it is the worked
+example: **HAR capture was out because contract §9 calls full HAR dumps too
+heavy for an always-on UI.** That reason is not withdrawn — it is answered, in
+§7, on the grounds that `har_writer.enabled` ships `false` and the switch is not
+always-on, with the cost owed to the row's subtitle. The other two carried no
+stated reason and needed none.
+
+**What is still true here: no v2 code has been written.** §7 is scope, not a
+queue. The next session picks an item and starts it the way every v1 feature was
+started — measurements into the contract first.
 
 ---
 
 ## 3. The backlog, with what is already known
 
-Ordered by cost, cheapest first. Nothing here is a commitment — §2 is the task,
-and this section is the input to it.
+Ordered by cost, cheapest first. **This section has been consumed**: it was the
+input to §2, that decision is taken, and [`architecture.md`](architecture.md) §7
+is now the authority for what is in and out. What is kept here is the working —
+the measurements and the trade-offs behind each item — which §7 states more
+briefly than it reasons. Where the two ever disagree, §7 wins.
 
 ### 3.1 HAR capture
 
@@ -141,12 +163,14 @@ entry, `adguard-extra`, and `proxy.yaml` says in AdGuard's own words that only
 AdGuard Extra is supported — so the feature was one switch for one script that
 ships pre-enabled, and a sidebar page for that is navigation without content.
 
-**Re-check it, because it is one command**, and because the measurement is now
-several `adguard-cli` releases old. If the answer is unchanged, §7 says so *with
-the date of the re-check* rather than silently carrying the old reasoning. If it
-moved, this is the cheapest item on the list.
+**Re-checked 2 August 2026 — unchanged.** Against `adguard-cli` 1.4.13,
+`userscripts list` exits 0 and returns one entry: id `adguard-extra`, title
+*AdGuard Extra*, marked `[x]` and therefore already enabled. So the v1 reasoning
+stands, and §7 now carries it with that date attached rather than silently. It
+is still one command, so re-check it again when `adguard-cli` moves — the
+version bump is the trigger, not the calendar.
 
-### 3.7 The recommendation
+### 3.7 The recommendation — taken, 2 August 2026
 
 **v2 = HAR capture + advanced parity + import/export**, with the userscripts
 re-check as a one-command precondition rather than an item. Stats behind a spike,
@@ -157,7 +181,13 @@ of knowing things. All three are `config set` writes and file reads, verified
 the way everything else here is verified. Stats is the one that is not, which is
 the argument for separating them rather than a complaint about it.
 
-**This is a recommendation and not a decision.** §2 is where it gets answered.
+~~**This is a recommendation and not a decision.**~~ **It was adopted unchanged
+by the project owner on 2 August 2026** and is now written into
+[`architecture.md`](architecture.md) §7, which is the authority. The precondition
+it names has been discharged: §3.6's re-check is done and the answer did not
+move. Two things §7 records that this recommendation did not: HAR's *always-on*
+objection from contract §9 is answered rather than dropped, and `har_writer`'s
+stock `location` is `'.'` — a relative path, which the row has to resolve.
 
 ---
 
