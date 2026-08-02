@@ -24,7 +24,7 @@ AdGuard CLI is a third-party install under `$HOME`, so no package can declare a 
 Every release carries a `.deb` and a tarball for `~/.local`, built in a clean `ubuntu:26.04` container and listed with their checksums in `SHA256SUMS`:
 
 ```bash
-sudo apt-get install ./adguard-ui_1.0.0_amd64.deb
+sudo apt-get install ./adguard-ui_1.1.0_amd64.deb
 ```
 
 [**Releases**](https://github.com/dominik-najberg/AdGuard-UI-Linux/releases) · [`CHANGELOG.md`](CHANGELOG.md). `apt-get install ./file.deb` rather than `dpkg -i`, because apt resolves the dependencies the package declares; the path has to start with `./` or apt looks the name up in the archive instead. The tarball is the unprivileged route: extract it and run its `install.sh`, which writes under `~/.local` and never asks for a password.
@@ -65,15 +65,15 @@ While the tray is present, closing the window only hides it and *Quit* in the tr
 
 **Status** — runtime state, start/stop/restart, the proxy endpoints, and the licence. Polled every 2 seconds while the window is up, every 10 when only the tray is showing.
 
-**Protection** — the six protection modules, each one switch over one key in `proxy.yaml`.
+**Protection** — the six protection modules, each one switch over one key in `proxy.yaml`, and the anonymous-statistics consent. That last row is the one setting here the application will not describe: nothing in AdGuard's configuration comments, its help output or its binary says what the key sends, so the row says *that* rather than inventing an answer.
 
 ![The Protection page](docs/screenshots/protection.png)
 
-**Filters** — AdGuard's own catalogue, read from its SQLite databases with localised names, plus custom lists installed by URL. The group description says what AdGuard's own content check does and does not catch: a link that answers with something other than a filter list is still installed, holding no rules.
+**Filters** — AdGuard's own catalogue, read from its SQLite databases with localised names, plus custom lists installed by URL. The group description says what AdGuard's own content check does and does not catch: a link that answers with something other than a filter list is still installed, holding no rules. Above the catalogue is the switch for adding filters in your system languages automatically — on this page rather than in Advanced, because a list you never switched on is something you notice here.
 
 ![The Filters page](docs/screenshots/filters.png)
 
-**DNS** — the DNS filter catalogue, your own DNS rules, the three server settings, and the local DNS proxy's listen port as disabled / automatic / fixed.
+**DNS** — the DNS filter catalogue, your own DNS rules, the three server settings, the local DNS proxy's listen port as disabled / automatic / fixed, and Encrypted Client Hello blocking, which is last because AdGuard's own comment says the common case is to leave it alone.
 
 ![The DNS page](docs/screenshots/dns.png)
 
@@ -81,11 +81,19 @@ While the tray is present, closing the window only hides it and *Quit* in the tr
 
 ![The Stealth page](docs/screenshots/stealth.png)
 
-**Advanced** — proxy mode, ports, listen address and authentication, outbound proxy, worker threads, log level, and secure DNS filtering. Settings whose effect depends on another setting say so rather than appearing to work.
+**Advanced** — proxy mode, ports, the filtered-port list, listen address and authentication, outbound proxy and outbound interface, worker threads, log level, secure DNS filtering, and the five HTTPS-filtering options behind the switch that gates them. Settings whose effect depends on another setting say so rather than appearing to work.
 
 ![The Advanced page](docs/screenshots/advanced.png)
 
-A **first-run assistant** covers the other end: on a machine with no `proxy.yaml` at all it checks the licence, seeds a configuration with one guarded `configure`, asks four questions, and writes the answers before handing over to the pages above.
+Two groups at the foot of that page do more than set a key:
+
+**Traffic capture** writes a HAR file of everything filtered, and it ships off. Its description is the feature: the capture records response bodies, the files are world-readable, and a measured run produced 114 MB in six minutes — one file per run, with nothing pruning them.
+
+**Backup and restore** exports your settings to a zip and restores one, with a third button beside the log level that bundles the logs for a bug report. Each of the three says the thing you would otherwise have to find out: a round trip **loses your DNS filter choices and DNS user rules**, because only `proxy.yaml` is exported; a restore leaves the **licence and the certificate untouched**; and the logs bundle **includes your configuration and not your browsing record**. A chosen zip is identified before anything happens to it, so handing the restore a logs bundle is refused with an explanation rather than accepted and half-applied.
+
+![Traffic capture and Backup and restore, at the foot of the Advanced page](docs/screenshots/advanced-backup.png)
+
+A **first-run assistant** covers the other end: on a machine with no `proxy.yaml` at all it checks the licence, seeds a configuration with one guarded `configure`, asks four questions, and writes the answers before handing over to the pages above. It also offers **restore from a backup**, in every branch including the two that will not set anything up — restoring is not licence-gated where seeding a configuration is, so it is reachable by exactly the user that screen otherwise turns away.
 
 ## Prerequisites it detects, and will not perform for you
 
@@ -97,7 +105,7 @@ Each is detected, named, and paired with **AdGuard's own command** and a copy bu
 
 The browser check is the one whose answer something unrelated to AdGuard can invalidate: install a browser after the integration command last ran and it is silently left out, with the extension reporting that it cannot find AdGuard at all. All three re-read themselves when the window regains focus.
 
-> Every check above is in its *met* state on the machine these screenshots came from, so the unmet frame was produced with the documented `$ADGUARD_CA_BUNDLE`, `$SYSTEM_CERT_DIR` and `$ADGUARD_BROWSER_HOME` overrides ([`docs/building.md`](docs/building.md) §3), pointing the checks at an empty sandbox rather than at this machine's real trust store. The licence owner, the visible tail of the licence key and the Stealth page's custom IP are placeholders; everything else is as rendered.
+> Every check above is in its *met* state on the machine these screenshots came from, so the unmet frame was produced with the documented `$ADGUARD_CA_BUNDLE`, `$SYSTEM_CERT_DIR` and `$ADGUARD_BROWSER_HOME` overrides ([`docs/building.md`](docs/building.md) §3), pointing the checks at an empty sandbox rather than at this machine's real trust store. The licence owner, the visible tail of the licence key and the Stealth page's custom IP are placeholders; everything else is as rendered. Frames of a page longer than the window show it from the top, so a page here is not always all of it — the *Advanced* frame above stops partway down, which is why the two groups at the foot of that page have a frame of their own.
 
 ---
 
@@ -124,7 +132,9 @@ The browser check is the one whose answer something unrelated to AdGuard can inv
 cargo test --workspace
 ```
 
-218 tests pass and 44 are `#[ignore]`d. The ignored suites drive the real `adguard-cli`: two write only to a throwaway `$XDG_DATA_HOME`, and two mutate this machine's real configuration and restore it afterwards. [`docs/building.md`](docs/building.md) §3 says which is which before you run one.
+That runs everything that touches nothing of yours. The suites it leaves `#[ignore]`d drive the real `adguard-cli`: two write only to a throwaway `$XDG_DATA_HOME`, and two mutate this machine's real configuration and restore it afterwards. [`docs/building.md`](docs/building.md) §3 says which is which before you run one.
+
+No count is quoted here on purpose. It was wrong twice — a figure that changes belongs in exactly one place, and for this project that place is [`docs/handoff.md`](docs/handoff.md) §0.
 
 CI runs the first of those commands on every push and pull request, in an `ubuntu:26.04` container — the runner's own image ships a libadwaita too old to build against. It runs no formatter check and never the ignored suites; [`.github/workflows/ci.yml`](.github/workflows/ci.yml) says why for each.
 

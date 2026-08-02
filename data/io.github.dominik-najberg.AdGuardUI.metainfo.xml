@@ -53,6 +53,22 @@
     application is its first release.
   -->
   <releases>
+    <release version="1.1.0" type="stable" date="2026-08-02">
+      <url type="details">https://github.com/dominik-najberg/AdGuard-UI-Linux/releases/tag/v1.1.0</url>
+      <description>
+        <p>The settings that were in AdGuard's configuration file and on no page, plus traffic capture and backup:</p>
+        <ul>
+          <li>Five HTTPS filtering options: EV-certificate sites, TLS 1.3, OCSP, Certificate Transparency and HTTP/3.</li>
+          <li>Blocking Encrypted Client Hello, on the DNS page.</li>
+          <li>The anonymous-statistics consent, on the Protection page.</li>
+          <li>The filtered-port list and the outbound interface, on Advanced.</li>
+          <li>Response tagging, which adds AdGuard's headers to responses rather than to requests.</li>
+          <li>Adding filters for the languages you browse in, on the Filters page.</li>
+          <li>Traffic capture to a HAR file, off by default, with what leaving it on costs written into the page.</li>
+          <li>Backup and restore of your settings, a bundle of the logs for a bug report, and restore from a backup on the first-run assistant.</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.0.0" type="stable" date="2026-08-01">
       <url type="details">https://github.com/dominik-najberg/AdGuard-UI-Linux/releases/tag/v1.0.0</url>
       <description>

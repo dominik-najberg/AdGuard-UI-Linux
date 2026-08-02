@@ -95,14 +95,15 @@ for each of the nine that are not.
 - **The activation success leg is still unmeasured**, unchanged from 1.0.0 and
   for the same reason: watching it needs a real account and spends a device slot
   ([`docs/handoff.md`](docs/handoff.md) §3 item 6).
-- **Launching the GUI can stop a running proxy.** Measured on 2 August 2026 from
-  the daemon's own log rather than inferred — three clean shutdowns, each within
-  about a second of a GUI start, under the headless test harness. Whether an
-  ordinary desktop launch does the same is not established, and neither is which
-  part of the GUI causes it; recovery is `adguard-cli start`. This predates the
-  release: it is the cause of outages two earlier sessions recorded as
-  unexplained, and what is new is the measurement, not the behaviour
-  ([`docs/handoff.md`](docs/handoff.md) §3 item 11).
+- **A headless GUI run under a sandboxed data directory can stop a running
+  proxy.** Measured on 2 August 2026 from the daemon's own log rather than
+  inferred — three clean shutdowns, each within about a second of such a start.
+  Six launches against the real data directory did not reproduce it, so this
+  looks like a property of the test sandbox rather than of ordinary use, but
+  which part of the GUI does it is still not established; recovery is
+  `adguard-cli start`. This predates the release: it is the cause of outages two
+  earlier sessions recorded as unexplained, and what is new is the measurement,
+  not the behaviour ([`docs/handoff.md`](docs/handoff.md) §3 item 11).
 - **Userscripts, live blocked-request stats and the `speed` benchmark remain out
   of scope**, each for a recorded reason (`docs/architecture.md` §7). HAR capture
   and import/export were on that list at 1.0.0 and have come off it.
