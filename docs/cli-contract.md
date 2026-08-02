@@ -1073,3 +1073,89 @@ So the installer writes only where it already sees a browser, and says the same 
 Read the manifests; never speak the protocol. `adguard_cli_nm` is a stdio native-messaging host whose manifests name the extension IDs permitted to reach it, so the browser vouches for the caller — impersonating one of those extensions is both fragile and rude ([§1](#1-rejected-integration-points)).
 
 `browser.rs` compares each manifest's `path` against the `adguard_cli_nm` beside the **resolved** `adguard-cli` binary, rather than merely testing that the file exists. A manifest left by an AdGuard reinstalled under a different prefix can name a host that still exists — the old one — and an existence check would call that healthy while the extension talked to a stale binary.
+
+---
+
+## 13. Import and export
+
+Measured 2 August 2026 against 1.4.13. `architecture.md` §7 puts import/export in v2 and requires the first-run collision to be designed before either half is built; this section is the input to that design and makes no scope claim of its own. Everything below was taken against the real install for the reads and a scratch `XDG_DATA_HOME` for every write, with `proxy.yaml`'s hash checked either side and unmoved.
+
+Flags, confirming §7: `import-settings` takes `-i,--input` and it is **REQUIRED**; `export-settings` and `export-logs` take `-o,--output`, optional, *"Can be a directory"*. All three artifacts are zip.
+
+### The two exports are not distinguishable by name
+
+Both write `adguard-cli_<YYYY-MM-DD>_<HH-MM-SS>.zip` into the directory given to `-o`. **Nothing in the filename says which command produced it.** Two exports taken a minute apart sit in a downloads folder as siblings, and the only way to tell them apart is to open them.
+
+That matters because of what the next subsection measures.
+
+### `export-settings` — nine files, and what is *not* in them
+
+| In the bundle | Bytes |
+| --- | --- |
+| `proxy.yaml` | 8,950 |
+| `https_exclusions.txt` | 72,563 |
+| `user.txt` | 14 |
+| `browsers.yaml` | 1,219 |
+| `userscripts/adguard-extra.meta.json` | 25,661 |
+| `userscripts/adguard-extra.user.js` | 531,969 |
+| `agflm_standard.db` | 51,138,560 |
+| `filters.yaml` | 543 |
+| `config.txt` | 28 |
+
+51.8 MB raw, 14.9 MB zipped, and **51.1 MB of that is `agflm_standard.db`** — the HTTP filter catalogue, which is redownloadable and is not the user's settings. An "export settings" that is 99 % filter database is worth knowing about before a progress spinner is designed for it.
+
+`filters.yaml` is the enabled HTTP filters as `internal_filters`, each with `title`, `id` and `is_enabled`. `config.txt` is one line: `Application version: 1.4.13`.
+
+**Three things are absent, and each one is load-bearing:**
+
+- **`adguard.conf` is not in the bundle.** So the export carries **no licence and no CA private key** — §8's *"the CA travels in `adguard.conf`, and so does the licence"* cuts the other way here, and the good way. An exported settings zip is safe to hand to someone else or to a backup. This is the single most useful fact in this section.
+- **`agflm_dns.db` and `dns_user.txt` are not in the bundle.** The DNS catalogue and the DNS user rules are **not exported**, while `proxy.yaml` — which *is* exported — carries every `dns_filtering.*` setting. So a round trip preserves DNS *settings* and loses DNS *filter selections* and *user rules*. The DNS page is a shipped v1 feature and half its content does not survive an export.
+
+### `export-logs` — and it does not contain what this project said it did
+
+| In the bundle | Bytes |
+| --- | --- |
+| `proxy.yaml` | 8,950 |
+| `app.log` | 9,200,646 |
+| `proxy.log` | 4,053,618 |
+| `proxy.log.1` | 10,485,626 |
+| `app_nm.log` | 218 |
+| `config.txt` | 506 |
+
+**`access.log` is not in it.** Measured on two separate runs, against an install that holds `access.log`, `access.log.1` and `access.log.2` — none of the three is bundled, while `proxy.log`'s rotated `.1` generation *is*. The omission is deliberate and reproducible.
+
+This corrects a sentence this project had already written down. `overnight-v2.md` §2.3 stated that `export-logs` bundles *"`app.log`, `proxy.log` and `access.log`, which are a record of what the user browsed"*, and hung a UI requirement on it. Two thirds of that was right. **The claim was never measured**, and it is the §4 pattern again — a plausible list, asserted, in a document whose own §4 forbids exactly that.
+
+**What it *does* contain that nobody would guess: `proxy.yaml`.** An "export logs" is also a full settings disclosure. `config.txt` here is richer than the settings bundle's — 506 bytes carrying the User-Agent (application version, kernel release, architecture), the install's **Application ID** (the same identifier §7 describes the activation link carrying), and the installed filter list. No e-mail and no licence key appear in it.
+
+So the honest summary for a UI: **the logs bundle is less sensitive than assumed about browsing and more sensitive than assumed about configuration.**
+
+### `import-settings` creates `proxy.yaml`, and leaves an install that cannot filter HTTPS
+
+Run against a **virgin** `XDG_DATA_HOME` with a settings zip:
+
+```
+Created data directory <dir>/adguard-cli
+Settings successfully imported from zip: <zip>          # exit 0
+```
+
+This confirms §5's aside that `import-settings` is the only alternative to `configure` for creating `proxy.yaml`, and it is the whole of the first-run collision: **an unconfigured install offered an import is a second path through first run.** What that path produces, measured immediately afterwards:
+
+- `proxy.yaml`, `agflm_standard.db`, `browsers.yaml`, `https_exclusions.txt`, `user.txt`, `userscripts/`, `logs/`, and an 88-byte `adguard.conf`.
+- **The install is unlicensed.** `license` answers `You need to activate an AdGuard license to use this command`. The zip carried no licence and the import invented none.
+- **There is no certificate.** No `AdGuard CLI CA.pem` and no `SSL/` directory, while the imported `proxy.yaml` holds `https_filtering: enabled: true`. That is precisely the *switch that reads on and cannot work* state `architecture.md` §5 requires to be marked — arrived at, this time, by the supported route rather than by a hand edit.
+- `agflm_dns.db` appears **anyway**, dated with the shipped defaults rather than the export. It is seeded by the CLI, not restored from the bundle — consistent with it being absent from the zip.
+- `dns_user.txt` is **absent immediately after the import** and appears after the next invocation of any command. A transient dangling reference: `proxy.yaml` names a file that does not exist yet. It self-heals, so it is a curiosity rather than a defect — recorded because a check run in that window would see a broken install.
+
+### Feeding it the wrong zip succeeds
+
+Because the two exports share a filename, this is not a hypothetical. `import-settings -i <a **logs** zip>` against a virgin directory:
+
+```
+Created data directory <dir>/adguard-cli
+Settings successfully imported from zip: <zip>          # exit 0, identical wording
+```
+
+`proxy.yaml` is created — it was in the logs bundle — so configuration really is restored. But `app.log`, `proxy.log`, `proxy.log.1` and `app_nm.log` are unpacked **into the data directory root** rather than into `logs/`, and `browsers.yaml`, `https_exclusions.txt`, `user.txt` and `userscripts/` never arrive at all, because they were never in that zip.
+
+**The result is a partial install reported as a complete success, in wording indistinguishable from the correct case.** This is *the confirmation is not the evidence* in its sharpest form yet: there is no exit code, no message and no filename that separates the right artifact from the wrong one. **A file picker handed straight to `import-settings` is not a safe design** — the manifest is the only discriminator (`filters.yaml` and `agflm_standard.db` for settings; `app.log` for logs), and reading it is a zip listing, not a protocol.

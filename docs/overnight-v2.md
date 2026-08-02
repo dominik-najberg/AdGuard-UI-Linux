@@ -78,8 +78,18 @@ and all three artifacts are zip. And `import-settings` is the second write path
 outside contract §5's rule — `configure` is the first — and the first to operate
 on an install that is already configured.
 
-`export-logs` bundles `app.log`, `proxy.log` and `access.log`, which are a record
-of what the user browsed. The button says what is in the bundle.
+~~`export-logs` bundles `app.log`, `proxy.log` and `access.log`, which are a
+record of what the user browsed. The button says what is in the bundle.~~
+
+**Corrected 2 August 2026, by measuring it.** `export-logs` bundles `app.log`,
+`proxy.log`, `proxy.log.1`, `app_nm.log`, a diagnostic `config.txt` — and
+**`proxy.yaml`**. It does **not** bundle `access.log`, on two runs, against an
+install holding three generations of it. So the sentence above was two thirds
+right and asserted rather than measured, in the file whose own §4 forbids that;
+it is struck rather than edited so the mistake stays visible. The requirement it
+carried survives and gets sharper: the button still says what is in the bundle,
+but what it has to say is that a *logs* export discloses the **configuration**,
+not the browsing history. Contract §13 has the manifests.
 
 ---
 
