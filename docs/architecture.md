@@ -149,7 +149,7 @@ An `AdwApplicationWindow` with `AdwNavigationSplitView`, plus `AdwToastOverlay` 
 | **Status** | Hero panel: protection on/off, one primary action, restart; three at-a-glance figures; HTTP + SOCKS5 endpoints; what is being filtered; licence state. Every figure and row but the licence links to the page that owns the setting behind it, and the HTTP endpoint carries the root-helper caveat of §6 | `status`, `license`, plus `proxy.yaml` and `agflm_*.db` for the figures, and one `stat` of the root helper |
 | **Protection** | `AdwSwitchRow`s: ad blocking, HTTPS filtering, stealth mode, DNS filtering, Safe Browsing, CRLite; the certificate-trust check under them | `proxy.yaml` → `config set`, plus the system trust store (§6) |
 | **Filters** | `AdwPreferencesGroup` per `filter_group`, switch per filter, custom-filter add | `agflm_standard.db` → `filters …` |
-| **DNS** | DNS filter list, user rules, upstream/fallback/bootstrap servers, listen port | `agflm_dns.db`, `dns_filtering.*` |
+| **DNS** | DNS filter list, user rules, upstream/fallback/bootstrap servers, listen port, ECH blocking | `agflm_dns.db`, `dns_filtering.*` |
 | **Advanced** | Proxy mode, HTTPS filtering, secure DNS filtering, ports, listen address, auth, outbound proxy, worker threads, log level | `proxy.yaml` → `config set` |
 | **Stealth** | The 26 settings behind the one `stealthmode.enabled` switch Protection shows: cookies, tracking, identity, browser APIs, anti-DPI | `proxy.yaml` → `config set` |
 
@@ -194,15 +194,15 @@ Notes that shape the widgets:
 
 **The count when it was taken: 80 leaf keys in the file, 58 rendered somewhere, 22 not.** And §7's prediction holds — the gap is smaller than "parity" sounds, because seven of the 22 should stay unrendered and two belong to a different item.
 
-**Since then five have been built** (the *HTTPS filtering* group, below), so the live figures are **63 rendered, 17 not**. The enumeration's own counts are left as they were taken rather than edited in place: it is a measurement with a date on it, and rewriting the numbers would make the later work invisible.
+**Since then six have been built** — the *HTTPS filtering* group and `dns_filtering.block_ech`, both below — so the live figures are **64 rendered, 16 not**. The enumeration's own counts are left as they were taken rather than edited in place: it is a measurement with a date on it, and rewriting the numbers would make the later work invisible.
 
 **One measured caveat on the 58.** `send_crash_reports` is the only key rendered *exclusively* by the first-run assistant. It is reachable on the one screen a user sees once and can never return to, so a user who changes their mind about crash telemetry has no page to change it on. That is a gap of a different shape from the 22 and it is listed with them below.
 
 Everything in the *Key*, *Type* and *Stock* columns is read from the file; every key marked addressable answered `config get` with `key = value` at exit 0, measured against the live install with `proxy.yaml`'s hash taken either side and unmoved (contract §5 for the three that refuse). **The *Verdict* column is a proposal, not a measurement** — it is the reasoning this enumeration exists to produce, and §7 remains the authority over whether any of it becomes a row.
 
-#### Should become rows — 11 proposed, **5 built**
+#### Should become rows — 11 proposed, **6 built**
 
-**The first five are done**, as of 2 August 2026: they are the *HTTPS filtering* group on the Advanced page, between *Proxy mode* and *Secure DNS filtering*. All five were measured writable through `config set` before the code was written — surgical, one line each, the file's 220 unchanged — and the group was then verified rendering headlessly, with each switch's state matching the file. **So the gap is now 17 unrendered keys, not 22**, and this table is the record of why each of the rest is or is not next.
+**Six are done**, as of 2 August 2026: the *HTTPS filtering* group on the Advanced page, between *Proxy mode* and *Secure DNS filtering*, and `dns_filtering.block_ech` as DNS ▸ *Browser compatibility*. Every one was measured writable through `config set` before the code was written — surgical, one line each, the file's 220 unchanged — and then verified rendering headlessly, with each switch's state matching the file. **So the gap is now 16 unrendered keys, not 22**, and this table is the record of why each of the rest is or is not next.
 
 | Key | Type | Stock | Where it belongs, and what it depends on |
 | --- | --- | --- | --- |
@@ -211,7 +211,7 @@ Everything in the *Key*, *Type* and *Stock* columns is read from the file; every
 | ~~`https_filtering.ocsp_check_enabled`~~ | bool | `true` | **Built** — same group |
 | ~~`https_filtering.enforce_certificate_transparency`~~ | bool | `true` | **Built** — same group |
 | ~~`https_filtering.http3_filtering_enabled`~~ | bool | `true` | **Built** — same group, and the row carries the file's *experimental* |
-| `dns_filtering.block_ech` | bool | `false` | **DNS page**, not Advanced — it sits beside the other `dns_filtering.*` keys that page already owns |
+| ~~`dns_filtering.block_ech`~~ | bool | `false` | **Built** — DNS ▸ *Browser compatibility*, its own group and the page's last |
 | `safebrowsing.send_anonymous_statistics` | bool | `false` | **Protection**, under the Safe Browsing switch it qualifies |
 | `auto_enable_language_filters` | bool | `true` | **Filters page** — it decides what that page's catalogue turns on, and `locale.rs` already holds the matching logic |
 | `adguard_headers_enabled` | bool | `false` | Advanced *Diagnostics*, the natural neighbour of HAR capture |
@@ -222,7 +222,17 @@ Five of the eleven were one coherent block — the `https_filtering.*` group —
 
 **Its dependency is stated in the group description, not on each row, and that is deliberate.** All five are inert unless `https_filtering.enabled` is on, but that switch is the *section they live in* rather than another section — which is not what `Setting::requires()` models. `requires()` exists for the cross-section dependencies `proxy.yaml` states in words and the CLI does not enforce, and `only_the_documented_settings_declare_a_dependency` asserts there are exactly two of those. The right precedent is Stealth: its twenty-six settings all depend on `stealthmode.enabled`, and every group there says so in its description rather than marking twenty-six rows. Extending that is what §7 asked for; adding a sixth and seventh `requires()` would have been the *dependency the GUI invents* that same test exists to catch.
 
-**`dns_filtering.block_ech` names an inconsistency worth fixing while it is cheap.** Its counterpart `https_filtering.encrypted_client_hello` is on Advanced, under *Secure DNS filtering*, while this one would sit on the DNS page — two halves of ECH handling on two pages. Whichever way it is resolved, it should be resolved deliberately.
+**`dns_filtering.block_ech` was called an inconsistency, and reading the file settles it the other way.** The claim was that it and `https_filtering.encrypted_client_hello` are two halves of ECH handling landing on two pages, and that whichever way it went it should go deliberately. It went deliberately, and it went *apart*, because `proxy.yaml` describes them as different features rather than two halves of one:
+
+> `encrypted_client_hello` — *"Encrypted Client Hello (ECH) support - enables ECH for better privacy. Requires dns_filtering to be enabled"*
+>
+> `block_ech` — *"Block ECH by removing 'ech' parameter from SVCB/HTTPS DNS records. Most browsers auto-detect HTTPS filtering and disable ECH themselves. Enable this only for problematic browsers that don't auto-detect"*
+
+One is a privacy feature AdGuard offers; the other is a workaround for a browser that fails to notice HTTPS filtering, and turning it on **costs** the privacy the first one buys. Filing them together under *Secure DNS filtering* would put a switch that strips ECH directly beneath one that enables it, reading as a matched pair of preferences when they are nothing of the kind. So `encrypted_client_hello` stays where v1 shipped it and `block_ech` went to the DNS page — in **its own group, *Browser compatibility*, placed last**, because the file's own comment says the common case is to leave it alone.
+
+**Its dependency is on the row, not the group, which is the opposite of the `https_filtering` five and for a reason.** Same shape — a key depending on the `enabled` of the section it lives in, so no `requires()` either way — but the group here holds one row, and a description carrying a caveat for a single switch is a caveat the user reads before knowing whether it applies. The DNS page already puts this kind of thing in the subtitle and moves it with the file: the mode row's subtitle reads `dns_filtering.enabled` as well as its own key. The ECH row does the same, and its paint snapshot keys on both settings for the same reason that one does.
+
+**Four renderings, four walks.** Off-and-live, on-and-live, on-with-DNS-filtering-off, and a `block_ech` no reader can take as a boolean — the last only reachable by hand-editing the file, because `config set` refuses `notabool` and coerces `1`/`0`. The third is the one worth having: `config set dns_filtering.block_ech true` succeeds and prints `Config has been updated` with `dns_filtering.enabled = false`, so the subtitle is the only thing between the user and a switch that is stored and not applied. The fourth greys the row out, which the walk now proves rather than asserts — `building.md` §3.
 
 #### Should stay unrendered (7)
 

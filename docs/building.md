@@ -358,6 +358,15 @@ Confirm by re-walking and looking for a heading that only the target page has, r
 
 **The a11y bus must be the one the app is on.** `gsettings get org.gnome.desktop.interface toolkit-accessibility` is `false` on this machine, and the app's own complaint when the bus is missing is explicit — *Unable to connect to the accessibility bus at `unix:path=/run/user/1000/at-spi/bus`*. Launch `/usr/libexec/at-spi-bus-launcher --launch-immediately` **inside** the same `dbus-run-session` as the app and the probe, with `GTK_A11Y=atspi` exported, and the walk finds it.
 
+**Report insensitivity, or half of every unavailable branch stays unproved.** Several rows in this application grey themselves out when `proxy.yaml` holds a shape they cannot read — the DNS user-rules row, the listen-port row, the ECH row — and each writes an *Unavailable — …* subtitle at the same time. A walk that reads only names and checked-state proves the subtitle and not the greying, which is the half that actually stops the user writing nonsense back. `SENSITIVE` is the state GTK clears for `set_sensitive(false)`, and it costs two lines:
+
+```python
+if not node.get_state_set().contains(Atspi.StateType.SENSITIVE):
+    mark += "  [INSENSITIVE]"
+```
+
+**Take the control run.** Added 2 August 2026 while verifying the ECH row, and the marker appearing on the hand-broken config proves nothing on its own — the same walker against a readable one has to come back with **zero** of them. It did: `grep -c INSENSITIVE` gave 1 on the broken file and 0 on the good one, on a page carrying about sixty rows. This is `overnight-v2.md` §4's *silence only means something once the input is known to have changed*, pointed at a probe rather than at a config.
+
 ### Taking focus away and giving it back
 
 The three checks that live outside `proxy.yaml` — the root helper, the certificate, and browser integration — all re-read themselves from one `connect_is_active_notify` handler in `main.rs` (`architecture.md` §6). For a long time the handler was the one line in this application nothing had ever exercised, because the note in this section said focus needed `xdotool`, and there is no `xdotool` here, no `wmctrl`, and no window manager on the Xvfb display at all.

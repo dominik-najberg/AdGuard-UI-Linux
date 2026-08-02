@@ -416,6 +416,31 @@ pub mod key {
     pub const DNS_FALLBACKS: &str = "dns_filtering.fallbacks";
     pub const DNS_BOOTSTRAPS: &str = "dns_filtering.bootstraps";
 
+    /// Strip the `ech` parameter from SVCB/HTTPS DNS answers.
+    ///
+    /// Measured on 1.4.13: readable with `config get`, writable with `config
+    /// set`, one line replaced without moving the file's 220. Type-checked as a
+    /// boolean — `notabool`, `True`, `TRUE` and `yes` are all refused with
+    /// *"Invalid value type: The value of the setting must be an boolean"*, at
+    /// **exit 0** and with the file unchanged, while `1` and `0` are accepted
+    /// and stored as integers. That last is the type-pun contract §5 already
+    /// records and [`Config::bool_at`] already coerces; measured here for a
+    /// third key, and a confirmation rather than a discovery.
+    ///
+    /// No `requires()`, for the same reason the five `https_filtering` booleans
+    /// declare none: the dependency is on `dns_filtering.enabled`, the section
+    /// it lives in, not another section. The DNS page carries it in the row's
+    /// own subtitle instead, which is where that page already puts the
+    /// both-ways dependency between the switch and the listen port.
+    ///
+    /// Not the counterpart of [`HTTPS_ECH`], which is why it is on a different
+    /// page and `architecture.md` §5 stopped calling that an inconsistency:
+    /// `proxy.yaml` describes that one as ECH *support*, "enables ECH for
+    /// better privacy", and this one as a workaround for browsers that fail to
+    /// disable ECH themselves once they detect HTTPS filtering. Enabling this
+    /// one costs the privacy the other one buys.
+    pub const DNS_BLOCK_ECH: &str = "dns_filtering.block_ech";
+
     // Both documented in `proxy.yaml` as "Requires dns_filtering to be
     // enabled", and neither enforced: measured, `config set
     // https_filtering.encrypted_client_hello true` succeeds with

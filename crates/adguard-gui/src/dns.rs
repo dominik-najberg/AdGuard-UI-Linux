@@ -71,6 +71,7 @@ struct Widgets {
     fallbacks: adw::EntryRow,
     bootstraps: adw::EntryRow,
     user_rules: adw::SwitchRow,
+    block_ech: adw::SwitchRow,
 }
 
 /// What each row of the settings half was last painted from.
@@ -89,10 +90,11 @@ struct Painted {
     fallbacks: String,
     bootstraps: String,
     user_rules: String,
+    block_ech: String,
 }
 
 impl Painted {
-    /// How many of the five rows differ. Field by field rather than a whole-
+    /// How many of the six rows differ. Field by field rather than a whole-
     /// struct comparison, because the answer is a count and not a yes/no.
     fn moved_to(&self, next: &Self) -> usize {
         [
@@ -101,6 +103,7 @@ impl Painted {
             self.fallbacks != next.fallbacks,
             self.bootstraps != next.bootstraps,
             self.user_rules != next.user_rules,
+            self.block_ech != next.block_ech,
         ]
         .into_iter()
         .filter(|differs| *differs)
@@ -327,7 +330,33 @@ impl DnsPage {
         user_rules.set_subtitle_lines(2);
         rules.add(&user_rules);
 
-        self.connect(&mode, &port, &upstream, &fallbacks, &bootstraps, &user_rules);
+        // Its own group, and last, because it is a workaround rather than a
+        // preference: `proxy.yaml` says most browsers disable ECH themselves
+        // once they detect HTTPS filtering, and that this is for the ones that
+        // do not. Putting it beside "Encrypted Client Hello" on Advanced would
+        // file a switch that *costs* privacy under one that buys it.
+        let compatibility = adw::PreferencesGroup::builder()
+            .title("Browser compatibility")
+            .description(
+                "Most browsers notice HTTPS filtering and turn Encrypted Client Hello off \
+                 by themselves. Only reach for this if one does not.",
+            )
+            .build();
+        let block_ech = adw::SwitchRow::new();
+        block_ech.set_use_markup(false);
+        block_ech.set_title("Block Encrypted Client Hello");
+        block_ech.set_subtitle_lines(3);
+        compatibility.add(&block_ech);
+
+        self.connect(
+            &mode,
+            &port,
+            &upstream,
+            &fallbacks,
+            &bootstraps,
+            &user_rules,
+            &block_ech,
+        );
         *self.widgets.borrow_mut() = Some(Widgets {
             filtering: filtering.clone(),
             mode,
@@ -337,6 +366,7 @@ impl DnsPage {
             fallbacks,
             bootstraps,
             user_rules,
+            block_ech,
         });
 
         // The prelude is built before the worker in `reload` has necessarily
@@ -351,7 +381,7 @@ impl DnsPage {
             None => self.refresh_config(),
         }
 
-        vec![filtering, servers, rules]
+        vec![filtering, servers, rules, compatibility]
     }
 
     fn connect(
@@ -362,6 +392,7 @@ impl DnsPage {
         fallbacks: &adw::EntryRow,
         bootstraps: &adw::EntryRow,
         user_rules: &adw::SwitchRow,
+        block_ech: &adw::SwitchRow,
     ) {
         mode.connect_selected_notify({
             let this = Rc::downgrade(self);
@@ -414,6 +445,17 @@ impl DnsPage {
                 this.write_user_rules(row.is_active());
             }
         });
+
+        block_ech.connect_active_notify({
+            let this = Rc::downgrade(self);
+            move |row| {
+                let Some(this) = this.upgrade() else { return };
+                if this.painting.get() {
+                    return;
+                }
+                this.write_block_ech(row.is_active());
+            }
+        });
     }
 
     // ---- painting -------------------------------------------------------
@@ -455,6 +497,14 @@ impl DnsPage {
             fallbacks: format!("{:?}", config.str_at(key::DNS_FALLBACKS)),
             bootstraps: format!("{:?}", config.str_at(key::DNS_BOOTSTRAPS)),
             user_rules: format!("{:?}", config.lists(key::DNS_FILTERS, DNS_USER_RULES_ENTRY)),
+            // Two settings, for one row, for the same reason `mode` carries
+            // two: this row's subtitle reads `dns_filtering.enabled` as well as
+            // its own key, and has to move when either does.
+            block_ech: format!(
+                "{:?} filtering={:?}",
+                config.bool_at(key::DNS_BLOCK_ECH),
+                config.bool_at(key::DNS_FILTERING)
+            ),
         };
         let moved = match self.painted.borrow().as_ref() {
             Some(before) => before.moved_to(&fresh),
@@ -524,6 +574,27 @@ impl DnsPage {
                 widgets.user_rules.set_subtitle(&format!(
                     "Unavailable — {} is not a list in this file",
                     key::DNS_FILTERS
+                ));
+            }
+        }
+
+        match config.bool_at(key::DNS_BLOCK_ECH) {
+            Some(on) => {
+                widgets.block_ech.set_sensitive(true);
+                widgets.block_ech.set_active(on);
+                widgets.block_ech.set_subtitle(&block_ech_subtitle(
+                    on,
+                    config.bool_at(key::DNS_FILTERING) == Some(true),
+                ));
+            }
+            // A shape `bool_at` cannot read as a boolean at all. It coerces the
+            // integers `config set` writes for `1` and `0`, so reaching this
+            // needs a hand edit.
+            None => {
+                widgets.block_ech.set_sensitive(false);
+                widgets.block_ech.set_subtitle(&format!(
+                    "Unavailable — {} does not hold a boolean in this file",
+                    key::DNS_BLOCK_ECH
                 ));
             }
         }
@@ -666,6 +737,27 @@ impl DnsPage {
         });
     }
 
+    /// Write the ECH-stripping switch.
+    ///
+    /// Decided against the last reading rather than against the row, the same
+    /// way every other write on this page is: a reconcile may have moved the
+    /// switch under the user, and `Config has been updated` prints for a no-op.
+    /// Unreadable is not a licence to write — the row is insensitive in that
+    /// case, and this is the second guard rather than the only one.
+    fn write_block_ech(self: &Rc<Self>, on: bool) {
+        let present = self
+            .last
+            .borrow()
+            .as_ref()
+            .and_then(|config| config.bool_at(key::DNS_BLOCK_ECH));
+        if present == Some(on) || present.is_none() {
+            return;
+        }
+
+        let cli = self.cli.clone();
+        self.write(move || cli.set_bool(key::DNS_BLOCK_ECH, on));
+    }
+
     /// act -> re-read -> reconcile, for every write on this page.
     ///
     /// The CLI's confirmation is never the evidence: `Config has been updated`
@@ -727,5 +819,65 @@ fn user_rules_subtitle(on: bool) -> String {
         (false, Some(path)) => format!("Not in use — {} is ignored", abbreviate(path)),
         (true, None) => "In use".to_owned(),
         (false, None) => "Not in use".to_owned(),
+    }
+}
+
+/// What blocking ECH is doing, including when it is doing nothing.
+///
+/// The on/off half says what the switch costs, because it is the rare control
+/// here whose *enabled* state is the worse one for privacy: stripping `ech`
+/// from a DNS answer is what lets a watcher see which site is being asked for.
+///
+/// The dependency half is this page's own pattern rather than a new one. The
+/// key lives under `dns_filtering`, so its dependency is on the section it is
+/// in — `Setting::requires` is for the cross-section kind and would be a
+/// dependency the GUI invented. Measured: `config set dns_filtering.block_ech
+/// true` succeeds and prints `Config has been updated` with
+/// `dns_filtering.enabled = false`, so nothing but this sentence tells the user
+/// the switch they just moved is inert.
+fn block_ech_subtitle(on: bool, filtering_on: bool) -> String {
+    match (on, filtering_on) {
+        (true, true) => "Removing 'ech' from SVCB/HTTPS answers, which lets an \
+                         observer see the name being requested"
+            .to_owned(),
+        (true, false) => format!(
+            "No effect until {} is on — the setting is stored, not applied",
+            key::DNS_FILTERING
+        ),
+        (false, _) => "Browsers may use Encrypted Client Hello".to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The inert case has to be reachable, because the CLI lets the user create
+    /// it. Measured on 1.4.13: `config set dns_filtering.block_ech true` with
+    /// `dns_filtering.enabled = false` returns `Config has been updated`.
+    #[test]
+    fn blocking_ech_says_so_when_it_is_inert() {
+        let inert = block_ech_subtitle(true, false);
+        assert!(inert.contains("No effect"), "{inert}");
+        assert!(inert.contains(key::DNS_FILTERING), "{inert}");
+
+        let live = block_ech_subtitle(true, true);
+        assert!(!live.contains("No effect"), "{live}");
+    }
+
+    /// The switch that is worse for privacy when it is on, which is unusual
+    /// enough on this page that the subtitle is the only thing saying so.
+    #[test]
+    fn blocking_ech_names_the_cost_of_turning_it_on() {
+        assert!(block_ech_subtitle(true, true).contains("observer"));
+        assert!(!block_ech_subtitle(false, true).contains("observer"));
+    }
+
+    /// Off is off whether or not DNS filtering is on: there is nothing to
+    /// qualify, and a caveat on a switch that is doing nothing either way would
+    /// be noise.
+    #[test]
+    fn switched_off_reads_the_same_either_way() {
+        assert_eq!(block_ech_subtitle(false, true), block_ech_subtitle(false, false));
     }
 }

@@ -329,6 +329,10 @@ Config has been updated           <- ...and it still says this
 
 **Always write lowercase `true`/`false`; read tolerantly.** A strict struct deserialise would fail the whole document on a single `enabled: 1`, taking every unrelated setting down with it — which is why [`config.rs`](../crates/adguard-core/src/config.rs) walks a generic value tree and coerces per key. One junk value then costs one row instead of the page.
 
+**The refusal is at exit 0, and it is a refusal.** Measured on `dns_filtering.block_ech`, 2 August 2026, with the exit status taken from the command and not from a pipeline: `config set dns_filtering.block_ech notabool` prints `Invalid value type: The value of the setting must be an boolean`, **exits 0**, and leaves the file byte-identical. Same shape as the list-key refusal in §5 and as `har_writer.enabled` in §9 — three keys now, so the pattern is the pattern and not a quirk of one. Anything reading exit status to decide whether a boolean write landed will conclude it did.
+
+**The type-pun's blast radius is every switch this app renders**, which is worth stating once rather than re-measuring per key: it is not a property of a particular setting but of how `config set` type-checks booleans, confirmed on `har_writer.enabled` (§9) and `dns_filtering.block_ech`. Setting `https_filtering.enable_tls13 1` leaves `enable_tls13: 1` in the file too. `Config::bool_at` coerces `Integer(1)`/`Integer(0)`, so a row painted from it survives; a row painted from a strict read would not.
+
 ### List writes: `list-add` and `list-remove`
 
 A handful of keys hold YAML sequences rather than scalars — `filters`, `userscripts`, `apps`, and `dns_filtering.filters`. `config get` refuses them (§5 above), and they are written with `config list-add` / `config list-remove` instead. Measured against a sandbox seeded from the real file:
