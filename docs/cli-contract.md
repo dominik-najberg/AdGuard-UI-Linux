@@ -901,6 +901,31 @@ Two things follow, and the second is the load-bearing one.
 
 So **`.` still cannot be predicted for `har_writer.location`**, and the tempting shortcut — read one of the other two relative keys and generalise — is exactly the wrong move: `access_log_file` is not cwd-relative, and if `certificates_cache` resolves to `<data>/SSL/` it is not cwd-relative either, which means AdGuard resolves these against per-key base directories and not against one rule. **The measurement §7 asks for still requires producing an actual HAR dump.** What this entry establishes is only that the answer cannot be inferred, and that the expected outcome — the row must show an absolute path — now has a *reason* (an unpredictable base) rather than only an expectation.
 
+**Why that dump has not been produced here.** It needs a proxy that is running with `har_writer.enabled`, and starting a second one on this machine is not a sandbox operation. §8 measured that the daemon spawns its root helper in **manual** mode too — that is the whole point of that section — so a sandbox proxy would spawn a second helper against the same suid binary while this machine's real proxy is in `auto` mode redirecting system traffic through the first. §11 is what that risks: a proxy the CLI has lost track of, out of which neither `stop` nor `start` recovers and whose actual cure is `killall adguard-cli` — which would take the real proxy down with it. **This is a machine-wide change and therefore the owner's call**, not an unattended one. `handoff.md` §3 item 9 carries what an authorised run would need to do.
+
+### The HAR keys' write path, measured without a proxy
+
+The *resolution* needs a running proxy; the *write* does not, and it is half of what the row needs. Measured 2 August 2026 in an unlicensed sandbox (`XDG_DATA_HOME` at a scratch copy of `proxy.yaml`, no `adguard.conf` copied in, so no licence and no CA private key), verified by re-reading the file rather than by the confirmation line, with the line count checked at 220 after every write:
+
+| `config set har_writer.location …` | Exit | File afterwards |
+| --- | --- | --- |
+| `/tmp/har-dumps` | 0 | `'/tmp/har-dumps'` |
+| `~/har-dumps` | 0 | `'~/har-dumps'` — **the tilde is stored literally, not expanded** |
+| `har` | 0 | `'har'` |
+| `/no/such/dir/at/all` | 0 | `'/no/such/dir/at/all'` |
+| `''` (empty) | 0 | `''` |
+| `/tmp/har-dumps/` | 0 | `'/tmp/har-dumps/'` |
+| `/tmp/har dumps` | 0 | `'/tmp/har dumps'` |
+
+**`har_writer.location` is not validated in any respect.** Not existence, not absoluteness, not emptiness — and unlike `listen_address` above, which *is* validated and narrowly, this is a path-valued string and nothing checks it at all. Every value round-trips verbatim into single quotes, exactly as the stock `'.'` is quoted.
+
+**The tilde is the sharp one.** `~/har-dumps` is the single most likely thing a user types into a directory field, it is accepted at exit 0 with a cheerful `har_writer.location = ~/har-dumps`, and what lands in the file is a literal tilde. Nothing in the CLI expands it and nothing warns. Whatever the row ends up doing about `'.'`, **it has to resolve `~` itself or refuse it** — and the same applies to every other path-valued string key this file has (`access_log_file`, `https_filtering.exclusions`, `https_filtering.certificates_cache`), which the parity enumeration in `architecture.md` §5 lists.
+
+Two smaller results from the same run:
+
+- **`config reset` works on this key, and this is the first measurement of `reset` on anything but the contract's `log_level` example.** `config reset har_writer.location` answers `har_writer.location = .` then `Config has been updated`, and the file really goes back to `'.'`. So the "restore default" affordance §5 calls the obvious home for `reset` is available per row, at least here.
+- **The boolean type-pun applies to `har_writer.enabled` as well**, which is a confirmation rather than a discovery — *Booleans have two spellings* above already has it, and `Config::bool_at` already coerces `Integer(1)`. Recorded only because the HAR row is a `Switch`: `config set har_writer.enabled 1` is accepted and leaves `enabled: 1` in the file, while `yes`, `TRUE` and `notabool` are all refused with `Invalid value type: The value of the setting must be an boolean` (AdGuard's grammar, not ours).
+
 **Live stats is its own milestone, behind a spike on this format** — `architecture.md` §7 is the scope authority and put it there on 2 August 2026; this section is the input to that spike, not a scope claim of its own. Nothing in the CLI provides a counter or stats endpoint.
 
 ---
