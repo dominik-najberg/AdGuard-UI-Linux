@@ -181,7 +181,7 @@ Key syntax facts:
 
 - Dotted paths work for scalars: `config get stealthmode.enabled`, `config get listen_ports.http_proxy`.
 - `config show <section>` accepts **top-level** sections only. Nested ones fail: `config show anti_dpi` → `not found`, even though `stealthmode.anti_dpi` exists in the file. Expand the parent instead.
-- List-valued keys (`filters`, `userscripts`, `apps`) are not scalars — `config get filters` refuses. Use `list-add`/`list-remove`, or edit an auxiliary file via `--list-file`.
+- List-valued keys (`filters`, `userscripts`, `apps`) are not scalars — `config get filters` refuses. Use `list-add`/`list-remove`, or edit an auxiliary file via `--list-file`. **The refusal is at exit 0**, measured 2 August 2026 for all three: `This field is not a separate setting` followed by ``Please run `adguard-cli config show <key>` to see its structure``, byte-identical across the three, exit 0 every time. So a wrapper that distinguishes "not a setting" from "read it" cannot do so on the exit code; it is a semantic refusal like `'--bogus' not found` above. This matters for an enumeration: every other leaf key of `proxy.yaml` answers `config get` with `key = value` at exit 0 too, so **exit status separates nothing here and only the stdout shape does**.
 - **`config get` does not mask secrets.** `config get listen_auth.password` prints `listen_auth.password = admin` in full; only `config show` masks, as `password: <set>`. So `config get` is not a safe thing to log.
 - `config reset <key>` restores the shipped default and confirms in the same way (`log_level` → `info`). Not used yet; the obvious home for it is a "restore default" affordance per row.
 
@@ -872,7 +872,34 @@ Caveats before building stats on this:
 - No rotation policy is configured by us — but **AdGuard rotates these itself**, and a reader must survive it. Measured 2 August 2026: `~/.local/share/adguard-cli/logs/` held `proxy.log.1` at 10,485,626 B and `access.log.1`/`.2` at 10,485,776 / 10,485,648 B — a ~10 MiB threshold with at least two generations kept. It is the writing process's own roll, not `logrotate` and not cron: there is no `/etc/logrotate.d` entry and no cron entry, and the seam is continuous — `proxy.log.1` ends `30.07.2026 22:21:07.275314 WARN [2394586]` and `proxy.log` begins `30.07.2026 22:21:07.276439 WARN [2394586]`, 1.1 ms later under the same PID. **A tailer holding an fd loses the stream silently every ~10 MiB.**
 - There is **no push or event mechanism**. A live view must tail the file.
 
-`har_writer` (`enabled`, `location`) is the richer alternative for debugging but writes full HAR dumps — too heavy for an always-on UI.
+`har_writer` (`enabled`, `location`) is the richer alternative for debugging but writes full HAR dumps — too heavy for an always-on *capture*, which `architecture.md` §7 distinguishes from a switch that ships `false`.
+
+### Where a relative path resolves — measured, and the answer is "it depends on the key"
+
+`architecture.md` §7 makes *where `har_writer.location: '.'` resolves* the first task of the HAR item, on the grounds that nothing records the proxy's working directory. **The working directory is now recorded, and it does not settle the question — it sharpens it.** Measured 2 August 2026:
+
+```
+$ pid=$(cat ~/.local/share/adguard-cli/adguard.pid); ps -o cmd= -p $pid; readlink /proc/$pid/cwd
+adguard-cli start --no-fork --log-to-file
+/home/potworny
+```
+
+Three relative paths in `proxy.yaml`, and **no single base directory explains them**:
+
+| Key | Value in the file | Where the artifact actually is | Base that would explain it |
+| --- | --- | --- | --- |
+| `access_log_file` | `'access.log'` | `<data>/logs/access.log` | `<data>/logs/` |
+| `https_filtering.certificates_cache` | `'.'` | `<data>/SSL/` holds `cert.db` — **inferred**, the key was not traced to that path | `<data>/SSL/` |
+| `har_writer.location` | `'.'` | **no dump has ever been produced here** | unknown |
+| the proxy process | — | cwd `/home/potworny` | the launcher's cwd |
+
+Two things follow, and the second is the load-bearing one.
+
+**`adguard-cli.md`'s gloss on `access_log_file` — "relative to the data dir" — is wrong**, or at best a word short: the file is one directory further down, in `logs/`. That gloss is this project's own writing, not AdGuard's, and it went in unmeasured.
+
+**The proxy's cwd is inherited, not chosen, so a cwd-relative default would be a path the user cannot predict.** `/home/potworny` is not written anywhere in the data directory; it is where the process happened to be started from. The supporting case is on the same machine: `adguard_cli_nm`, launched by Chrome rather than by a shell, has cwd `/home/potworny/.local/opt/adguard-cli`. (That cwd is inherited from the launcher is POSIX, not a measurement of AdGuard — but two AdGuard processes with two different cwds, each matching its own launcher, is what makes it the explanation here rather than a guess.)
+
+So **`.` still cannot be predicted for `har_writer.location`**, and the tempting shortcut — read one of the other two relative keys and generalise — is exactly the wrong move: `access_log_file` is not cwd-relative, and if `certificates_cache` resolves to `<data>/SSL/` it is not cwd-relative either, which means AdGuard resolves these against per-key base directories and not against one rule. **The measurement §7 asks for still requires producing an actual HAR dump.** What this entry establishes is only that the answer cannot be inferred, and that the expected outcome — the row must show an absolute path — now has a *reason* (an unpredictable base) rather than only an expectation.
 
 **Live stats is its own milestone, behind a spike on this format** — `architecture.md` §7 is the scope authority and put it there on 2 August 2026; this section is the input to that spike, not a scope claim of its own. Nothing in the CLI provides a counter or stats endpoint.
 

@@ -333,7 +333,7 @@ Main file: `~/.local/share/adguard-cli/proxy.yaml`. Values below are this machin
 
 | Key | Example | Meaning |
 | --- | --- | --- |
-| `proxy_mode` | `manual` | `manual` — apps opt in by pointing at the proxy. Other modes filter system-wide via the root helper. |
+| `proxy_mode` | `auto` | `manual` — apps opt in by pointing at the proxy. `auto` filters system-wide via the root helper. This machine was moved to `auto` by its owner on 1 August 2026; the row read `manual` until then. |
 | `listen_address` | `127.0.0.1` | Interface the proxy binds to. `0.0.0.0` exposes it to the LAN — pair with `listen_auth`. |
 | `listen_ports.http_proxy` | `3129` | HTTP proxy port |
 | `listen_ports.socks5_proxy` | `1081` | SOCKS5 proxy port |
@@ -347,10 +347,11 @@ Main file: `~/.local/share/adguard-cli/proxy.yaml`. Values below are this machin
 | `userscripts` | list of meta/content pairs | Installed userscripts |
 | `apps` | see below | Per-application filtering rules |
 | `log_level` | `info` | Logging verbosity |
-| `access_log_file` | `access.log` | Access log filename, relative to the data dir |
+| `access_log_file` | `access.log` | Access log filename. Resolved against `<data>/logs/`, **not** the data dir — measured 2 August 2026, the file is at `~/.local/share/adguard-cli/logs/access.log`. Do not generalise that base to the other relative keys; see contract §9 |
 | `update_channel` | `release` | App update channel |
 | `send_crash_reports` | `false` | Crash telemetry |
-| `show_hints`, `show_notifications` | `true` / `false` | CLI hint text and desktop notifications |
+| `show_hints` | `true` | CLI hint text — measured, it lands between the echo and the confirmation of a `config set` (contract §5) |
+| `show_notifications` | `false` | **Unmeasured.** The file's comment says only *"show protection status notification"* and names no mechanism. An earlier revision of this row glossed it "desktop notifications"; that was this project's guess, and `handoff.md` §3 item 8 carries it as an open question because the answer decides whether it collides with this app's tray |
 
 ### `listen_auth`
 

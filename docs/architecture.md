@@ -150,7 +150,8 @@ An `AdwApplicationWindow` with `AdwNavigationSplitView`, plus `AdwToastOverlay` 
 | **Protection** | `AdwSwitchRow`s: ad blocking, HTTPS filtering, stealth mode, DNS filtering, Safe Browsing, CRLite; the certificate-trust check under them | `proxy.yaml` → `config set`, plus the system trust store (§6) |
 | **Filters** | `AdwPreferencesGroup` per `filter_group`, switch per filter, custom-filter add | `agflm_standard.db` → `filters …` |
 | **DNS** | DNS filter list, user rules, upstream/fallback/bootstrap servers, listen port | `agflm_dns.db`, `dns_filtering.*` |
-| **Advanced** | Ports, listen address, auth, outbound proxy, worker threads, log level | `proxy.yaml` → `config set` |
+| **Advanced** | Proxy mode, secure DNS filtering, ports, listen address, auth, outbound proxy, worker threads, log level | `proxy.yaml` → `config set` |
+| **Stealth** | The 26 settings behind the one `stealthmode.enabled` switch Protection shows: cookies, tracking, identity, browser APIs, anti-DPI | `proxy.yaml` → `config set` |
 
 Notes that shape the widgets:
 
@@ -186,6 +187,63 @@ Notes that shape the widgets:
 - **The link is shown as well as opened.** `UriLauncher` can fail — no browser, a portal that refuses — and a flow whose only exit is a browser that did not open is a dead end. The row carries the link with a copy button, and the launcher's failure becomes a toast rather than the end of the road.
 - **Activation is offered only from a licence that is readably inactive.** Not from one we merely failed to read: what `activate` does to a working licence is not measured, and the app should not find out on a user's machine. "The licence is not active" and "the licence could not be read" are different facts and the page keeps them apart, exactly as it distinguishes "off" from "unknown" everywhere else.
 - **A successful `license` read is sensitive output.** It carries the owner's e-mail and the licence key in full. `License::masked_key` shows the key's last four characters and nothing else, and `License`'s `Debug` is hand-written to mask both fields, so a stray `{:?}` in a log or an error cannot leak them. Note that the crate's older scrubber is no help here: `redact_error` replaces a secret the *caller* already knows, which is why its only caller is `Cli::set_secret`. A licence key is what came back, so there is nothing to hand it — `Cli::license` redacts by shape instead, with `redact_values` (contract §3).
+
+### What the pages do not render — the advanced-parity enumeration
+
+§7 makes this enumeration the **first task** of the advanced-parity item and says plainly that it is not code. It was taken on 2 August 2026. The walk is mechanical rather than by eye: every leaf path of `proxy.yaml` on one side, every `key:` literal reachable from `ADVANCED`, `STEALTH`, `SETUP` and `Toggle::key` on the other, resolved through `config::key` so the table cannot drift from the source the way a retyped one would.
+
+**The count: 80 leaf keys in the file, 58 rendered somewhere, 22 not.** And §7's prediction holds — the gap is smaller than "parity" sounds, because seven of the 22 should stay unrendered and two belong to a different item.
+
+**One measured caveat on the 58.** `send_crash_reports` is the only key rendered *exclusively* by the first-run assistant. It is reachable on the one screen a user sees once and can never return to, so a user who changes their mind about crash telemetry has no page to change it on. That is a gap of a different shape from the 22 and it is listed with them below.
+
+Everything in the *Key*, *Type* and *Stock* columns is read from the file; every key marked addressable answered `config get` with `key = value` at exit 0, measured against the live install with `proxy.yaml`'s hash taken either side and unmoved (contract §5 for the three that refuse). **The *Verdict* column is a proposal, not a measurement** — it is the reasoning this enumeration exists to produce, and §7 remains the authority over whether any of it becomes a row.
+
+#### Should become rows (11)
+
+| Key | Type | Stock | Where it belongs, and what it depends on |
+| --- | --- | --- | --- |
+| `https_filtering.filter_ev_certificates` | bool | `false` | Advanced, a new *HTTPS filtering* group. Depends on `https_filtering.enabled` |
+| `https_filtering.enable_tls13` | bool | `true` | same group, same dependency |
+| `https_filtering.ocsp_check_enabled` | bool | `true` | same group, same dependency |
+| `https_filtering.enforce_certificate_transparency` | bool | `true` | same group, same dependency |
+| `https_filtering.http3_filtering_enabled` | bool | `true` | same group, same dependency. The file calls it *experimental*; the row should too |
+| `dns_filtering.block_ech` | bool | `false` | **DNS page**, not Advanced — it sits beside the other `dns_filtering.*` keys that page already owns |
+| `safebrowsing.send_anonymous_statistics` | bool | `false` | **Protection**, under the Safe Browsing switch it qualifies |
+| `auto_enable_language_filters` | bool | `true` | **Filters page** — it decides what that page's catalogue turns on, and `locale.rs` already holds the matching logic |
+| `adguard_headers_enabled` | bool | `false` | Advanced *Diagnostics*, the natural neighbour of HAR capture |
+| `filtered_ports` | str | `'80:5221,5300:49151'` | Advanced *Proxy mode*. Auto mode only, so it depends on `proxy_mode` — and its compound range syntax is ours to validate, since `config set` type-checks strings not at all |
+| `outbound_interface` | null | `null` | Advanced *Outbound proxy*. Needs a design for the null case before it is a row: how an empty text field writes back `null` is unmeasured |
+
+Five of the eleven are one coherent block — the `https_filtering.*` group — which makes it the obvious first slice, and all five carry the same dependency the Advanced page already states for `filter_secure_dns_mode` and `encrypted_client_hello`. That is the pattern §7 says to extend rather than replace.
+
+**`dns_filtering.block_ech` names an inconsistency worth fixing while it is cheap.** Its counterpart `https_filtering.encrypted_client_hello` is on Advanced, under *Secure DNS filtering*, while this one would sit on the DNS page — two halves of ECH handling on two pages. Whichever way it is resolved, it should be resolved deliberately.
+
+#### Should stay unrendered (7)
+
+| Key | Type | Why not |
+| --- | --- | --- |
+| `show_hints` | bool | Configures the **CLI's own terminal output** — the hint text contract §5 notes landing between the echo and the confirmation. A GUI switch for it changes nothing the GUI user can see |
+| `access_log_file` | str | Renaming the log file moves an artifact `export-logs` bundles **by name**. The useful feature is reading or exporting the log, not renaming it |
+| `filters` | list | The plumbing behind the Filters page, which manages the catalogue through `adguard-cli filters`. A row here would be a second, contradictory way to manage filter lists. Refuses `config get` anyway |
+| `userscripts` | list | Out by §7's own decision, re-checked 2 August 2026 and unchanged. Refuses `config get` |
+| `apps` | list | Per-app filter actions: three different entry shapes and an **ordering rule** (*"Wildcard should be last"*) that no generic row can express. This is a feature with a design, not a parity gap. Refuses `config get` |
+| `https_filtering.exclusions` | str | Names the file `https_exclusions.txt`, 72,563 B of it. The feature a user wants is editing the **list**; renaming the file is not that, and the list is a `--list-file` job of its own |
+| `https_filtering.certificates_cache` | str | A cache directory the trust check of §6 already reasons about by its real path. Letting a user point it elsewhere invites the same failure `root_certificate_name` was found to cause: a check aimed at a path nothing will create |
+
+#### Cannot be classified without a measurement (2)
+
+| Key | Type | Stock | What is missing |
+| --- | --- | --- | --- |
+| `update_channel` | str | `'release'` | `adguard-cli` really does have `update` and `check-update` subcommands (measured from `--help` on 1.4.13), so the key has a consumer. What is **not** measured is whether either command is safe to expose from a GUI on a machine where `adguard-cli` was installed by a package manager, or what the three channels do to a working install |
+| `show_notifications` | bool | `false` | The file's own comment says *"show protection status notification"* and says nothing about who shows it. `adguard-cli.md` glosses it as "desktop notifications" — **that gloss is this project's writing and is unmeasured**. If it is desktop notifications, it collides head-on with this app's tray, and the row is a design question rather than a switch; if it is terminal output it belongs with `show_hints` above. One measurement decides which table it goes in |
+
+#### Belongs to a different item (2)
+
+`har_writer.enabled` and `har_writer.location` are §7's own HAR-capture item and are not counted as a parity gap. Contract §9 now carries what is measured about the second of them, which is that its `'.'` default still cannot be predicted.
+
+#### And one that is rendered, but only once
+
+`send_crash_reports` — see the caveat above. Whether it gets a permanent home is a smaller decision than the eleven, and it is the only one on this page that costs nothing to reason about: the assistant's own table already argues the key is worth asking about, and that argument does not expire when the assistant closes.
 
 ### GNOME dock icon grouping
 
