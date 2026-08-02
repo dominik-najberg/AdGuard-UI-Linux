@@ -347,6 +347,14 @@ impl AdvancedPage {
             if group.settings.iter().any(|s| s.key == key::LISTEN_ADDRESS) {
                 self.listen_group.replace(Some(widget.clone()));
             }
+
+            // The logs bundle belongs beside `log_level`, which is the setting
+            // that decides what ends up in it — `architecture.md` §5. Keyed off
+            // the setting rather than the group title, so a retitled group does
+            // not silently drop the row.
+            if group.settings.iter().any(|s| s.key == key::LOG_LEVEL) {
+                widget.add(&crate::backup::logs_row(&self.cli, &self.toasts));
+            }
             page.add(&widget);
             // In table order and with nothing skipped, which is what lets
             // `reveal` index this by the position of the group in the table.
@@ -362,6 +370,14 @@ impl AdvancedPage {
                 view.paint();
                 self.helper_view.replace(Some(view));
             }
+        }
+
+        // Backup and restore, after the last group. Only on the Advanced
+        // table: `STEALTH` and the Filters settings share this page type and
+        // neither is where a user looks for a backup.
+        if self.table.iter().any(|g| g.settings.iter().any(|s| s.key == key::LOG_LEVEL)) {
+            let view = crate::backup::BackupView::new(&self.cli, &self.toasts);
+            page.add(view.widget());
         }
 
         self.apply(config);

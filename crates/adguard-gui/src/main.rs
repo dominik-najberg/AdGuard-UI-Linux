@@ -6,6 +6,7 @@
 //! measured CLI behaviour the wrapper encodes.
 
 mod advanced;
+mod backup;
 mod browser_integration;
 mod certificate;
 mod dns;
