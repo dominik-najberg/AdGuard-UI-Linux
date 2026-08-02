@@ -1,3 +1,8 @@
 /target
 *.zip
+# ...except the zip-reader's fixtures, which are test data rather than build
+# output. They are written by python's `zipfile` so the parser is checked
+# against an independent implementation, and `src/zip.rs` include_bytes!s them,
+# so a checkout without them does not compile.
+!crates/adguard-core/tests/fixtures/*.zip
 .idea/

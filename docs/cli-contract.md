@@ -1368,6 +1368,26 @@ This corrects a sentence this project had already written down. `overnight-v2.md
 
 So the honest summary for a UI: **the logs bundle is less sensitive than assumed about browsing and more sensitive than assumed about configuration.**
 
+### `-o` decides between "a file" and "a folder" by whether the path exists
+
+Measured 2 August 2026, both exports, against a sandbox:
+
+```console
+$ adguard-cli export-settings -o /tmp/exp/          # /tmp/exp exists
+Settings successfully exported to zip: /tmp/exp/adguard-cli_2026-08-02_14-40-36.zip
+$ adguard-cli export-logs -o /tmp/exp2              # /tmp/exp2 does not exist
+Logs successfully exported to zip: /tmp/exp2
+$ file /tmp/exp2
+Zip archive data
+```
+
+So an **existing directory** gets a generated `adguard-cli_<date>_<time>.zip`
+inside it, and **anything else** becomes the archive itself — at that exact
+path, with **no `.zip` appended**. A save dialog therefore cannot hand the CLI
+whatever the user typed and then look for the name it chose: which of the two
+happened depends on the filesystem, and the only reliable answer is the path on
+the confirmation line, which both forms print.
+
 ### `import-settings` creates `proxy.yaml`, and leaves an install that cannot filter HTTPS
 
 Run against a **virgin** `XDG_DATA_HOME` with a settings zip:

@@ -15,6 +15,7 @@ pub mod model;
 pub mod orphan;
 pub mod paths;
 pub mod trust;
+pub mod zip;
 
 pub use browser::BrowserIntegration;
 pub use cli::{Activation, Applied, Cli, Error};
