@@ -1,7 +1,9 @@
 # v2 plan
 
 **Live as of 2 August 2026, against `v1.0.0`.** This is the queued work: the
-owner opened v2 the day 1.0.0 was released and the repository went public.
+owner opened v2 on 2 August 2026, the day the repository went public and the
+day after 1.0.0 was tagged — two different days, and this line said one until
+2 August.
 [`handoff.md`](handoff.md) is still the state of the project and §0 there is
 still the entry point, and this is still the first plan file to be live since
 [`overnight-plan.md`](overnight-plan.md) was archived.
@@ -141,8 +143,12 @@ it — a benchmark that cannot be cancelled is a modal that cannot be closed.
 The expensive item, and the one that changes the project's character. Contract
 §9 is blunt about `access.log`: the format is undocumented and unstable across
 versions, its detail varies with `log_level` (at `info` many messages are elided
-to `...`), nothing rotates it — `proxy.log` was already 8 MB — and **there is no
-push or event mechanism**, so a live view must tail the file.
+to `...`), **AdGuard rotates it under the reader** — measured 2 August 2026, a
+~10 MiB roll with `.1`/`.2` generations kept, by the writing process itself —
+and **there is no push or event mechanism**, so a live view must tail the file.
+(This line said *nothing rotates it* until 2 August 2026, which was wrong and
+made the hazard look absent rather than central; contract §9 has the
+measurement.)
 
 That last point is the one to weigh. Every other reading in this application is
 a fact checked against a file or a database, and *verify, don't trust*

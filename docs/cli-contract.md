@@ -869,12 +869,12 @@ Caveats before building stats on this:
 
 - The format is undocumented and unstable across versions.
 - Detail depends on `log_level`; at `info` many app-log messages are elided to `...`.
-- No rotation policy is configured by us — `proxy.log` was already 8 MB.
+- No rotation policy is configured by us — but **AdGuard rotates these itself**, and a reader must survive it. Measured 2 August 2026: `~/.local/share/adguard-cli/logs/` held `proxy.log.1` at 10,485,626 B and `access.log.1`/`.2` at 10,485,776 / 10,485,648 B — a ~10 MiB threshold with at least two generations kept. It is the writing process's own roll, not `logrotate` and not cron: there is no `/etc/logrotate.d` entry and no cron entry, and the seam is continuous — `proxy.log.1` ends `30.07.2026 22:21:07.275314 WARN [2394586]` and `proxy.log` begins `30.07.2026 22:21:07.276439 WARN [2394586]`, 1.1 ms later under the same PID. **A tailer holding an fd loses the stream silently every ~10 MiB.**
 - There is **no push or event mechanism**. A live view must tail the file.
 
 `har_writer` (`enabled`, `location`) is the richer alternative for debugging but writes full HAR dumps — too heavy for an always-on UI.
 
-**Treat live stats as v2.** Nothing in the CLI provides a counter or stats endpoint.
+**Live stats is its own milestone, behind a spike on this format** — `architecture.md` §7 is the scope authority and put it there on 2 August 2026; this section is the input to that spike, not a scope claim of its own. Nothing in the CLI provides a counter or stats endpoint.
 
 ---
 
