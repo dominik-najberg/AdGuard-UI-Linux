@@ -1531,3 +1531,43 @@ mod tests {
         assert_eq!(grouped[0].1.len(), 1);
     }
 }
+
+#[cfg(test)]
+mod telemetry_tests {
+    use super::*;
+
+    /// The statistics key is deliberately **not** a seventh [`Toggle`].
+    ///
+    /// `Toggle` is the six switches that change what AdGuard does to traffic,
+    /// and `Toggle::description` is documented as taking its wording from
+    /// `proxy.yaml`'s own comments. This key has no comment to take, so a
+    /// seventh variant would either carry an invented description or break that
+    /// rule silently. It lives in its own group on the Protection page instead.
+    #[test]
+    fn the_statistics_key_is_not_a_protection_toggle() {
+        for toggle in Toggle::ALL {
+            assert_ne!(
+                toggle.key(),
+                crate::config::key::SAFEBROWSING_STATS,
+                "{:?} took over the consent key",
+                toggle
+            );
+        }
+        assert_eq!(Toggle::ALL.len(), 6, "the protection switches changed count");
+    }
+
+    /// Every `Toggle` description really does come from the file, which is the
+    /// rule the consent key could not satisfy. Cheap guard: the six are all
+    /// non-empty and none of them announces a missing description.
+    #[test]
+    fn every_toggle_still_has_wording_from_the_file() {
+        for toggle in Toggle::ALL {
+            let description = toggle.description();
+            assert!(!description.is_empty(), "{toggle:?} lost its description");
+            assert!(
+                !description.contains("not documented"),
+                "{toggle:?} has no wording in proxy.yaml and should not be a Toggle"
+            );
+        }
+    }
+}

@@ -147,7 +147,7 @@ An `AdwApplicationWindow` with `AdwNavigationSplitView`, plus `AdwToastOverlay` 
 | View | Contents | Backing |
 | --- | --- | --- |
 | **Status** | Hero panel: protection on/off, one primary action, restart; three at-a-glance figures; HTTP + SOCKS5 endpoints; what is being filtered; licence state. Every figure and row but the licence links to the page that owns the setting behind it, and the HTTP endpoint carries the root-helper caveat of §6 | `status`, `license`, plus `proxy.yaml` and `agflm_*.db` for the figures, and one `stat` of the root helper |
-| **Protection** | `AdwSwitchRow`s: ad blocking, HTTPS filtering, stealth mode, DNS filtering, Safe Browsing, CRLite; the certificate-trust check under them | `proxy.yaml` → `config set`, plus the system trust store (§6) |
+| **Protection** | `AdwSwitchRow`s: ad blocking, HTTPS filtering, stealth mode, DNS filtering, Safe Browsing, CRLite; the certificate-trust check under them; the statistics-consent row last | `proxy.yaml` → `config set`, plus the system trust store (§6) |
 | **Filters** | `AdwPreferencesGroup` per `filter_group`, switch per filter, custom-filter add | `agflm_standard.db` → `filters …` |
 | **DNS** | DNS filter list, user rules, upstream/fallback/bootstrap servers, listen port, ECH blocking | `agflm_dns.db`, `dns_filtering.*` |
 | **Advanced** | Proxy mode, HTTPS filtering, secure DNS filtering, ports, listen address, auth, outbound proxy, worker threads, log level | `proxy.yaml` → `config set` |
@@ -194,15 +194,15 @@ Notes that shape the widgets:
 
 **The count when it was taken: 80 leaf keys in the file, 58 rendered somewhere, 22 not.** And §7's prediction holds — the gap is smaller than "parity" sounds, because seven of the 22 should stay unrendered and two belong to a different item.
 
-**Since then six have been built** — the *HTTPS filtering* group and `dns_filtering.block_ech`, both below — so the live figures are **64 rendered, 16 not**. The enumeration's own counts are left as they were taken rather than edited in place: it is a measurement with a date on it, and rewriting the numbers would make the later work invisible.
+**Since then seven have been built** — the *HTTPS filtering* group, `dns_filtering.block_ech` and `safebrowsing.send_anonymous_statistics`, all below — so the live figures are **65 rendered, 15 not**. The enumeration's own counts are left as they were taken rather than edited in place: it is a measurement with a date on it, and rewriting the numbers would make the later work invisible.
 
 **One measured caveat on the 58.** `send_crash_reports` is the only key rendered *exclusively* by the first-run assistant. It is reachable on the one screen a user sees once and can never return to, so a user who changes their mind about crash telemetry has no page to change it on. That is a gap of a different shape from the 22 and it is listed with them below.
 
 Everything in the *Key*, *Type* and *Stock* columns is read from the file; every key marked addressable answered `config get` with `key = value` at exit 0, measured against the live install with `proxy.yaml`'s hash taken either side and unmoved (contract §5 for the three that refuse). **The *Verdict* column is a proposal, not a measurement** — it is the reasoning this enumeration exists to produce, and §7 remains the authority over whether any of it becomes a row.
 
-#### Should become rows — 11 proposed, **6 built**
+#### Should become rows — 11 proposed, **7 built**
 
-**Six are done**, as of 2 August 2026: the *HTTPS filtering* group on the Advanced page, between *Proxy mode* and *Secure DNS filtering*, and `dns_filtering.block_ech` as DNS ▸ *Browser compatibility*. Every one was measured writable through `config set` before the code was written — surgical, one line each, the file's 220 unchanged — and then verified rendering headlessly, with each switch's state matching the file. **So the gap is now 16 unrendered keys, not 22**, and this table is the record of why each of the rest is or is not next.
+**Seven are done**, as of 2 August 2026: the *HTTPS filtering* group on the Advanced page, between *Proxy mode* and *Secure DNS filtering*, `dns_filtering.block_ech` as DNS ▸ *Browser compatibility*, and `safebrowsing.send_anonymous_statistics` as Protection ▸ *Privacy*. Every one was measured writable through `config set` before the code was written — surgical, one line each, the file's 220 unchanged — and then verified rendering headlessly, with each switch's state matching the file. **So the gap is now 15 unrendered keys, not 22**, and this table is the record of why each of the rest is or is not next.
 
 | Key | Type | Stock | Where it belongs, and what it depends on |
 | --- | --- | --- | --- |
@@ -212,7 +212,7 @@ Everything in the *Key*, *Type* and *Stock* columns is read from the file; every
 | ~~`https_filtering.enforce_certificate_transparency`~~ | bool | `true` | **Built** — same group |
 | ~~`https_filtering.http3_filtering_enabled`~~ | bool | `true` | **Built** — same group, and the row carries the file's *experimental* |
 | ~~`dns_filtering.block_ech`~~ | bool | `false` | **Built** — DNS ▸ *Browser compatibility*, its own group and the page's last |
-| `safebrowsing.send_anonymous_statistics` | bool | `false` | **Protection**, under the Safe Browsing switch it qualifies |
+| ~~`safebrowsing.send_anonymous_statistics`~~ | bool | `false` | **Built** — Protection ▸ *Privacy*, its own group and the page's last |
 | `auto_enable_language_filters` | bool | `true` | **Filters page** — it decides what that page's catalogue turns on, and `locale.rs` already holds the matching logic |
 | `adguard_headers_enabled` | bool | `false` | Advanced *Diagnostics*, the natural neighbour of HAR capture |
 | `filtered_ports` | str | `'80:5221,5300:49151'` | Advanced *Proxy mode*. Auto mode only, so it depends on `proxy_mode` — and its compound range syntax is ours to validate, since `config set` type-checks strings not at all |
@@ -233,6 +233,14 @@ One is a privacy feature AdGuard offers; the other is a workaround for a browser
 **Its dependency is on the row, not the group, which is the opposite of the `https_filtering` five and for a reason.** Same shape — a key depending on the `enabled` of the section it lives in, so no `requires()` either way — but the group here holds one row, and a description carrying a caveat for a single switch is a caveat the user reads before knowing whether it applies. The DNS page already puts this kind of thing in the subtitle and moves it with the file: the mode row's subtitle reads `dns_filtering.enabled` as well as its own key. The ECH row does the same, and its paint snapshot keys on both settings for the same reason that one does.
 
 **Four renderings, four walks.** Off-and-live, on-and-live, on-with-DNS-filtering-off, and a `block_ech` no reader can take as a boolean — the last only reachable by hand-editing the file, because `config set` refuses `notabool` and coerces `1`/`0`. The third is the one worth having: `config set dns_filtering.block_ech true` succeeds and prints `Config has been updated` with `dns_filtering.enabled = false`, so the subtitle is the only thing between the user and a switch that is stored and not applied. The fourth greys the row out, which the walk now proves rather than asserts — `building.md` §3.
+
+**`safebrowsing.send_anonymous_statistics` is the first row this project has built that it cannot describe**, and that is the whole finding. Measured 2 August 2026: `proxy.yaml` gives the `safebrowsing:` block one comment — *"Browsing security settings"* — and nothing for this key; `config --help` and `--help-all` never mention it; the binary's string table holds the key's name and no description. Three sources, no answer.
+
+That is a problem because the row is a **consent** control, where a confident-sounding description would be the most damaging possible invention. Three options were open: describe it from general knowledge, which is invention and is what `overnight-v2.md` §4 forbids; leave it unrendered, which means a user cannot confirm their own telemetry state without reading YAML; or render it and say the description is missing. The third is what shipped, in all three reachable states — *"Off. What it would send is not documented in proxy.yaml or the CLI"*, its *On* counterpart, and the inert case. `consent_never_claims_to_know_what_is_sent` asserts every state carries that admission, so a future edit cannot quietly add a payload description nobody measured.
+
+**It is not a seventh [`Toggle`], and the reason generalises.** That enum is the six switches that change what AdGuard does to *traffic*; this changes what AdGuard is *told*. More concretely, `Toggle::description` is documented as taking its wording from `proxy.yaml`'s own comments so that the GUI and a user reading the file are told the same thing — a rule this key cannot satisfy, having no comment to take. A seventh variant would have broken that silently, so the row lives in its own group with its own write path, and two tests hold the line: one that no `Toggle` ever adopts the key, one that no `Toggle` description ever contains *"not documented"*.
+
+**Its group is Protection ▸ *Privacy*, placed last**, below the certificate and browser-integration checks. Those two are problems to fix; this is a preference, and nothing is wrong when it is off — which is how it ships. That group is also the obvious home for `send_crash_reports`, the caveat noted above about the only key rendered exclusively by the first-run assistant: a user who changes their mind about crash telemetry still has no page to change it on, and now there is one to put it on. **That is a proposal, not a decision** — `send_crash_reports` was never among the eleven, and §7 owns whether it becomes a row.
 
 #### Should stay unrendered (7)
 

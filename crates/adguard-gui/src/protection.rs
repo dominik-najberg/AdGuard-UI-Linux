@@ -13,6 +13,7 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
+use adguard_core::config::key;
 use adguard_core::{Applied, Cli, Config, Toggle};
 use adw::prelude::*;
 use gtk4 as gtk;
@@ -93,6 +94,27 @@ pub struct ProtectionPage {
     /// the certificate there is no companion `_inputs` field: the check is
     /// entirely a question about this machine.
     browser: RefCell<Option<Rc<BrowserIntegrationView>>>,
+
+    /// The statistics-consent row. `None` until the page has been built.
+    ///
+    /// Kept beside [`Self::rows`] rather than in it, because that vector is
+    /// [`Toggle`]s and this key is deliberately not one — `config::key`'s note
+    /// on `SAFEBROWSING_STATS` has the reasoning. Self-contained for a second
+    /// reason as well: the six switches on this page are the user's protection,
+    /// and a consent row is not worth a refactor that could disturb them.
+    telemetry: RefCell<Option<Telemetry>>,
+}
+
+/// The one row on this page that is not a [`Toggle`].
+struct Telemetry {
+    switch: adw::SwitchRow,
+    /// A write for this row is in flight — same purpose as [`Row::pending`],
+    /// and the reason `apply` can leave it alone while it settles.
+    pending: Cell<bool>,
+    /// Everything the row displays, as last painted. Carries the Safe Browsing
+    /// state too, because the subtitle reads it: the row has to move when that
+    /// switch moves, not only when its own key does.
+    painted: RefCell<Option<String>>,
 }
 
 impl ProtectionPage {
@@ -105,6 +127,7 @@ impl ProtectionPage {
             reconciling: Cell::new(false),
             observer: RefCell::new(None),
             certificate: RefCell::new(None),
+            telemetry: RefCell::new(None),
             certificate_inputs: RefCell::new((
                 None,
                 String::from(adguard_core::trust::DEFAULT_CERTIFICATE_NAME),
@@ -269,8 +292,155 @@ impl ProtectionPage {
         browser.paint();
         self.browser.replace(Some(browser));
 
+        // Last, below both checks, because it is the only thing on this page
+        // that is not about whether protection is working. The certificate and
+        // browser rows are problems to fix; this is a preference, and nothing
+        // is wrong when it is off — which is how it ships.
+        page.add(&self.telemetry_group());
+
         self.apply(config);
         page
+    }
+
+    /// The statistics-consent group.
+    ///
+    /// Its own group rather than a seventh switch above, because it is a
+    /// different kind of thing: the six change what AdGuard does to traffic,
+    /// this changes what AdGuard is told. The group description carries the
+    /// dependency on Safe Browsing the way Stealth's groups carry theirs, and
+    /// the row's subtitle carries the state that dependency can produce.
+    fn telemetry_group(self: &Rc<Self>) -> adw::PreferencesGroup {
+        let group = adw::PreferencesGroup::builder()
+            .title("Privacy")
+            .description(
+                "Ships off. Neither proxy.yaml nor the CLI describes what this sends, \
+                 so neither can this page.",
+            )
+            .build();
+
+        let switch = adw::SwitchRow::new();
+        switch.set_use_markup(false);
+        switch.set_title("Send anonymous statistics");
+        switch.set_subtitle_lines(3);
+
+        switch.connect_active_notify({
+            let this = Rc::downgrade(self);
+            move |switch| {
+                let Some(this) = this.upgrade() else { return };
+                if this.reconciling.get() {
+                    return; // our own repaint, not a click
+                }
+                this.write_telemetry(switch.is_active());
+            }
+        });
+
+        group.add(&switch);
+        *self.telemetry.borrow_mut() = Some(Telemetry {
+            switch,
+            pending: Cell::new(false),
+            painted: RefCell::new(None),
+        });
+        group
+    }
+
+    /// Paint the consent row from one reading, and say how many rows moved.
+    ///
+    /// Counted, unlike the certificate and browser checks below it: this one
+    /// really is a key in `proxy.yaml`, so an external edit to it is exactly
+    /// the kind of change the reconcile toast exists to announce.
+    fn apply_telemetry(&self, config: &Config) -> usize {
+        let telemetry = self.telemetry.borrow();
+        let Some(telemetry) = telemetry.as_ref() else {
+            return 0;
+        };
+        if telemetry.pending.get() {
+            return 0;
+        }
+
+        let state = config.bool_at(key::SAFEBROWSING_STATS);
+        let safebrowsing_on = config.bool_at(key::SAFE_BROWSING) == Some(true);
+        let snapshot = format!("{state:?} safebrowsing={safebrowsing_on}");
+        if telemetry.painted.borrow().as_deref() == Some(snapshot.as_str()) {
+            return 0;
+        }
+        let first_paint = telemetry.painted.borrow().is_none();
+        telemetry.painted.replace(Some(snapshot));
+
+        match state {
+            Some(on) => {
+                telemetry.switch.set_sensitive(true);
+                self.set_active(&telemetry.switch, on);
+                telemetry
+                    .switch
+                    .set_subtitle(&telemetry_subtitle(on, safebrowsing_on));
+            }
+            // Absent, or holding something no reader can take as a boolean.
+            // Showing it as off would be a claim about what this machine is
+            // sending, which is exactly the claim we cannot support.
+            None => {
+                telemetry.switch.set_sensitive(false);
+                telemetry.switch.set_subtitle(&format!(
+                    "Unavailable — {} does not hold a boolean in this file",
+                    key::SAFEBROWSING_STATS
+                ));
+            }
+        }
+
+        // The first paint is not a change the user could have seen.
+        usize::from(!first_paint)
+    }
+
+    /// Write the consent row, then confirm it against the file.
+    fn write_telemetry(self: &Rc<Self>, on: bool) {
+        if let Some(telemetry) = self.telemetry.borrow().as_ref() {
+            telemetry.switch.set_sensitive(false);
+            telemetry.pending.set(true);
+        }
+
+        let cli = self.cli.clone();
+        let this = self.clone();
+        worker::run(
+            move || {
+                let outcome = cli
+                    .set_bool(key::SAFEBROWSING_STATS, on)
+                    .map_err(|err| err.to_string());
+                (outcome, Config::load().ok())
+            },
+            move |(outcome, config): (Result<Applied, String>, Option<Config>)| {
+                if let Some(telemetry) = this.telemetry.borrow().as_ref() {
+                    telemetry.pending.set(false);
+                    // Force a repaint even when the file did not move: the
+                    // click already flipped the widget, so a write the CLI
+                    // accepted without acting on would otherwise leave the
+                    // switch showing a value that never landed.
+                    telemetry.painted.replace(None);
+                    telemetry.switch.set_sensitive(true);
+                }
+                if let Some(config) = &config {
+                    this.apply(config);
+                }
+
+                let landed = config
+                    .as_ref()
+                    .map(|config| config.bool_at(key::SAFEBROWSING_STATS));
+                if landed == Some(Some(on)) {
+                    return;
+                }
+                let message = match (outcome, landed) {
+                    (Err(message), _) => message,
+                    (Ok(_), Some(Some(_))) => {
+                        let verb = if on { "enable" } else { "disable" };
+                        format!("Could not {verb} anonymous statistics")
+                    }
+                    (Ok(_), _) => {
+                        "Changed anonymous statistics, but could not re-read proxy.yaml \
+                         to confirm it"
+                            .to_owned()
+                    }
+                };
+                this.toasts.add_toast(toast(&message));
+            },
+        );
     }
 
     fn row(self: &Rc<Self>, toggle: Toggle) -> adw::SwitchRow {
@@ -329,7 +499,7 @@ impl ProtectionPage {
         }
 
         let dns_is_inert = config.dns_filtering_is_inert();
-        let mut moved = 0;
+        let mut moved = self.apply_telemetry(config);
 
         for row in self.rows.borrow().iter() {
             // Someone else's snapshot must not overwrite a row that is still
@@ -500,6 +670,31 @@ impl ProtectionPage {
     }
 }
 
+/// What the statistics switch is doing, including when it is doing nothing.
+///
+/// Three states, and the wording of two of them is load-bearing. **Nothing
+/// documents what this key transmits** — not `proxy.yaml`, whose
+/// `safebrowsing:` block carries one comment and none for this key; not
+/// `config --help` or `--help-all`; not the binary's string table, which holds
+/// the key's name and no description. Measured 2 August 2026. A subtitle
+/// describing the payload would therefore be invention, and on a consent
+/// control invention is the worst possible error — so the row says the
+/// description is missing and lets the user decide on that basis.
+///
+/// The third state is the one the CLI will happily create: measured, `config
+/// set safebrowsing.send_anonymous_statistics true` succeeds and reports
+/// `Config has been updated` with `safebrowsing.enabled: false`.
+fn telemetry_subtitle(on: bool, safebrowsing_on: bool) -> String {
+    match (on, safebrowsing_on) {
+        (true, true) => "On. What it sends is not documented in proxy.yaml or the CLI".to_owned(),
+        (true, false) => format!(
+            "No effect until Safe Browsing is on — stored, not applied ({})",
+            key::SAFE_BROWSING
+        ),
+        (false, _) => "Off. What it would send is not documented in proxy.yaml or the CLI".to_owned(),
+    }
+}
+
 fn loading_view() -> adw::Spinner {
     adw::Spinner::builder()
         .width_request(32)
@@ -515,4 +710,34 @@ fn error_view(message: &str) -> adw::StatusPage {
         .title("Configuration unavailable")
         .description(message)
         .build()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The state the CLI will create for you: measured, `config set
+    /// safebrowsing.send_anonymous_statistics true` succeeds and prints
+    /// `Config has been updated` with `safebrowsing.enabled: false`.
+    #[test]
+    fn consent_says_so_when_it_is_inert() {
+        let inert = telemetry_subtitle(true, false);
+        assert!(inert.contains("No effect"), "{inert}");
+        assert!(inert.contains(key::SAFE_BROWSING), "{inert}");
+        assert!(!telemetry_subtitle(true, true).contains("No effect"));
+    }
+
+    /// The row's whole justification. Nothing on this machine documents what
+    /// the key transmits, so every state the user can reach has to say that
+    /// rather than describe a payload nobody measured.
+    #[test]
+    fn consent_never_claims_to_know_what_is_sent() {
+        for (on, safebrowsing) in [(true, true), (false, true), (false, false)] {
+            let text = telemetry_subtitle(on, safebrowsing);
+            assert!(
+                text.contains("not documented"),
+                "{on}/{safebrowsing} described a payload nobody measured: {text}"
+            );
+        }
+    }
 }

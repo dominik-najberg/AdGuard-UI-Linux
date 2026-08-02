@@ -396,6 +396,31 @@ pub mod key {
 
     pub const DNS_LISTEN_PORT: &str = "dns_filtering.listen_port";
 
+    /// Consent to send statistics alongside Browsing security.
+    ///
+    /// Measured on 1.4.13: readable, writable, one line replaced. Type-checked
+    /// as a boolean, refusing `notabool` at **exit 0** with the file unchanged
+    /// — the third key to show that, so contract §5 now states it as the
+    /// pattern. Accepted with `safebrowsing.enabled: false`, reporting `Config
+    /// has been updated`, so it has the same stored-but-inert state every other
+    /// dependent setting here has.
+    ///
+    /// **What it sends is not documented anywhere this machine can reach**, and
+    /// that is a measurement rather than an impression: `proxy.yaml` gives the
+    /// `safebrowsing:` block one comment, *"Browsing security settings"*, and
+    /// says nothing about this key; `config --help` and `--help-all` never
+    /// mention it; and the binary's string table holds the key name and no
+    /// description. So the row renders it and says the description is missing,
+    /// which is the honest option — inventing one would be the invention
+    /// `docs/overnight-v2.md` §4 forbids, and hiding the switch would leave a
+    /// user unable to confirm their own telemetry state without reading YAML.
+    ///
+    /// Not a seventh [`crate::model::Toggle`]. That enum is the six switches
+    /// that change what AdGuard does to traffic, and its `description` is
+    /// documented as taking its wording from `proxy.yaml`'s comments — a rule
+    /// this key cannot satisfy, because it has no comment to take.
+    pub const SAFEBROWSING_STATS: &str = "safebrowsing.send_anonymous_statistics";
+
     /// Consent to send crash reports to AdGuard.
     ///
     /// The one key the `configure` wizard asks about that no page of this app
