@@ -36,10 +36,11 @@
 //!   issues no calls at all.
 
 use std::cell::RefCell;
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use adguard_core::config::key;
-use adguard_core::{cli, Cli, Config, Kind, Setting, Toggle, SETUP};
+use adguard_core::{cli, zip, Cli, Config, Kind, Setting, Toggle, SETUP};
 use adw::prelude::*;
 use gtk::glib;
 use gtk4 as gtk;
@@ -298,7 +299,135 @@ impl SetupAssistant {
             buttons.append(&again);
         }
 
+        // Offered in **every** branch, including the two that refuse to set up.
+        // `import-settings` is not licence-gated where `configure` is (contract
+        // §13), so a restore is reachable by exactly the user this screen
+        // otherwise turns away: someone rebuilding a machine who has their
+        // backup and has not activated yet. `architecture.md` §5 — leaving it
+        // behind the licence check would have the app refuse to do something
+        // the CLI would have done.
+        let restore = gtk::Button::with_label("Restore from a backup");
+        restore.add_css_class("pill");
+        on_click(&restore, self, |this| this.choose_backup());
+        buttons.append(&restore);
+
         status.set_child(Some(&buttons));
+        self.view
+            .replace(&[page("Setup", &wrap(&status, None::<&gtk::Widget>))]);
+    }
+
+    // --- restore, the second path through first run ------------------------
+
+    /// Pick a backup, **read its manifest**, confirm, import.
+    ///
+    /// The manifest check is not optional: the two exports share one filename
+    /// and `import-settings` takes a *logs* zip at exit 0, leaving a partial
+    /// install (contract §13). Here that matters more than on the Advanced
+    /// page, because there is no configuration yet to fall back to.
+    fn choose_backup(self: &Rc<Self>) {
+        let filter = gtk::FileFilter::new();
+        filter.set_name(Some("Backup (zip)"));
+        filter.add_pattern("*.zip");
+        let filters = gtk::gio::ListStore::new::<gtk::FileFilter>();
+        filters.append(&filter);
+        let dialog = gtk::FileDialog::builder()
+            .title("Choose a backup")
+            .filters(&filters)
+            .build();
+
+        let this = self.clone();
+        let parent = self
+            .view
+            .root()
+            .and_then(|root| root.downcast::<gtk::Window>().ok());
+        dialog.open(parent.as_ref(), gtk::gio::Cancellable::NONE, move |result| {
+            let Ok(file) = result else {
+                return;
+            };
+            let Some(path) = file.path() else {
+                this.toasts.add_toast(toast("That file is not on this machine"));
+                return;
+            };
+            match zip::entries(&path).map(|names| zip::classify(&names)) {
+                Ok(zip::Bundle::Settings) => this.restore(path),
+                Ok(zip::Bundle::Logs) => this.toasts.add_toast(toast(
+                    "That is a logs bundle, not a settings backup. AdGuard would accept it \
+                     and leave this install half-configured.",
+                )),
+                Ok(zip::Bundle::Neither) => {
+                    this.toasts.add_toast(toast("That zip was not made by AdGuard"));
+                }
+                Err(err) => this.toasts.add_toast(toast(&err.to_string())),
+            }
+        });
+    }
+
+    /// Run the import, then say what the backup could not carry.
+    ///
+    /// **No confirmation dialog here, unlike the Advanced page's restore.**
+    /// There is nothing to overwrite: this screen only exists because
+    /// `proxy.yaml` is absent, so the destructive-action discipline §5 applies
+    /// to the other entry point has nothing to warn about at this one.
+    fn restore(self: &Rc<Self>, path: PathBuf) {
+        let status = adw::StatusPage::builder()
+            .icon_name("document-save-symbolic")
+            .title("Restoring your settings")
+            .description("Reading the backup…")
+            .build();
+        let spinner = adw::Spinner::builder()
+            .width_request(32)
+            .height_request(32)
+            .build();
+        status.set_child(Some(&spinner));
+        self.view
+            .replace(&[page("Setup", &wrap(&status, None::<&gtk::Widget>))]);
+
+        let this = self.clone();
+        let cli = self.cli.clone();
+        worker::run(
+            move || cli.import_settings(&path),
+            move |result: Result<(), cli::Error>| match result {
+                Ok(()) => this.show_restored(),
+                Err(err) => {
+                    this.toasts.add_toast(toast(&err.to_string()));
+                    this.show_welcome();
+                }
+            },
+        );
+    }
+
+    /// The end of a restore, which is **not** where a completed `configure`
+    /// ends.
+    ///
+    /// A seeded install is ready and the window is handed to the pages
+    /// silently. A restored one is not: it is unlicensed, it has no
+    /// certificate, and the `proxy.yaml` it just wrote says HTTPS filtering is
+    /// on (contract §13). Both are states this application already renders and
+    /// neither is the user's mistake, so this names them rather than letting
+    /// the user meet them as breakage — §6's detect-and-instruct pattern
+    /// pointed at a state this app has just created.
+    fn show_restored(self: &Rc<Self>) {
+        let status = adw::StatusPage::builder()
+            .icon_name("emblem-ok-symbolic")
+            .title("Settings restored")
+            .description(
+                "Your settings are back. Two things a backup cannot carry, both of which \
+                 this machine still needs:\n\n\
+                 • Your licence. AdGuard exports never contain it — activation is on the \
+                 Status page.\n\
+                 • The HTTPS certificate. Your settings say HTTPS filtering is on, and it \
+                 cannot work until the certificate is generated and trusted; Protection \
+                 shows you how.\n\n\
+                 Your DNS filter choices and DNS user rules are not in a backup either, so \
+                 those are as this machine left them.",
+            )
+            .build();
+
+        let button = gtk::Button::with_label("Continue to the app");
+        button.add_css_class("pill");
+        button.add_css_class("suggested-action");
+        on_click(&button, self, |this| this.finish());
+        status.set_child(Some(&button));
         self.view
             .replace(&[page("Setup", &wrap(&status, None::<&gtk::Widget>))]);
     }
