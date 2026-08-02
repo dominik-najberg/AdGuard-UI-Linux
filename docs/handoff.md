@@ -291,11 +291,27 @@ Two of these overturned a recommendation in `overnight-plan.md` §5, both becaus
 
     Two smaller ones for whoever builds it: `export-settings` is 99 % `agflm_standard.db` (51 MB of 51.8 MB), so it is slow for a reason that is not the user's settings; and the DNS catalogue and `dns_user.txt` are **not exported at all**, so a round trip silently loses DNS filter selections and user rules — which the confirmation has to say, because nothing else in the flow would.
 
+11. **Launching the GUI stops the machine's running proxy, and which part of it does that is not established.** Measured 2 August 2026, from the daemon's own `proxy.log` rather than inferred. This is the cause of two outages that two previous sessions recorded as unexplained, and it supersedes them.
+
+    **What is measured.** The proxy running at session start, PID 1695937, logged a clean shutdown at **08:47:11.257** — `AGProxyServer::stop()` → `AGProxyFilter::deinit()` → `AGLocalApiServer destroy: Destroying WebSocket Server...` → `~AdGuardCli: Stop CLI App`. That is the orderly stop path, not a crash and not a kill; nothing precedes it in the log but routine `NETWORK_MONITORING` lines, and there is no error. The sandboxed headless GUI had started **within about one second** of it. Two more clean stops the same morning, 07:52:10 and 07:56:28, line up with the previous session's harness runs, so the count is three for three.
+
+    **What is ruled out, by data rather than by argument.** *Sandboxed CLI calls are not the trigger* — a dozen `config get`/`config set` invocations under a throwaway `XDG_DATA_HOME` ran between roughly 08:40 and 08:47 with the proxy alive throughout, and a `config get` timed either side of the real data directory's mtimes moved nothing in it. *The walk is not the trigger* — all six walks reached the page through `Atspi.Selection.select_child` and none used the synthetic-click fallback, which the captured output records. *An exit handler is not the trigger* — the GUI has no shutdown or `Drop` handler, and `Cli::stop` has exactly one caller, the Status page's button. *The later launches are consistent* — five more GUI starts followed 08:47:11 and produced no further stop lines, because there was no longer a proxy to stop.
+
+    **So `XDG_DATA_HOME` sandboxes the configuration and not the daemon**, which is a singleton on the machine — and the `AGLocalApiServer` in that teardown is a shared local endpoint the sandbox cannot possibly redirect. That is the shape of a mechanism, **not** a measured one, and it is written here as a lead rather than an answer.
+
+    **What it costs right now:** every headless GUI run takes the owner's proxy down. Recovery is `adguard-cli start`, verified working — HTTP and HTTPS both 200 through `127.0.0.1:3129`, root helper alive, `proxy.yaml`'s hash unmoved — and the systemd unit will not do it for you (§4, and item 9's note that it is `active (exited)` with `MainPID 0`).
+
+    **What would settle it needs the owner**, because every candidate experiment stops a working proxy on purpose: launch the GUI with the Status page's poll disabled, then with the config monitor disabled, and see which start leaves the daemon up. One bisection, three or four deliberate outages. That is a machine-wide change on a machine in `auto` mode, which is the §6 line — so it is here rather than done.
+
 ---
 
 ## 4. Things that will bite you if you do not know them
 
 **Config writes.** `Config has been updated` is necessary but not sufficient — it prints for a no-op *and* for a change the CLI silently declined. Always re-read `proxy.yaml`. Only ever write lowercase `true`/`false`. Pass `--` before any user-supplied key or value, or a value starting with `-` is eaten as an option. `config set` type-checks and never range-checks, so bounds are ours. Nothing enforces dependencies between settings; the GUI owns them.
+
+**Running the GUI stops the machine's proxy — sandboxing the config does not sandbox the daemon.** Measured 2 August 2026 and written up in §3 item 11. `XDG_DATA_HOME` gives the binary a throwaway *configuration*; the proxy is a singleton on the machine and there is one of it whatever the environment says. Every headless run this project has ever done has been taking the owner's proxy down, and two earlier sessions recorded the outage without finding the cause because they looked at the GUI's log instead of the daemon's. **`~/.local/share/adguard-cli/logs/proxy.log` is where the answer was**, and `AGProxyServer::stop()` with no error above it means *something asked it to stop*, not that it fell over.
+
+Two things follow. **Check `adguard-cli status` after any headless run** and restart with `adguard-cli start` if it is down — the systemd unit is `active (exited)` with `MainPID 0` and will not. And **do not report a proxy outage as unexplained without reading the daemon's own log first**; both prior sessions had the evidence available and did not open the file.
 
 **Testing writes.** The CLI resolves its data directory as `$XDG_DATA_HOME/adguard-cli`, so `Cli::with_xdg_data_home` gives the real binary a throwaway config. Put anything dangerous in `tests/config_sandbox.rs`, which never touches the machine and asserts as much:
 

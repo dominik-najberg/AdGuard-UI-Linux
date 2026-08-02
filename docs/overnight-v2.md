@@ -117,14 +117,14 @@ The ones an ambitious night is most likely to talk itself into:
 
 ---
 
-## 4. Verification, and the four traps that have actually fired
+## 4. Verification, and the five traps that have actually fired
 
 `overnight-plan.md` §4 is the discipline: `cargo build` is not verification,
 every claim names a command and pastes its output, measurements land in the
 contract *before* the code that depends on them, and one sample is not a
 measurement.
 
-Four failure modes have really happened on this project, and an unattended run
+Five failure modes have really happened on this project, and an unattended run
 is where they are cheapest to repeat and most expensive to notice:
 
 - **The confirmation is not the evidence.** `Config has been updated` prints for
@@ -137,6 +137,13 @@ is where they are cheapest to repeat and most expensive to notice:
   in it, carry the word or re-measure. `handoff.md` §4.
 - **Do not launder an unmeasured clause into a measured sentence.** Split the
   clause and mark which half was measured. Same §4 entry.
+- **Look at the log belonging to the thing that broke.** Two sessions reported
+  the owner's proxy going down as an unexplained outage. It was not
+  unexplained; the daemon's own `logs/proxy.log` had a clean
+  `AGProxyServer::stop()` with a timestamp, and neither session opened it. Both
+  looked at the GUI's log, which is the log of the process they had been
+  running rather than the process that died. Measured and written up 2 August
+  2026 — `handoff.md` §3 item 11.
 
 **The repository is public and so is every commit.** Redact before anything
 reaches a commit message, a doc, or the terminal — both patterns, e-mail *and*
@@ -149,9 +156,15 @@ licence key, per `handoff.md` §4. A Status-page walk carries both.
 Every iteration, without exception:
 
 1. Verify with a pasted command and its output.
-2. Update [`handoff.md`](handoff.md) — §1's table, §3's gaps, §4 if you learned
+2. **Put the owner's proxy back if you took it down.** Any iteration that
+   launched the GUI did — measured, `handoff.md` §3 item 11 — so `adguard-cli
+   status`, and `adguard-cli start` if it is not running. Verify it by passing
+   traffic through `127.0.0.1:3129`, not by the start command's own output.
+   Leaving a machine in `auto` mode with no proxy is the worst thing an
+   unattended run on this project can do, and it is silent.
+3. Update [`handoff.md`](handoff.md) — §1's table, §3's gaps, §4 if you learned
    a trap. **The test is whether the next thread can start from §0 alone.**
-3. Commit locally, with a message that says what was *measured*, not what was
+4. Commit locally, with a message that says what was *measured*, not what was
    written.
 
 If you are blocked, write the blocker into `handoff.md` §3 and move to the next

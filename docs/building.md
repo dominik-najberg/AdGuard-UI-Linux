@@ -228,6 +228,8 @@ Copy the tree somewhere disposable first, or pass a `target/` the container can 
 
 ### Driving the GUI against a fake config
 
+> **This stops the proxy you are running.** Measured 2 August 2026: starting the app under a throwaway `$XDG_DATA_HOME` is followed within about a second by a clean `AGProxyServer::stop()` in the **real** daemon's `~/.local/share/adguard-cli/logs/proxy.log`, three times out of three. `$XDG_DATA_HOME` redirects the *configuration*; the daemon is a singleton on the machine and there is one of it regardless. Sandboxed `config get`/`config set` are **not** affected — only launching the app. Check `adguard-cli status` when you are done and `adguard-cli start` if it is down, because the user unit is `active (exited)` with `MainPID 0` and will not. `handoff.md` §3 item 11 has the full measurement and the bisection that would identify which part of the app is responsible.
+
 The same `$XDG_DATA_HOME` trick works on the app, which is the only practical way to see how a page renders against a config you would never create on purpose — a port holding a float, a key missing outright, a value outside its enum:
 
 ```bash
