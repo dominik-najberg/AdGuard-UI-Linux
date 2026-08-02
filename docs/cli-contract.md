@@ -1388,6 +1388,50 @@ whatever the user typed and then look for the name it chose: which of the two
 happened depends on the filesystem, and the only reliable answer is the path on
 the confirmation line, which both forms print.
 
+### The `--` guard is *wrong* here, and the failure line looks like the success line
+
+Two measurements from wiring the wrappers, 2 August 2026, and each one broke a
+rule this contract states elsewhere.
+
+**`--` must not be passed to `-o` or `-i`.** §5 makes `--` mandatory for every
+`config` call. It is fatal for these:
+
+```console
+$ adguard-cli export-settings -o -- /tmp/exp      # exit 1
+The following argument was not expected: /tmp/exp
+```
+
+`--` ends option parsing, and these subcommands have **no positional** to catch
+the path afterwards. §5's guard is about a *value that looks like an option*
+being read as one; it does not generalise to an option's own argument. All four
+plain forms work and are equivalent — `-o <path>`, `-o<path>`, `--output <path>`
+and `--output=<path>` — measured one per directory, for the reason below.
+
+**Two exports into one directory within the same second collide, at exit 0.**
+The generated name is `adguard-cli_<date>_<time>.zip`, one-second resolution,
+and the CLI does not overwrite:
+
+```console
+$ adguard-cli export-logs -o /tmp/d      # exit 0
+Logs successfully exported to zip: /tmp/d/adguard-cli_2026-08-02_15-10-06.zip
+$ adguard-cli export-logs -o /tmp/d      # exit 0, immediately after
+Failed to export logs to zip: /tmp/d/adguard-cli_2026-08-02_15-10-06.zip
+$ ls /tmp/d | wc -l
+1
+```
+
+**The failure line carries the same `zip: ` token and the same path as the
+success line.** So a parser that reads the path out of `zip: ` returns the
+archive the CLI just *failed* to write — which is not a hypothetical: the first
+version of `Cli::exported` did exactly that, and this is reachable in one click
+by a user pressing Export twice. Match the **success** prefix, `successfully
+exported to zip: `, and treat everything else as a refusal.
+
+It also invalidates any measurement that exports repeatedly into one directory.
+A first attempt here compared four `-o` spellings that way and read three of
+them as syntax failures; they were collisions. One directory per invocation, or
+a second between them.
+
 ### `import-settings` creates `proxy.yaml`, and leaves an install that cannot filter HTTPS
 
 Run against a **virgin** `XDG_DATA_HOME` with a settings zip:

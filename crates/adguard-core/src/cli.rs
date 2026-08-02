@@ -15,7 +15,7 @@
 //!    changes follow act -> re-read -> reconcile.
 
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
@@ -57,6 +57,11 @@ const LOCAL_TIMEOUT: Duration = Duration::from_secs(15);
 /// CLI's minute, and being told what happened at the end of it beats being told
 /// nothing at 15 s.
 const START_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// Both exports and the import. Generous because `export-settings` writes
+/// 14.9 MB of which 51.1 MB raw is the filter catalogue (contract §13), and
+/// because none of the three is a local read the way `config get` is.
+const EXPORT_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Deadline for the commands that reach the network — `filters update`,
 /// `check-update`, `update` (`architecture.md` §4), and [`Cli::activate`].
@@ -929,6 +934,98 @@ impl Cli {
     /// every other write in this module.
     pub fn list_remove(&self, key: &str, value: &str) -> Result<Applied, Error> {
         self.config_list("list-remove", key, value)
+    }
+
+    /// Write a settings zip, and return **where it actually went**.
+    ///
+    /// The path is read back off the confirmation line rather than predicted,
+    /// because `-o` decides between "a folder to put it in" and "the archive
+    /// itself" by whether the path already exists (contract §13). An existing
+    /// directory gets a generated `adguard-cli_<date>_<time>.zip` inside it;
+    /// anything else *becomes* the archive, at that exact name, with no `.zip`
+    /// appended. Which of the two happened is a fact about the filesystem at
+    /// the moment of the call, so the caller cannot work it out and must not
+    /// try — and both forms print the answer.
+    ///
+    /// Slow for a reason that is not the user's settings: **51.1 MB of the
+    /// 51.8 MB is `agflm_standard.db`**, the redownloadable filter catalogue.
+    /// Anything driving this needs a progress state and a generous timeout.
+    pub fn export_settings(&self, output: &Path) -> Result<PathBuf, Error> {
+        self.exported(&["export-settings", "-o"], output, "export-settings")
+    }
+
+    /// Write a logs zip, and return where it actually went.
+    ///
+    /// **This bundle discloses the configuration.** It carries `proxy.yaml`
+    /// and does *not* carry `access.log` — measured twice, contract §13 — so
+    /// it is less sensitive than assumed about browsing and more sensitive
+    /// than assumed about settings. Whatever offers this has to say so.
+    pub fn export_logs(&self, output: &Path) -> Result<PathBuf, Error> {
+        self.exported(&["export-logs", "-o"], output, "export-logs")
+    }
+
+    /// The shared half of the two exports.
+    ///
+    /// Success is defined **positively**, by a confirmation line that carries a
+    /// path, the same rule [`Self::config_set`] follows: an unrecognised line
+    /// is a refusal rather than a success with an unknown path, because the
+    /// only thing a caller can do with this result is show the user where their
+    /// data went.
+    fn exported(&self, verb: &[&str], output: &Path, what: &str) -> Result<PathBuf, Error> {
+        // **No `--` here**, unlike every `config` call. Measured 2 August 2026:
+        // `export-settings -o -- <path>` exits **1** with *"The following
+        // argument was not expected"*, because `--` ends option parsing and
+        // these subcommands have no positional to catch the path. §5's guard is
+        // about option *values that look like options*; it does not generalise
+        // to an option's own argument.
+        let out = self.run_within(&[verb[0], verb[1], &output.to_string_lossy()], EXPORT_TIMEOUT)?;
+
+        // Matched on the **success** prefix, not on `zip: `. The failure line
+        // is `Failed to export logs to zip: <path>` — it carries the same
+        // token and the same path, at exit 0, so a parser keyed on `zip: `
+        // reports the archive it just failed to write. Measured, and it is
+        // reachable in one click: see below.
+        out.stdout
+            .lines()
+            .filter_map(|line| line.split_once("successfully exported to zip: "))
+            .map(|(_, path)| PathBuf::from(path.trim()))
+            .next_back()
+            .ok_or_else(|| Error::Refused {
+                message: first_line(&out.stdout)
+                    .unwrap_or_else(|| format!("`{what}` said nothing at all")),
+            })
+    }
+
+    /// Import a settings zip over this install.
+    ///
+    /// **The caller must have classified the archive first.** `import-settings`
+    /// accepts a *logs* zip at exit 0 with wording identical to the correct
+    /// case and leaves a partial install (contract §13), so exit status and
+    /// output cannot tell the two apart and this method cannot either. That is
+    /// what [`crate::zip::classify`] is for, and why it is not called from
+    /// here: a check the caller can forget is worse than no check, so the
+    /// decision belongs at the point where the file was chosen and can still
+    /// be rejected with an explanation.
+    ///
+    /// **`-i` is required**, unlike the exports' optional `-o`.
+    ///
+    /// What an import does *not* destroy, measured: the licence and the CA
+    /// survive it — `adguard.conf` is untouched. A confirmation dialog may not
+    /// warn about losing them, because it would be false.
+    pub fn import_settings(&self, input: &Path) -> Result<(), Error> {
+        // No `--`, for the same reason as the exports above.
+        let out = self.run_within(
+            &["import-settings", "-i", &input.to_string_lossy()],
+            EXPORT_TIMEOUT,
+        )?;
+        if out.stdout.contains("successfully imported") {
+            Ok(())
+        } else {
+            Err(Error::Refused {
+                message: first_line(&out.stdout)
+                    .unwrap_or_else(|| "`import-settings` said nothing at all".to_owned()),
+            })
+        }
     }
 
     /// The shared half of [`Self::list_add`] and [`Self::list_remove`].
