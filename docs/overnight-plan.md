@@ -46,7 +46,7 @@ cargo test --workspace      # 150 pass, 42 ignored
 sha256sum ~/.local/share/adguard-cli/proxy.yaml
 ```
 
-The counts are three sessions out of date — it is **218 passing and 44 ignored** now — and so is the hash below. The *shape* of the check is the part to keep: know what the working tree and the user's real configuration look like before touching either, and re-check after every commit.
+The counts are many sessions out of date, and so is the hash below. **They are deliberately not corrected here.** This file is archived, and a live figure kept in an archived plan is one more copy to drift — that is exactly how the number above reached three different values in three files; [`handoff.md`](handoff.md) §0 is the one place the current counts are written. The *shape* of the check is the part to keep: know what the working tree and the user's real configuration look like before touching either, and re-check after every commit.
 
 The config hash was `c4b58ce8ced6598fa94a5c48faae7bd4ac9695a64a924b3f27263ee7cbce19e3` and is now `7b419727afde68a8e09cdc90382915d14daff4159ae2a0c85aa0b300d38af3f5`, for the one deliberate reason in the banner. **A mismatch is a hard stop** — but a hard stop means stop and diff, not stop and assume the worst. That file is 220 lines, roughly half of them upstream explanatory comments, with no backup and no regeneration path short of `configure`.
 
