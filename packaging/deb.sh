@@ -14,7 +14,7 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="${1:-$REPO/target/package}"
 NAME=adguard-ui
 ARCH="$(dpkg --print-architecture)"
-VERSION="$(sed -n 's/^version = "\(.*\)"$/\1/p' "$REPO/Cargo.toml" | head -1)"
+VERSION="$(sed -n 's/^version = "\(.*\)"$/\1/p' "$REPO/Cargo.toml" | sed -n '1p')"
 [ -n "$VERSION" ] || { echo "deb.sh: could not read the version out of Cargo.toml" >&2; exit 1; }
 
 # The maintainer comes from git rather than from a constant, so a fork's

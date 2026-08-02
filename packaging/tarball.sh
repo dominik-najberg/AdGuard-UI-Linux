@@ -14,7 +14,7 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="${1:-$REPO/target/package}"
 NAME=adguard-ui
 ARCH="$(uname -m)"
-VERSION="$(sed -n 's/^version = "\(.*\)"$/\1/p' "$REPO/Cargo.toml" | head -1)"
+VERSION="$(sed -n 's/^version = "\(.*\)"$/\1/p' "$REPO/Cargo.toml" | sed -n '1p')"
 [ -n "$VERSION" ] || { echo "tarball.sh: could not read the version out of Cargo.toml" >&2; exit 1; }
 
 STAGE="$OUT/$NAME-$VERSION-$ARCH"
@@ -100,4 +100,11 @@ EOF
 tar -czf "$OUT/$NAME-$VERSION-$ARCH.tar.gz" -C "$OUT" "$NAME-$VERSION-$ARCH"
 rm -rf "$STAGE"
 echo "tarball.sh: $OUT/$NAME-$VERSION-$ARCH.tar.gz"
-tar -tzf "$OUT/$NAME-$VERSION-$ARCH.tar.gz" | head -6
+# `sed -n '1,6p'` rather than `head -6`, and it is not style. `head` closes the
+# pipe the moment it has its six lines; under `set -o pipefail` a `tar` that has
+# not finished writing by then takes SIGPIPE and the pipeline returns 141, which
+# fails the release build after every artefact has already been produced
+# correctly. It is a race, so it passes on a fast machine and on a warm cache and
+# then fails in the container — measured 2 August 2026, on the v1.1.0 tag. `sed`
+# reads its input to the end.
+tar -tzf "$OUT/$NAME-$VERSION-$ARCH.tar.gz" | sed -n '1,6p'
