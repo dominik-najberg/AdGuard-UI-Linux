@@ -919,14 +919,7 @@ fn configure_seeds_a_config_the_assistant_can_work_from() {
     let config = sandbox.config();
     for group in &adguard_core::SETUP {
         for setting in group.settings {
-            let present = match setting.kind {
-                adguard_core::Kind::Switch => config.bool_at(setting.key).is_some(),
-                adguard_core::Kind::Number { .. } => config.int_at(setting.key).is_some(),
-                adguard_core::Kind::Text { .. } => config.str_at(setting.key).is_some(),
-                adguard_core::Kind::Choice { options } => {
-                    config.choice_at(setting.key, options).is_some()
-                }
-            };
+            let present = config.resolves(*setting);
             assert!(present, "{} is missing from a freshly seeded config", setting.key);
         }
     }

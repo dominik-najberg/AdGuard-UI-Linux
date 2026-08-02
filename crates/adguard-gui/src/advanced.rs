@@ -574,7 +574,16 @@ impl AdvancedPage {
         let mut snapshot = match setting.kind {
             Kind::Switch => format!("{:?}", config.bool_at(setting.key)),
             Kind::Number { .. } => format!("{:?}", config.int_at(setting.key)),
-            Kind::Text { .. } => format!("{:?}", config.str_at(setting.key)),
+            // The null flag is not decoration either. `str_at` answers `None`
+            // for a null *and* for a wrong type, so without it a row moving
+            // between those two states would snapshot identically and never
+            // repaint — leaving a usable empty entry where the file had just
+            // become unreadable, or the reverse.
+            Kind::Text { .. } => format!(
+                "{:?} null={}",
+                config.str_at(setting.key),
+                config.is_null_at(setting.key)
+            ),
             Kind::Choice { options } => format!("{:?}", config.choice_at(setting.key, options)),
         };
         if let Some(required) = setting.requires() {
@@ -664,6 +673,16 @@ impl AdvancedPage {
                         setting.description
                     }));
                 }
+                // Nothing to show, which for one setting is a real value rather
+                // than a failure to read one: `outbound_interface` ships null,
+                // meaning the system chooses. An empty, *usable* entry is the
+                // honest rendering of that — greying it out would report the
+                // shipped state of a stock install as broken.
+                None if setting.may_be_absent() && config.is_null_at(setting.key) => {
+                    entry.set_sensitive(true);
+                    self.without_feedback(|| entry.set_text(""));
+                    entry.set_tooltip_text(Some(setting.description));
+                }
                 None => self.mark_unavailable(row, "is missing from the config file"),
             },
 
@@ -731,13 +750,7 @@ impl AdvancedPage {
         };
         // A row already marked unavailable has a more urgent problem, and its
         // explanation should not be overwritten by this one.
-        let resolved = match row.setting.kind {
-            Kind::Switch => config.bool_at(row.setting.key).is_some(),
-            Kind::Number { .. } => config.int_at(row.setting.key).is_some(),
-            Kind::Text { .. } => config.str_at(row.setting.key).is_some(),
-            Kind::Choice { options } => config.choice_at(row.setting.key, options).is_some(),
-        };
-        if !resolved || config.bool_at(required) == Some(true) {
+        if !config.resolves(row.setting) || config.bool_at(required) == Some(true) {
             return;
         }
 
@@ -880,6 +893,17 @@ impl AdvancedPage {
         // what it rejects. So we say what `proxy.yaml` says instead.
         // `is_port_list` is deliberately no stricter than the CLI, so this
         // cannot refuse a value the CLI would have taken.
+        // Clearing a row whose null is a real value writes the *word* `null`,
+        // not the empty string. Both restore "the system decides", but only
+        // this one restores the stock line byte-identically: an empty string
+        // leaves a bare `outbound_interface:`, which every YAML reader calls
+        // null while `config get` reads it back as an empty string. Measured,
+        // `cli-contract.md` §5 — two readers disagreeing about one line is a
+        // state to avoid, not to choose.
+        if row.setting.may_be_absent() && text.trim().is_empty() {
+            self.write(row, "null".to_owned());
+            return;
+        }
         if row.setting.key == key::FILTERED_PORTS && !is_port_list(text) {
             self.toasts.add_toast(toast(PORT_LIST_ADVICE));
             self.reset_row(row);

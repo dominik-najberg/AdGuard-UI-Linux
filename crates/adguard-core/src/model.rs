@@ -242,6 +242,29 @@ impl Setting {
         }
     }
 
+    /// May this setting legitimately hold nothing at all?
+    ///
+    /// `Kind::Text` has no room for the difference between *empty*, *absent*
+    /// and *unreadable*, and for nine of the ten text rows it does not need
+    /// one: a credential or a hostname holds the empty string, which `str_at`
+    /// returns as `Some("")`, and a `None` there means a key the page genuinely
+    /// cannot read. `outbound_interface` is the exception measured on 2 August
+    /// 2026 — the only null-valued scalar in `proxy.yaml`, where null is the
+    /// **shipped** state and means "the system chooses the interface".
+    ///
+    /// Without this, that row renders as *unavailable* on an install nobody has
+    /// touched, and `every_advanced_setting_resolves_with_the_right_type` fails
+    /// against the real config. That assertion is the guard working, so the fix
+    /// is to teach it the distinction rather than to loosen it: `str_at` is
+    /// unchanged and [`crate::Config::resolves`] consults this.
+    ///
+    /// A method over the key, for the same reason [`Self::requires`] is one —
+    /// one setting in forty declares this, and one place listing it reads
+    /// better than thirty-nine `may_be_absent: false`.
+    pub fn may_be_absent(self) -> bool {
+        self.key == crate::config::key::OUTBOUND_INTERFACE
+    }
+
     /// The setting that must be **on** for this one to do anything.
     ///
     /// `proxy.yaml` states these dependencies in its comments and nothing
@@ -525,7 +548,7 @@ pub const STEALTH: [SettingGroup; 5] = [
 /// had no documentation at all — `cargo doc` is what proves it, not reading.
 /// A blank line does *not* separate two `///` runs; only an intervening item
 /// does. Moved here 2 August 2026.
-pub const ADVANCED: [SettingGroup; 8] = [
+pub const ADVANCED: [SettingGroup; 9] = [
     SettingGroup {
         title: "Proxy mode",
         description: "Manual mode listens on the ports below and leaves it to you \
@@ -676,6 +699,19 @@ pub const ADVANCED: [SettingGroup; 8] = [
                 kind: Kind::Text { secret: true },
             },
         ],
+    },
+    SettingGroup {
+        title: "Outgoing connections",
+        description: "Which network interface AdGuard's own outgoing connections \
+                      leave from. Leave it empty to let the system choose, which \
+                      is how it ships.",
+        settings: &[Setting {
+            key: crate::config::key::OUTBOUND_INTERFACE,
+            title: "Bind to interface",
+            description: "A name as `ip link` reports it, such as eth0 or wlan0. \
+                          AdGuard does not check that it exists",
+            kind: Kind::Text { secret: false },
+        }],
     },
     SettingGroup {
         title: "Outbound proxy",
@@ -1414,6 +1450,7 @@ mod tests {
             key::HTTPS_CERT_TRANSPARENCY,
             key::HTTPS_HTTP3,
             key::FILTERED_PORTS,
+            key::OUTBOUND_INTERFACE,
         ] {
             assert!(keys.contains(&expected), "{expected} is missing from ADVANCED");
         }
@@ -1710,6 +1747,57 @@ mod filtered_ports_tests {
             group.settings.len(),
             1,
             "a second row here would inherit a mode caveat nobody wrote for it"
+        );
+    }
+}
+
+/// `outbound_interface`, whose placement the parity enumeration got wrong and
+/// whose null the page had no way to render — `architecture.md` §5.
+#[cfg(test)]
+mod outbound_interface_tests {
+    use super::{Kind, ADVANCED};
+
+    /// **Not part of the outbound proxy, despite sharing a prefix.** It is a
+    /// top-level key 144 lines above `outbound_proxy:` in `proxy.yaml` and it
+    /// binds *every* outgoing connection, so filing it in that group — which
+    /// the enumeration proposed — would tell the user it only applies to
+    /// traffic going through a proxy they may not even have enabled.
+    #[test]
+    fn it_did_not_join_the_outbound_proxy_group() {
+        let group = ADVANCED
+            .iter()
+            .find(|group| {
+                group
+                    .settings
+                    .iter()
+                    .any(|setting| setting.key == crate::config::key::OUTBOUND_INTERFACE)
+            })
+            .expect("the outbound interface row is not on the Advanced page");
+        assert_ne!(group.title, "Outbound proxy");
+        assert_eq!(group.settings.len(), 1);
+        assert!(
+            group.description.contains("empty"),
+            "the group stopped saying what leaving it blank does: {}",
+            group.description
+        );
+    }
+
+    /// The one setting allowed to hold nothing, and the row has to say what
+    /// nothing *means* — the system choosing — rather than leaving a blank box
+    /// the user has to guess about.
+    #[test]
+    fn the_row_admits_the_value_is_unchecked() {
+        let row = ADVANCED
+            .iter()
+            .flat_map(|group| group.settings.iter())
+            .find(|setting| setting.key == crate::config::key::OUTBOUND_INTERFACE)
+            .expect("the row vanished");
+        assert!(row.may_be_absent());
+        assert!(matches!(row.kind, Kind::Text { secret: false }));
+        assert!(
+            row.description.contains("does not check"),
+            "the row stopped saying AdGuard accepts any name: {}",
+            row.description
         );
     }
 }

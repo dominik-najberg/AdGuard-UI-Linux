@@ -158,6 +158,48 @@ impl Config {
         }
     }
 
+    /// Is this key present and explicitly null?
+    ///
+    /// Deliberately narrow, and deliberately **not** folded into
+    /// [`Self::str_at`]. Widening that would make every text row on the
+    /// Advanced page quietly tolerant of a value it should still refuse to
+    /// render — the distinction it draws is the whole reason
+    /// `every_advanced_setting_resolves_with_the_right_type` can catch a table
+    /// row pointing at a key nothing can read.
+    ///
+    /// `Yaml::BadValue` — the key is missing altogether — answers `false`. That
+    /// is not the same state: contract §5 measures that any CLI invocation
+    /// restores a missing key with its default, so *missing* heals itself,
+    /// while *null* is a value the user is entitled to keep.
+    pub fn is_null_at(&self, key: &str) -> bool {
+        matches!(self.at(key), Yaml::Null)
+    }
+
+    /// Does this setting hold something its row can render?
+    ///
+    /// One implementation, called by the page and by both suites that assert
+    /// the table stays readable, because the alternative was three copies of
+    /// the same `match` — and a rule added to two of them is a rule that
+    /// silently does not hold.
+    ///
+    /// The `Text` arm is the interesting one. A row that reads `None` renders
+    /// as *unavailable*, which is the right answer for a hand-edited wrong type
+    /// and the wrong one for `outbound_interface`, whose shipped value is null
+    /// and means *"the system decides"*. [`crate::Setting::may_be_absent`] is
+    /// the opt-in, so the tolerance reaches exactly the one key measured to
+    /// need it rather than every text row on the page.
+    pub fn resolves(&self, setting: crate::Setting) -> bool {
+        match setting.kind {
+            crate::Kind::Switch => self.bool_at(setting.key).is_some(),
+            crate::Kind::Number { .. } => self.int_at(setting.key).is_some(),
+            crate::Kind::Text { .. } => {
+                self.str_at(setting.key).is_some()
+                    || (setting.may_be_absent() && self.is_null_at(setting.key))
+            }
+            crate::Kind::Choice { options } => self.choice_at(setting.key, options).is_some(),
+        }
+    }
+
     /// Read an enumerated setting, returning the matching entry of `options`.
     ///
     /// Case-insensitive, because the CLI is: `config set log_level INFO` and
@@ -564,6 +606,28 @@ pub mod key {
     pub const LISTEN_AUTH_PASSWORD: &str = "listen_auth.password";
     pub const LISTEN_PORT_HTTP: &str = "listen_ports.http_proxy";
     pub const LISTEN_PORT_SOCKS5: &str = "listen_ports.socks5_proxy";
+
+    /// The interface AdGuard's own outgoing connections are bound to.
+    ///
+    /// **The only null-valued scalar in the whole 220-line file**, and the
+    /// reason [`super::Config::resolves`] exists: a null here is the shipped
+    /// state and means *"the system decides"*, which is not the same as a key
+    /// the page could not read. [`crate::Setting::may_be_absent`] is what tells
+    /// them apart.
+    ///
+    /// **Not part of `outbound_proxy`, despite the name.** It is a top-level
+    /// key 144 lines above that block and binds *every* outgoing connection,
+    /// not only ones going to an outbound proxy — so the parity enumeration's
+    /// proposal to file it there would have told the user something false.
+    /// `architecture.md` §5.
+    ///
+    /// **Unvalidated in every respect.** Measured 2 August 2026: `config set
+    /// outbound_interface "no such iface 0"` is accepted, spaces and all, and
+    /// written unquoted. Clearing it writes the word `null`, which restores the
+    /// stock line byte-identically; writing `""` instead leaves an empty scalar
+    /// that every YAML reader calls null while the CLI reads it back as an
+    /// empty string. `cli-contract.md` §5.
+    pub const OUTBOUND_INTERFACE: &str = "outbound_interface";
     pub const WORKER_THREADS: &str = "worker_threads";
     pub const LOG_LEVEL: &str = "log_level";
     pub const OUTBOUND_ENABLED: &str = "outbound_proxy.enabled";
@@ -1600,6 +1664,103 @@ stealthmode:
     #[test]
     fn the_sample_reads_its_dns_listen_port() {
         assert_eq!(sample().dns_listen_port(), Some(DnsListenPort::Disabled));
+    }
+}
+
+/// The null a row is allowed to have, and the null it is not.
+///
+/// `outbound_interface` is the only key in `proxy.yaml` that ships null, and
+/// teaching the page to render that as an empty field risked teaching it to
+/// render *every* unreadable text key that way — which would disarm
+/// `every_advanced_setting_resolves_with_the_right_type`, the assertion that
+/// caught this row in the first place. These pin the tolerance to one key.
+#[cfg(test)]
+mod absent_tests {
+    use super::{key, Config};
+    use crate::{Kind, Setting, ADVANCED, STEALTH};
+    use std::path::Path;
+
+    fn parse(text: &str) -> Config {
+        Config::parse(text, Path::new("proxy.yaml")).expect("should parse")
+    }
+
+    fn setting(key: &str) -> Setting {
+        *ADVANCED
+            .iter()
+            .chain(STEALTH.iter())
+            .flat_map(|group| group.settings.iter())
+            .find(|setting| setting.key == key)
+            .expect("no such setting")
+    }
+
+    /// The shipped state of a stock install. Before this, it rendered as
+    /// *unavailable* — a machine nobody had touched reporting a broken row.
+    #[test]
+    fn the_shipped_null_resolves() {
+        let config = parse("outbound_interface: null\n");
+        assert!(config.is_null_at(key::OUTBOUND_INTERFACE));
+        assert!(config.resolves(setting(key::OUTBOUND_INTERFACE)));
+    }
+
+    /// An empty scalar is what `config set outbound_interface ""` leaves, and
+    /// YAML calls it null — so the row has to survive the other route to
+    /// nothing as well, not just the word.
+    #[test]
+    fn an_empty_scalar_is_the_same_null() {
+        let config = parse("outbound_interface:\n");
+        assert!(config.is_null_at(key::OUTBOUND_INTERFACE));
+        assert!(config.resolves(setting(key::OUTBOUND_INTERFACE)));
+    }
+
+    /// The tolerance is for *null*, not for anything unreadable. A hand-edited
+    /// integer where a string belongs is still a row the page cannot render,
+    /// and saying otherwise would show an empty box for a value that is really
+    /// there.
+    #[test]
+    fn a_wrong_type_does_not_resolve_even_where_null_is_allowed() {
+        let config = parse("outbound_interface: 42\n");
+        assert!(!config.is_null_at(key::OUTBOUND_INTERFACE));
+        assert!(!config.resolves(setting(key::OUTBOUND_INTERFACE)));
+    }
+
+    /// The half that keeps the guard armed. Every other text row treats a null
+    /// as unreadable exactly as it did before, so a key that goes null by
+    /// accident still shows as unavailable rather than as empty-and-fine.
+    #[test]
+    fn a_null_in_any_other_text_row_is_still_unreadable() {
+        let others: Vec<Setting> = ADVANCED
+            .iter()
+            .chain(STEALTH.iter())
+            .flat_map(|group| group.settings.iter())
+            .filter(|setting| matches!(setting.kind, Kind::Text { .. }) && !setting.may_be_absent())
+            .copied()
+            .collect();
+        assert!(others.len() >= 8, "the text rows vanished: {}", others.len());
+
+        for setting in others {
+            let config = parse(&format!("{}: null\n", setting.key));
+            assert!(
+                !config.resolves(setting),
+                "{} started tolerating a null it was never measured to have",
+                setting.key
+            );
+        }
+    }
+
+    /// One setting declares this, and the count is asserted for the same reason
+    /// `only_the_documented_settings_declare_a_dependency` asserts its own: the
+    /// loop above would pass just as happily against a table where a second key
+    /// had quietly opted in.
+    #[test]
+    fn exactly_one_setting_may_be_absent() {
+        let opted_in: Vec<&str> = ADVANCED
+            .iter()
+            .chain(STEALTH.iter())
+            .flat_map(|group| group.settings.iter())
+            .filter(|setting| setting.may_be_absent())
+            .map(|setting| setting.key)
+            .collect();
+        assert_eq!(opted_in, vec![key::OUTBOUND_INTERFACE]);
     }
 }
 

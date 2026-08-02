@@ -76,14 +76,13 @@ fn every_advanced_setting_resolves_with_the_right_type() {
 
     for group in ADVANCED.iter().chain(STEALTH.iter()) {
         for setting in group.settings {
-            let resolved = match setting.kind {
-                Kind::Switch => config.bool_at(setting.key).is_some(),
-                Kind::Number { .. } => config.int_at(setting.key).is_some(),
-                // A credential or a host legitimately holds the empty string;
-                // `str_at` still returns `Some` for it, which is the point.
-                Kind::Text { .. } => config.str_at(setting.key).is_some(),
-                Kind::Choice { options } => config.choice_at(setting.key, options).is_some(),
-            };
+            // One implementation, in `Config::resolves`, because this rule
+            // also lives in the sandbox suite and on the page itself — and a
+            // rule added to two of the three is a rule that silently does not
+            // hold. A credential or a host legitimately holds the empty string,
+            // which `str_at` returns as `Some`; the one setting whose *null* is
+            // also legitimate opts in through `Setting::may_be_absent`.
+            let resolved = config.resolves(*setting);
             assert!(
                 resolved,
                 "{} ({}) did not resolve as {:?} in {}",

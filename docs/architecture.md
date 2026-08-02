@@ -200,9 +200,9 @@ Notes that shape the widgets:
 
 Everything in the *Key*, *Type* and *Stock* columns is read from the file; every key marked addressable answered `config get` with `key = value` at exit 0, measured against the live install with `proxy.yaml`'s hash taken either side and unmoved (contract §5 for the three that refuse). **The *Verdict* column is a proposal, not a measurement** — it is the reasoning this enumeration exists to produce, and §7 remains the authority over whether any of it becomes a row.
 
-#### Should become rows — 11 proposed, **9 built**
+#### Should become rows — 11 proposed, **10 built**
 
-**Nine are done**, as of 2 August 2026: the *HTTPS filtering* group on the Advanced page, between *Proxy mode* and *Secure DNS filtering*, `dns_filtering.block_ech` as DNS ▸ *Browser compatibility*, `safebrowsing.send_anonymous_statistics` as Protection ▸ *Privacy*, `adguard_headers_enabled` in Advanced ▸ *Diagnostics*, and `filtered_ports` as Advanced ▸ *Filtered ports* — the first of the nine that is not a switch, and the only row on that page which does not let the CLI word its own refusal. Every one was measured writable through `config set` before the code was written — surgical, one line each, the file's 220 unchanged — and then verified rendering headlessly, in each state the row can reach. **So the gap is now 13 unrendered keys, not 22**, and this table is the record of why each of the rest is or is not next.
+**Ten are done**, as of 2 August 2026: the *HTTPS filtering* group on the Advanced page, between *Proxy mode* and *Secure DNS filtering*, `dns_filtering.block_ech` as DNS ▸ *Browser compatibility*, `safebrowsing.send_anonymous_statistics` as Protection ▸ *Privacy*, `adguard_headers_enabled` in Advanced ▸ *Diagnostics*, `filtered_ports` as Advanced ▸ *Filtered ports* — the first of them that is not a switch, and the only row on that page which does not let the CLI word its own refusal — and `outbound_interface` as Advanced ▸ *Outgoing connections*, the only row whose key is allowed to hold nothing at all. Every one was measured writable through `config set` before the code was written — surgical, one line each, the file's 220 unchanged — and then verified rendering headlessly, in each state the row can reach. **So the gap is now 12 unrendered keys, not 22**, and this table is the record of why each of the rest is or is not next.
 
 | Key | Type | Stock | Where it belongs, and what it depends on |
 | --- | --- | --- | --- |
@@ -216,7 +216,7 @@ Everything in the *Key*, *Type* and *Stock* columns is read from the file; every
 | `auto_enable_language_filters` | bool | `true` | **Filters page**, and **blocked on one measurement** — see below. Both halves of this row's original reasoning were wrong |
 | ~~`adguard_headers_enabled`~~ | bool | `false` | **Built** — Advanced ▸ *Diagnostics*, beside `log_level` |
 | ~~`filtered_ports`~~ | str | `'80:5221,5300:49151'` | **Built** — Advanced ▸ *Filtered ports*, its own group directly above *Manual proxy ports*. ~~Its compound range syntax is ours to validate, since `config set` type-checks strings not at all~~ — **refuted 2 August 2026**: the CLI validates it, and what was ours turned out to be the wording, see below |
-| `outbound_interface` | null | `null` | Advanced *Outbound proxy*. ~~Needs a design for the null case: how an empty text field writes back `null` is unmeasured~~ — **measured 2 August 2026, and the write half was never the problem.** The read half is: this row cannot be a `Kind::Text`, see below |
+| ~~`outbound_interface`~~ | null | `null` | **Built** — Advanced ▸ *Outgoing connections*, its own group after *Listen address*. ~~Advanced *Outbound proxy*~~ — **the file refutes that placement**, and ~~needs a design for the null case: how an empty text field writes back `null` is unmeasured~~ — the write half was never the problem, see below |
 
 Five of the eleven were one coherent block — the `https_filtering.*` group — which is what made it the obvious first slice, and it is the one that got built.
 
@@ -287,6 +287,16 @@ PROBE (outbound_interface) did not resolve as Text { secret: false }
 ```
 
 So this row costs a change to `Kind::Text` — a shared type behind nine existing rows — to carry a notion of *absent* distinct from *unreadable*, plus the read helper to match. **That is the design, and it is a bigger one than the table implied**; the failing assertion is exactly the guard that should stop a row shipping with a hole in it, and it did.
+
+**Built 2 August 2026, and `Kind::Text` did not change after all.** The variant would have needed a third field on every one of the ten text literals to describe one of them. `Setting::requires()` had already solved the same shape and written down why — *"a method over the key rather than a field on every literal: two of the forty-odd settings have a dependency, and one place listing them reads better than forty-two `requires: None`"* — so `Setting::may_be_absent()` is a method naming exactly one key, and the type is untouched.
+
+**`str_at` is untouched too, which was the harder half of the constraint.** Widening it to answer `Some("")` for a null would have fixed this row by disarming the assertion that found it: every text row on the page would have started rendering an unreadable key as an empty box. Instead `Config::is_null_at` is a separate, narrow read — `Yaml::Null` only, and explicitly **not** `Yaml::BadValue`, because contract §5 measures that a *missing* key is restored with its default by the next CLI invocation while a null is a value the user is entitled to keep. `Config::resolves` is where the two are combined.
+
+**That combination now exists once instead of three times.** The same `match setting.kind { … }` was copied into `config_live.rs`, `config_sandbox.rs` and `AdvancedPage::mark_unmet_dependency`, and a rule added to two of the three is a rule that silently does not hold. All three call `Config::resolves`. Two tests keep the tolerance from spreading: one asserts **exactly one** setting declares `may_be_absent`, the other feeds a null to every *other* text row and asserts each still reads as unreadable.
+
+**The enumeration's placement was wrong, and the file is what says so** — the third time that column has been overruled by `proxy.yaml` itself. `outbound_interface` is a **top-level key at line 39, 144 lines above `outbound_proxy:`**, and its comment is *"If not null, bind outgoing connections to specified interface"* — every outgoing connection, not only ones bound for a proxy. Filing it under *Outbound proxy* would have told a user with no outbound proxy configured that the setting did not apply to them. It went into its own group, *Outgoing connections*, directly after *Listen address*, so the page reads incoming then outgoing; a test asserts it is not in the outbound-proxy group.
+
+**Three renderings, three walks**, and the first is the one that was broken: the shipped `null` renders as an empty and **usable** field, where before the change it would have been greyed out on a stock install. Then `eth0`, rendered as written. Then a hand-edited `outbound_interface: 42` — an integer where a string belongs — which is still `[INSENSITIVE]`, proving the tolerance did not become blanket. The clear path writes the word `null` rather than `""`, per contract §5, which restores the stock line byte-identically.
 
 #### Should stay unrendered (7)
 
