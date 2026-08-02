@@ -342,7 +342,7 @@ Main file: `~/.local/share/adguard-cli/proxy.yaml`. Values below are this machin
 | `outbound_interface` | `null` | Bind outgoing connections to a specific interface |
 | `ad_blocking_enabled` | `true` | Master switch for ad blocking |
 | `adguard_headers_enabled` | `false` | Add AdGuard's own HTTP headers |
-| `auto_enable_language_filters` | `true` | Auto-enable filters matching your system language |
+| `auto_enable_language_filters` | `true` | Adds and enables catalogue filters for **the language of the pages you visit as well as your system locale**. Never disables anything. Corrected 2 August 2026 — the previous gloss said "matching your system language", which dropped the half that runs continuously |
 | `filters` | `flm://`, `user.txt` | Active HTTP filter sources. `flm://` = the managed filter-list database; `user.txt` = your custom rules. |
 | `userscripts` | list of meta/content pairs | Installed userscripts |
 | `apps` | see below | Per-application filtering rules |

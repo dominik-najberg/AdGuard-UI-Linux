@@ -528,6 +528,15 @@ Consequences for a switch-per-filter UI:
 - **Turning a switch off is `disable`, never `remove`** — off should not silently unsubscribe.
 - **`add`'s confirmation is unreliable**: it prints the same two lines whether it did anything or not. Since it cannot distinguish a no-op, success must be read from the database, not the message.
 - The confirmation shape is `Filter [<something>] <verb>`. Matching that positively — and treating every other shape as failure — is the only way to tell the refusals apart from the successes, since both exit 0.
+
+**These four commands are not the only writer, and this section used to imply they were.** Measured 2 August 2026: `auto_enable_language_filters` — top-level in `proxy.yaml`, shipped `true`, commented *"Enables filters based on the query language and system locale"* — makes AdGuard add filters on its own, and the binary carries the runtime string ``Language filter `{}` has been added automatically``. So filter state can move with no command from us and no action by the user, which a UI that patches rows on toggle and re-reads only on demand will not see. It **only ever adds**; nothing here disables.
+
+Two measured facts for whoever builds against this:
+
+- **The database records no user provenance for filter state.** `pragma table_info(filter)` gives `is_user_title` and `is_user_description` — provenance for a filter's *name* — and nothing equivalent for `is_enabled` or `is_installed`. So *"off because the user chose off"* is indistinguishable from *"off because it was never on"*, to us and to anything else reading the file.
+- **The language-targeting tables are not the localisation tables, and nothing in this workspace reads them.** `filter_locale` holds **39 rows, 38 distinct tags, every one exactly two characters and none with an underscore** — so a POSIX tag like `en_US` cannot match, and neither `en` nor `en_US` appears at all. That is a different vocabulary from `filter_localisation`, which is what *Localisation tags are POSIX, not BCP-47* above is about and what `locale.rs` serves. Do not reach for `locale.rs` here.
+
+**What remains unmeasured is whether the automatic add respects a filter the user turned off**, which is the question a UI row for this key has to answer before it can exist. `architecture.md` §5 has the reasoning and `handoff.md` §3 item 12 has the blocker.
 - The database is updated **immediately**, and while the proxy is **stopped**. No restart is needed for the UI to observe a change.
 - Negative IDs need no `--` guard: `filters enable -2147483648` parses as a positional, not a flag, and resolves to `User rules`. (`filters enable 'User rules'` works too — the argument is `TEXT`, matched against ID *or* title.)
 
