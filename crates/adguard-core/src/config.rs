@@ -396,6 +396,39 @@ pub mod key {
 
     pub const DNS_LISTEN_PORT: &str = "dns_filtering.listen_port";
 
+    /// Tag filtered responses with the rule that matched.
+    ///
+    /// Measured on 1.4.13: readable, writable, one line of the file's 220
+    /// replaced with the comment above it untouched. Type-checked as a boolean
+    /// — exactly `true`, `false`, `1` and `0` are accepted, and `notabool`,
+    /// `True`, `TRUE`, `yes`, `on`, `off`, `No`, `FALSE`, `2` and the empty
+    /// string are all refused with *"Invalid value type: The value of the
+    /// setting must be an boolean"* on **stdout**, at **exit 0**, leaving the
+    /// file byte-identical. Setting it to the value it already holds still
+    /// prints `Config has been updated`.
+    ///
+    /// **These headers go to the browser, not to the site**, which is the whole
+    /// content of the row and is measured rather than assumed. In 1.4.13 both
+    /// names are referenced exactly once each, from one ~650-byte region around
+    /// `0x6bc3d0`, and every immediate beside them is the header name's own
+    /// length (`0x12` = 18 for `X-Adguard-Filtered`, `0xe` = 14 for
+    /// `X-Adguard-Rule`), so these really are `(name, len)` pairs into header
+    /// calls. Both are *written* through `0x7a36c0` into the collection in
+    /// `%r13` — and `Access-Control-Allow-Origin`, which exists only on
+    /// responses, is operated on through that same `%r13`. The CORS *request*
+    /// header `access-control-request-method` is read from a different object
+    /// (`%r14`) through a different function. So a switch here is **not** a
+    /// fingerprinting vector and the row must not imply it is; the disclosure
+    /// it does carry is that the matched rule and filter-list id arrive in the
+    /// browser, where same-origin script can read response headers.
+    ///
+    /// No `requires()`. The key is top-level, `proxy.yaml` claims no
+    /// dependency, and the CLI accepts it with both `https_filtering.enabled`
+    /// and `ad_blocking_enabled` false. Whether the headers are actually
+    /// *emitted* without HTTPS filtering is unmeasured — it would need traffic
+    /// through a second proxy — so it is not asserted here or in the row.
+    pub const ADGUARD_HEADERS: &str = "adguard_headers_enabled";
+
     /// Consent to send statistics alongside Browsing security.
     ///
     /// Measured on 1.4.13: readable, writable, one line replaced. Type-checked

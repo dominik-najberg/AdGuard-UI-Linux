@@ -745,6 +745,14 @@ pub const ADVANCED: [SettingGroup; 7] = [
                 description: "Allowed log levels are: info, debug, trace",
                 kind: Kind::Choice { options: LOG_LEVELS },
             },
+            Setting {
+                key: crate::config::key::ADGUARD_HEADERS,
+                title: "Tag filtered responses",
+                description: "Adds X-Adguard-Filtered and X-Adguard-Rule to responses on \
+                              their way to your browser, naming the rule that matched. The \
+                              sites you visit never see them",
+                kind: Kind::Switch,
+            },
         ],
     },
 ];
@@ -1385,6 +1393,7 @@ mod tests {
             key::OUTBOUND_PORT,
             key::WORKER_THREADS,
             key::LOG_LEVEL,
+            key::ADGUARD_HEADERS,
             // The parity enumeration's first slice — `architecture.md` §5.
             key::HTTPS_FILTER_EV,
             key::HTTPS_TLS13,
@@ -1569,5 +1578,52 @@ mod telemetry_tests {
                 "{toggle:?} has no wording in proxy.yaml and should not be a Toggle"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod header_row_tests {
+    use super::*;
+
+    /// The row went into the group that already existed rather than creating
+    /// one. `architecture.md` §5 justified the placement by *"the natural
+    /// neighbour of HAR capture"*, which appeals to something unbuilt and
+    /// blocked; the neighbour that actually ships is `log_level`, and the
+    /// reason that survives is `proxy.yaml`'s own word — *debugging*.
+    #[test]
+    fn the_header_switch_joined_diagnostics_rather_than_inventing_a_group() {
+        let diagnostics = ADVANCED
+            .iter()
+            .find(|group| group.title == "Diagnostics")
+            .expect("the Diagnostics group vanished");
+        let row = diagnostics
+            .settings
+            .iter()
+            .find(|setting| setting.key == crate::config::key::ADGUARD_HEADERS)
+            .expect("the header switch left Diagnostics");
+        assert!(matches!(row.kind, Kind::Switch));
+        assert_eq!(row.requires(), None, "invented a dependency nothing measured");
+    }
+
+    /// Directionality is the whole row, and it was very nearly written the
+    /// wrong way round. These headers are added to **responses**, so the sites
+    /// the user visits never receive them — a subtitle implying otherwise would
+    /// be a privacy claim measured false. Both header names are named, because
+    /// they are what a user greps for in devtools.
+    #[test]
+    fn the_header_row_does_not_imply_the_site_sees_them() {
+        let row = ADVANCED
+            .iter()
+            .flat_map(|group| group.settings.iter())
+            .find(|setting| setting.key == crate::config::key::ADGUARD_HEADERS)
+            .expect("the header row is not on the Advanced page");
+        let description = row.description;
+        assert!(description.contains("X-Adguard-Filtered"), "{description}");
+        assert!(description.contains("X-Adguard-Rule"), "{description}");
+        assert!(description.contains("responses"), "{description}");
+        assert!(
+            description.contains("never see them"),
+            "the row stopped saying the site cannot see these: {description}"
+        );
     }
 }

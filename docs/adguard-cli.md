@@ -341,7 +341,7 @@ Main file: `~/.local/share/adguard-cli/proxy.yaml`. Values below are this machin
 | `worker_threads` | `4` | Proxy worker thread count |
 | `outbound_interface` | `null` | Bind outgoing connections to a specific interface |
 | `ad_blocking_enabled` | `true` | Master switch for ad blocking |
-| `adguard_headers_enabled` | `false` | Add AdGuard's own HTTP headers |
+| `adguard_headers_enabled` | `false` | Adds `X-Adguard-Filtered` and `X-Adguard-Rule` **to responses**, on their way to the browser, naming the rule that matched. For debugging. The remote site never receives them — measured, 2 August 2026; the previous gloss named no direction, which is the ambiguity that made the measurement necessary |
 | `auto_enable_language_filters` | `true` | Adds and enables catalogue filters for **the language of the pages you visit as well as your system locale**. Never disables anything. Corrected 2 August 2026 — the previous gloss said "matching your system language", which dropped the half that runs continuously |
 | `filters` | `flm://`, `user.txt` | Active HTTP filter sources. `flm://` = the managed filter-list database; `user.txt` = your custom rules. |
 | `userscripts` | list of meta/content pairs | Installed userscripts |
