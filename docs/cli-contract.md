@@ -274,22 +274,25 @@ But **the accepted value is written back verbatim, in whatever case it was given
 
 ### `filtered_ports` is validated too — and its refusal names the wrong separator
 
-**Measured 2 August 2026**, twenty-nine writes against a sandbox seeded from the real file, each one diffed rather than read from the confirmation line. This correction matters because both `architecture.md` §5 and `handoff.md` §0 said the opposite — that this key's *"compound range syntax is ours to validate, since `config set` type-checks strings not at all"*. **It is not ours. The CLI validates it, and more thoroughly than `listen_address`.**
+**Measured 2 August 2026**, thirty-nine writes against a sandbox seeded from the real file, each one diffed rather than read from the confirmation line. This correction matters because both `architecture.md` §5 and `handoff.md` §0 said the opposite — that this key's *"compound range syntax is ours to validate, since `config set` type-checks strings not at all"*. **It is not ours. The CLI validates it, and more thoroughly than `listen_address`.**
 
 | Written | Result |
 | --- | --- |
 | `80:5221,5300:49151`, `80,443,8080` | accepted — the two forms the file's comment documents |
-| `80`, `0`, `65535`, `80:80`, `0:80`, `80:65535`, `80:90,443` | accepted |
-| `65536`, `80:65536` | refused — the ceiling is 65535 |
+| `80`, `0`, `65535`, `80:80`, `0:80`, `0:65535`, `80:65535`, `80:90,443` | accepted |
+| `9:80` | accepted — ascending, and a *string* comparison would refuse it |
+| `65536`, `80:65536`, `80,65536` | refused — the ceiling is 65535, in every position |
 | `9000:80` | refused — **a range must ascend** |
-| `80:`, `80:90:100`, `-1`, `http`, `hello world`, `80,abc` | refused |
-| *(empty)* | refused — so this key has no "clear" state, unlike `outbound_interface` below |
+| `80:`, `:90`, `80,:90`, `80,90:` | refused — an empty endpoint, in every position |
+| `80:90:100`, `-1`, `http`, `hello world`, `80,abc` | refused |
+| *(empty)*, `" "` | refused — so this key has no "clear" state, unlike `outbound_interface` below |
 | `80, 443`, `80,`, `80,,443`, `80 `, `080`, `00080:00090` | **accepted, and written verbatim** |
+| `80: 90`, `80 :90`, `80:90 ` | accepted — whitespace around the colon is tolerated |
 | `,80`, ` 80` | refused — but with the **integer** message, not the range one |
 
 So the grammar the CLI actually enforces is: comma-separated elements, each either `N` or `LO:HI`, with `0 ≤ N ≤ 65535` and `LO ≤ HI`. Three things follow, and the first is the one a row depends on:
 
-- **The refusal text is wrong, and wrong in the most expensive direction.** It reads ``Invalid value for key `filtered_ports`. Valid values are: space-separated list of valid ports or range of port`` — and space-separated is *precisely* the form it rejects (`80 443`, `80:90 443`, both refused). Every other refusal in this section can be shown to the user verbatim; `log_level`'s even enumerates the valid options correctly. **This one cannot.** A row that surfaces the CLI's own words here would instruct the user to do the one thing that cannot work. The file's comment is right where the binary's message is wrong, which is the reverse of the usual direction and is why this was worth twenty-nine writes.
+- **The refusal text is wrong, and wrong in the most expensive direction.** It reads ``Invalid value for key `filtered_ports`. Valid values are: space-separated list of valid ports or range of port`` — and space-separated is *precisely* the form it rejects (`80 443`, `80:90 443`, both refused). Every other refusal in this section can be shown to the user verbatim; `log_level`'s even enumerates the valid options correctly. **This one cannot.** A row that surfaces the CLI's own words here would instruct the user to do the one thing that cannot work. The file's comment is right where the binary's message is wrong, which is the reverse of the usual direction and is why this was worth thirty-nine writes. `config::is_port_list` is what the GUI checks instead, and its rustdoc carries this table so the two cannot drift.
 - **The tolerated junk is written back verbatim and must survive a read.** `80,` and `80,,443` and `80 ` and `00080:00090` all land in `proxy.yaml` exactly as typed. A GUI that re-normalises what it reads would rewrite a file the user has not touched, and one that refuses to render them would call a value unavailable that the CLI itself produced — the same trap `choice_at` exists for.
 - **Two refusals, two messages, and the split is positional.** An empty or whitespace-led element is refused with the *integer* message at the **start of the string** (`,80`, ` 80`) and accepted anywhere later (`80,,443`, `80, 443`). Measured on both sides; the mechanism behind it is not, and does not need to be.
 

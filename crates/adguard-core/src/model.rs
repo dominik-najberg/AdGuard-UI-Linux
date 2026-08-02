@@ -525,7 +525,7 @@ pub const STEALTH: [SettingGroup; 5] = [
 /// had no documentation at all — `cargo doc` is what proves it, not reading.
 /// A blank line does *not* separate two `///` runs; only an intervening item
 /// does. Moved here 2 August 2026.
-pub const ADVANCED: [SettingGroup; 7] = [
+pub const ADVANCED: [SettingGroup; 8] = [
     SettingGroup {
         title: "Proxy mode",
         description: "Manual mode listens on the ports below and leaves it to you \
@@ -603,6 +603,19 @@ pub const ADVANCED: [SettingGroup; 7] = [
                 kind: Kind::Switch,
             },
         ],
+    },
+    SettingGroup {
+        title: "Filtered ports",
+        description: "Ports AdGuard redirects into itself in automatic proxy \
+                      mode. Traffic to any other port reaches the network \
+                      without being filtered.",
+        settings: &[Setting {
+            key: crate::config::key::FILTERED_PORTS,
+            title: "Filtered ports",
+            description: "Single ports and low:high ranges, separated by commas \
+                          — 80,443,8080 or 80:5221,5300:49151",
+            kind: Kind::Text { secret: false },
+        }],
     },
     SettingGroup {
         title: "Manual proxy ports",
@@ -1400,6 +1413,7 @@ mod tests {
             key::HTTPS_OCSP,
             key::HTTPS_CERT_TRANSPARENCY,
             key::HTTPS_HTTP3,
+            key::FILTERED_PORTS,
         ] {
             assert!(keys.contains(&expected), "{expected} is missing from ADVANCED");
         }
@@ -1624,6 +1638,78 @@ mod header_row_tests {
         assert!(
             description.contains("never see them"),
             "the row stopped saying the site cannot see these: {description}"
+        );
+    }
+}
+
+/// The `filtered_ports` row, whose entire design is that it does **not** repeat
+/// what the CLI says — `architecture.md` §5 and `cli-contract.md` §5.
+#[cfg(test)]
+mod filtered_ports_tests {
+    use super::{Kind, ADVANCED};
+
+    fn row() -> super::Setting {
+        *ADVANCED
+            .iter()
+            .flat_map(|group| group.settings.iter())
+            .find(|setting| setting.key == crate::config::key::FILTERED_PORTS)
+            .expect("the filtered ports row is not on the Advanced page")
+    }
+
+    /// The reason this row exists at all. `adguard-cli` refuses a bad value
+    /// with *"Valid values are: space-separated list of valid ports or range of
+    /// port"* — and `80 443` is refused. Measured, `cli-contract.md` §5. A
+    /// future edit "helpfully" aligning this wording with the CLI's would hand
+    /// the user the one form that cannot work, so the word is banned outright.
+    #[test]
+    fn the_row_never_repeats_the_cli_wrong_separator() {
+        let description = row().description;
+        assert!(
+            !description.contains("space-separated") && !description.contains("space separated"),
+            "took the CLI's wording, which recommends the form it rejects: {description}"
+        );
+        assert!(
+            description.contains("commas"),
+            "the row stopped naming the separator that works: {description}"
+        );
+    }
+
+    /// Both forms `proxy.yaml`'s comment gives, verbatim, because the file was
+    /// right where the binary was wrong and that is the only reason we know it.
+    #[test]
+    fn the_row_shows_the_two_documented_forms() {
+        let description = row().description;
+        assert!(description.contains("80,443,8080"), "{description}");
+        assert!(description.contains("80:5221,5300:49151"), "{description}");
+    }
+
+    /// Its dependency is on `proxy_mode`, which is a **choice**, and
+    /// `requires()` models a dependency on a boolean. It could not be declared
+    /// here even if it should be — so it lives in the group description, the
+    /// way *Manual proxy ports* states the opposite mode.
+    #[test]
+    fn the_mode_dependency_is_in_the_group_not_a_requires() {
+        assert_eq!(row().requires(), None, "invented a dependency requires() cannot express");
+        assert!(matches!(row().kind, Kind::Text { secret: false }));
+
+        let group = ADVANCED
+            .iter()
+            .find(|group| {
+                group
+                    .settings
+                    .iter()
+                    .any(|setting| setting.key == crate::config::key::FILTERED_PORTS)
+            })
+            .expect("the group vanished");
+        assert!(
+            group.description.contains("automatic proxy"),
+            "the group stopped naming the mode this applies in: {}",
+            group.description
+        );
+        assert_eq!(
+            group.settings.len(),
+            1,
+            "a second row here would inherit a mode caveat nobody wrote for it"
         );
     }
 }

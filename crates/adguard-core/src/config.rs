@@ -387,6 +387,24 @@ fn missing_credentials_message(username: bool, password: bool) -> String {
 /// `adguard-cli config set` argument, so the two can never drift apart.
 pub mod key {
     pub const PROXY_MODE: &str = "proxy_mode";
+
+    /// Destination ports redirected into the proxy in automatic mode.
+    ///
+    /// Inert in manual mode — `proxy.yaml` calls it *"Filtered ports for Linux
+    /// auto-proxy mode"* — which is why its row lives in a group of its own
+    /// whose description names the mode, mirroring *Manual proxy ports*.
+    /// `Setting::requires()` could not carry it in any case: that models a
+    /// dependency on a **boolean**, and `proxy_mode` is a choice.
+    ///
+    /// **The CLI validates this key, and its refusal recommends the one form it
+    /// rejects.** Measured 2 August 2026 over twenty-nine sandboxed writes
+    /// (`cli-contract.md` §5): descending ranges, `65536`, `80:`, `-1`, `http`
+    /// and the empty string are all refused, so the grammar is real and
+    /// enforced — but the message reads *"Valid values are: space-separated
+    /// list of valid ports or range of port"*, and `80 443` is refused by the
+    /// very sentence recommending it. [`is_port_list`] exists so a user never
+    /// sees that sentence.
+    pub const FILTERED_PORTS: &str = "filtered_ports";
     pub const AD_BLOCKING: &str = "ad_blocking_enabled";
     pub const HTTPS_FILTERING: &str = "https_filtering.enabled";
     pub const STEALTH_MODE: &str = "stealthmode.enabled";
@@ -587,6 +605,76 @@ pub mod key {
     pub const SM_DPI_SPLIT_DELAY: &str = "stealthmode.anti_dpi.split_delay_ms";
     pub const SM_DPI_SPACE_JUGGLING: &str = "stealthmode.anti_dpi.http_space_juggling";
     pub const SM_DPI_FIRST_PACKET: &str = "stealthmode.anti_dpi.increase_first_packet_size";
+}
+
+/// Would `adguard-cli config set filtered_ports` accept this?
+///
+/// **This is the one place the GUI second-guesses a CLI refusal, and it is
+/// earned rather than assumed.** `AdvancedPage::settle` toasts a refusal
+/// verbatim on the stated grounds that the CLI's wording beats ours — it names
+/// an enum's valid values, or the key it did not recognise. For this key it
+/// does not: the message is *"Valid values are: space-separated list of valid
+/// ports or range of port"*, and space-separated is precisely what it rejects
+/// (`80 443`, refused). Passing that through would instruct the user to do the
+/// one thing that cannot work, so the row checks first and says what
+/// `proxy.yaml` says.
+///
+/// **Deliberately no stricter than the CLI**, including where the CLI is
+/// odd. Refusing something `config set` would have taken is the same class of
+/// mistake as [`Config::choice_at`] rendering a CLI-written value as
+/// unavailable, and it is the more likely one here, so every shape measured as
+/// accepted is accepted:
+///
+/// | Written | CLI | Here |
+/// | --- | --- | --- |
+/// | `80:5221,5300:49151`, `80,443,8080` | accepted | accepted — the file's two documented forms |
+/// | `0`, `65535`, `80:80`, `0:80`, `0:65535`, `9:80`, `80:90,443` | accepted | accepted |
+/// | `80, 443`, `80,`, `80,,443`, `80 `, `080`, `00080:00090` | accepted | accepted — junk the CLI takes and writes back verbatim |
+/// | `80: 90`, `80 :90`, `80:90 ` | accepted | accepted — whitespace around the colon |
+/// | `9000:80` | refused — descending | refused |
+/// | `65536`, `80:65536`, `80,65536` | refused — the ceiling is 65535 | refused |
+/// | `80:`, `:90`, `80,:90`, `80,90:` | refused — an empty endpoint, in any position | refused |
+/// | `80:90:100`, `-1`, `http`, `80,abc`, *(empty)*, `" "` | refused | refused |
+/// | `,80`, ` 80` | refused, with the *integer* message | refused |
+///
+/// The last row is why the leading character is tested against the whole string
+/// rather than per element: an empty or space-led element is refused at the
+/// **start** and accepted anywhere later (`80,,443` and `80, 443` both land).
+/// Measured on both sides; the mechanism behind the asymmetry is not, and does
+/// not need to be for this to match it.
+pub fn is_port_list(value: &str) -> bool {
+    if value.is_empty() || value.starts_with([' ', '\t', ',']) {
+        return false;
+    }
+
+    // `080` and `00080` are accepted by the CLI and written back verbatim, so
+    // leading zeros are not an error — only a non-digit is. Parsing alone would
+    // take a leading `+` or `-`, which the CLI refuses, hence the digit test.
+    let port = |text: &str| {
+        (!text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit()))
+            .then(|| text.parse::<u32>().ok())
+            .flatten()
+            .filter(|number| *number <= 65535)
+    };
+
+    value.split(',').all(|element| {
+        let element = element.trim();
+        match element.split_once(':') {
+            // An empty element is only reachable in a later position, the first
+            // having been ruled out above. The CLI accepts `80,` and `80,,443`.
+            None if element.is_empty() => true,
+            None => port(element).is_some(),
+            // Compared as numbers. `9:80` is a legal ascending range and a
+            // string comparison would refuse it, since "9" sorts after "80".
+            // Trimmed on both sides because `80 :90` and `80: 90` are accepted
+            // too — measured, not assumed; an *empty* endpoint is refused in
+            // every position, including `80,:90`.
+            Some((low, high)) => match (port(low.trim()), port(high.trim())) {
+                (Some(low), Some(high)) => low <= high,
+                _ => false,
+            },
+        }
+    })
 }
 
 /// Is this listen address confined to the local machine?
@@ -1512,5 +1600,90 @@ stealthmode:
     #[test]
     fn the_sample_reads_its_dns_listen_port() {
         assert_eq!(sample().dns_listen_port(), Some(DnsListenPort::Disabled));
+    }
+}
+
+/// Every case here is a real `adguard-cli config set filtered_ports` against a
+/// sandbox, taken 2 August 2026 with the file diffed either side — thirty-nine
+/// of them, `cli-contract.md` §5. They are a transcript, not a specification:
+/// if a future CLI disagrees, this table is what has to be re-measured, and the
+/// wrong move would be to "fix" [`is_port_list`] to match an opinion about what
+/// the grammar ought to be.
+#[cfg(test)]
+mod port_list_tests {
+    use super::is_port_list;
+
+    /// The direction that matters most. Refusing a value `config set` would
+    /// have written is worse than accepting one it refuses: the second costs a
+    /// toast in the CLI's own words, while the first is the GUI standing
+    /// between a user and a setting the CLI was willing to make.
+    #[test]
+    fn everything_the_cli_accepted_is_accepted() {
+        for value in [
+            // The two forms `proxy.yaml`'s own comment documents.
+            "80:5221,5300:49151",
+            "80,443,8080",
+            // Bounds and degenerate ranges.
+            "0",
+            "65535",
+            "80:80",
+            "0:80",
+            "0:65535",
+            "80:65535",
+            // Ascending, and a string comparison would refuse this one.
+            "9:80",
+            "80:90,443",
+            // Whitespace the CLI tolerates, in the positions it tolerates it.
+            "80, 443",
+            "80 ",
+            "80: 90",
+            "80 :90",
+            "80:90 ",
+            // Junk it takes and writes back verbatim.
+            "80,",
+            "80,,443",
+            "080",
+            "00080:00090",
+        ] {
+            assert!(is_port_list(value), "{value:?} was accepted by the CLI");
+        }
+    }
+
+    #[test]
+    fn everything_the_cli_refused_is_refused() {
+        for value in [
+            // A range must ascend, and 65535 is the ceiling.
+            "9000:80",
+            "65536",
+            "80:65536",
+            "80,65536",
+            // An empty endpoint, in every position it can take.
+            "80:",
+            ":90",
+            "80,:90",
+            "80,90:",
+            // Not a port list at all.
+            "80:90:100",
+            "-1",
+            "http",
+            "hello world",
+            "80,abc",
+            "",
+            " ",
+            // Refused with the *integer* message rather than the range one, and
+            // only at the start of the string — `80,,443` and `80, 443` above
+            // are the same shapes in a later position, and both land.
+            ",80",
+            " 80",
+        ] {
+            assert!(!is_port_list(value), "{value:?} was refused by the CLI");
+        }
+    }
+
+    /// The stock value must survive a round trip, or the row would refuse to
+    /// write back what it was rendered from on a machine nobody has touched.
+    #[test]
+    fn the_shipped_default_is_writable() {
+        assert!(is_port_list("80:5221,5300:49151"));
     }
 }

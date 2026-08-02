@@ -31,7 +31,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
 
-use adguard_core::config::{key, listen_address_plan};
+use adguard_core::config::{is_port_list, key, listen_address_plan};
 use adguard_core::{
     AddressPlan, Applied, Cli, Config, Kind, RootHelper, Setting, SettingGroup,
 };
@@ -873,6 +873,18 @@ impl AdvancedPage {
             self.move_listen_address(row, text.trim().to_owned());
             return;
         }
+        // The only value this page checks before asking the CLI. `settle` toasts
+        // a refusal verbatim because the CLI's wording beats ours — and for this
+        // one key it does not: it answers *"Valid values are: space-separated
+        // list of valid ports or range of port"*, and space-separated is exactly
+        // what it rejects. So we say what `proxy.yaml` says instead.
+        // `is_port_list` is deliberately no stricter than the CLI, so this
+        // cannot refuse a value the CLI would have taken.
+        if row.setting.key == key::FILTERED_PORTS && !is_port_list(text) {
+            self.toasts.add_toast(toast(PORT_LIST_ADVICE));
+            self.reset_row(row);
+            return;
+        }
         self.write(row, text.to_owned());
     }
 
@@ -1078,6 +1090,17 @@ impl AdvancedPage {
     }
 }
 
+/// What the user is told when `filtered_ports` will not be accepted.
+///
+/// A named constant rather than a literal at the call site so a test can hold
+/// it, because this is the one refusal on this page the CLI must not be allowed
+/// to word: `adguard-cli` answers *"Valid values are: space-separated list of
+/// valid ports or range of port"*, and `80 443` is refused. `cli-contract.md`
+/// §5, measured. The wording here is `proxy.yaml`'s.
+const PORT_LIST_ADVICE: &str = "Filtered ports are single ports and low:high ranges \
+                                separated by commas, such as 80,443,8080 or \
+                                80:5221,5300:49151";
+
 /// The subtitle for a number row that holds a value we can write.
 fn describe_number(setting: Setting, value: i64) -> String {
     match setting.kind {
@@ -1111,4 +1134,43 @@ fn error_view(message: &str) -> adw::StatusPage {
         .title("Configuration unavailable")
         .description(message)
         .build()
+}
+
+/// The refusal wording for `filtered_ports`, which exists because the CLI's own
+/// is wrong — `architecture.md` §5 and `cli-contract.md` §5.
+#[cfg(test)]
+mod tests {
+    use super::PORT_LIST_ADVICE;
+    use adguard_core::config::is_port_list;
+
+    /// The trap this whole row was built around. `adguard-cli` answers a bad
+    /// value with *"Valid values are: space-separated list of valid ports or
+    /// range of port"* — and `80 443` is the one thing it refuses. Anyone
+    /// aligning our toast with the CLI's message would be handing the user the
+    /// form that cannot work, so the word cannot appear here.
+    #[test]
+    fn the_advice_never_repeats_the_cli_wrong_separator() {
+        assert!(
+            !PORT_LIST_ADVICE.contains("space-separated")
+                && !PORT_LIST_ADVICE.contains("space separated"),
+            "{PORT_LIST_ADVICE}"
+        );
+        assert!(PORT_LIST_ADVICE.contains("commas"), "{PORT_LIST_ADVICE}");
+    }
+
+    /// Advice a user cannot act on is worse than none, so the two forms it
+    /// offers have to be forms the CLI actually takes. Checked against the
+    /// validator rather than asserted, so an edit to either has to keep them
+    /// agreeing.
+    #[test]
+    fn every_example_in_the_advice_is_one_the_cli_accepts() {
+        let examples: Vec<&str> = PORT_LIST_ADVICE
+            .split_whitespace()
+            .filter(|word| word.starts_with(|c: char| c.is_ascii_digit()))
+            .collect();
+        assert_eq!(examples.len(), 2, "the advice stopped offering two examples: {examples:?}");
+        for example in examples {
+            assert!(is_port_list(example), "the advice offers {example:?}, which is refused");
+        }
+    }
 }
