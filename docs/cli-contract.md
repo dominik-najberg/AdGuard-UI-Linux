@@ -541,15 +541,26 @@ Neither string carries the `{}: ` component tag every log format string around t
 
 So **there is no terminal or log path carrying protection status to a user at all.** Whatever `show_notifications` gates, the only protection-status message this binary has goes out over D-Bus — which answers the fork without needing the key's wiring, and puts it on the design side.
 
-**What is not measured, and the binary is what weakens it.** That the key gates *that call* is an inference. The mechanism has **more than one caller**: a fourth untagged string,
+**The wiring was an inference for about twenty minutes, and is now measured.** The paragraph that stood here said the key gating *that call* could not be concluded from strings, because the mechanism has **more than one caller** — a fourth untagged string, `` Language filter `{}` has been added automatically ``. That caution was right and it is what made the following experiment worth running rather than skipping.
+
+**Measured 2 August 2026**, in the authorised sandbox run, with a shim `gdbus` early on `PATH` capturing the call instead of raising a notification. Two legs, one variable, both on a data directory short enough that the daemon started cleanly:
+
+| `show_notifications` | Daemon | `Notify` calls captured |
+| --- | --- | --- |
+| `true` | 400-line start, 2 listeners | `Protection started`, `Protection stopped`, **and** `` Language filter `AdGuard French filter` has been added automatically `` |
+| `false` | 201-line start, 2 listeners, 0 socket errors | **none — the shim was never invoked at all** |
+
+The captured argument vector, verbatim, which is what the table above was decoded from:
 
 ```
-Language filter `{}` has been added automatically
+adguardvpn_cli · 0 · '' · "AdGuard CLI" · "Protection started" · [] · {} · 5000
 ```
 
-is the `auto_enable_language_filters` announcement `handoff.md` §3 item 12 records as going over D-Bus rather than to a log — same shape, same absence from `app.log`, one shared `gdbus` path. *A notification mechanism exists* is therefore evidence about the mechanism and not about which switch silences which caller. Settling it needs a proxy start whose bus traffic can be captured, which is the second-proxy wall of §3 items 9 and 12.
+So `summary` is the constant **`AdGuard CLI`** and `body` carries the event; the timeout is **5 s**; and `replaces_id` is `0` on each call, so the "read the id back and replace" path exists but is not being used for these.
 
-**Two smaller facts** for whoever takes it. `adguard_cli_nm` carries the same mechanism and neither `Protection` string, while `adguard_root_helper` carries neither — so a notification never originates in the privileged process. And a shim `gdbus` placed early on `PATH` is how an authorised run captures the call argument-for-argument without a real notification ever being raised.
+**Two things follow that the key's own comment does not say.** It gates **every** caller of the shared mechanism, not just protection status — the language-filter announcement went silent with it, and `proxy.yaml` describes the key only as *"show protection status notification"*. And a UI that offers this switch is therefore also the only control over `auto_enable_language_filters`' notification, which is the one thing that would otherwise tell a user their filter list had been changed for them.
+
+**One smaller fact** for whoever takes it: `adguard_cli_nm` carries the same mechanism and neither `Protection` string, while `adguard_root_helper` carries neither — so a notification never originates in the privileged process.
 
 ### A change may not reach the running proxy
 
@@ -729,6 +740,34 @@ The absent-id refusal is the one a UI will actually hit: two windows open, or a 
 **And custom rows sort newest-first.** `Catalogue::custom_filters` orders by `filter_id` ascending while custom ids *descend* from `-10001`, so index 0 is the most recently installed list. That is stable, unlike the `display_number = 0` ordering warned about above, but it is the opposite of the order they were added in — worth knowing before indexing into that list in a test or a UI.
 
 **`proxy.yaml` is not touched.** Its `filters` list still reads `['flm://', 'user.txt']` after four installs; custom lists live only in the database, behind that `flm://` entry. So no `config list-add` is involved and nothing here needs the write path of [§5](#5-configuration-writes).
+
+### `auto_enable_language_filters` keys on *installation*, so a `disable` survives it and a `remove` does not
+
+The question `handoff.md` §3 item 12 opened and could not answer from the database: **does the automatic add respect a filter the user turned off?** It cannot be read off the schema, because there is no column in which *"off because I chose off"* could be written — `filter` has `is_user_title` and `is_user_description` and nothing equivalent for `is_enabled` or `is_installed` (confirmed against the schema, 19 columns).
+
+**Answered 2 August 2026** in the authorised sandbox run, with both asymmetries under test at once so one traffic run settles both. Setup, on a licensed scratch install seeded by copy:
+
+```console
+$ adguard-cli filters add 6   && adguard-cli filters disable 6    # German — disabled, still installed
+$ adguard-cli filters add 16  && adguard-cli filters remove 16    # French  — removed
+```
+
+Then 64 requests to German and French pages through the sandbox proxy over ~6 minutes, in 8 rounds, and the `filter` table read directly either side:
+
+| `filter_id` | Title | Before (`is_enabled`/`is_installed`) | After | Verdict |
+| --- | --- | --- | --- | --- |
+| 6 | AdGuard German filter | `0` / `1` — **disabled** | `0` / `1` | **untouched** |
+| 16 | AdGuard French filter | `0` / `0` — **removed** | `1` / `1` | **re-added *and* enabled** |
+| 224 | AdGuard Chinese filter | `0` / `1` | `0` / `1` | control, no matching traffic |
+
+Stable across all eight rounds, and **independently corroborated by a second channel**: with `show_notifications: true`, the run raised `` Language filter `AdGuard French filter` has been added automatically `` over D-Bus and named no other filter (§5).
+
+**So the add path keys on `is_installed`, not on `is_enabled`** — and the inversion item 12 predicted is real: **removing a list is less durable than disabling it.** A `disable` leaves `is_installed = 1`, the heuristic sees the list as present and leaves the switch alone; a `remove` clears it, and the heuristic puts the list back *and turns it on*. That is the opposite of the mental model the removal dialog is built around, where removal is the stronger of the two.
+
+Two consequences for the UI, and the first is not about this row:
+
+- **The removal dialog is now describing the weaker action.** It names the URL and asks for confirmation, which reads as the more serious choice; for a *language* filter with this setting on, it is the one that does not stick.
+- **The row's subtitle has to carry the asymmetry**, because nothing else in the flow would: turning this on can restore lists you removed, and will not re-enable lists you disabled. That is one sentence and it is the whole reason the row needed a measurement before it could ship.
 
 ---
 
@@ -1048,6 +1087,43 @@ Two smaller results from the same run:
 
 **Live stats is its own milestone, behind a spike on this format** — `architecture.md` §7 is the scope authority and put it there on 2 August 2026; this section is the input to that spike, not a scope claim of its own. Nothing in the CLI provides a counter or stats endpoint.
 
+### `har_writer.location: '.'` resolves against the **data directory** — measured with a proxy
+
+The question `architecture.md` §7 makes the HAR item's first task. **Answered 2 August 2026**, by the authorised sandbox run the owner cleared: a licensed scratch `XDG_DATA_HOME`, `proxy_mode: manual`, both listen ports moved off 3129/1081, `har_writer.enabled: true`, `location` left at its shipped `'.'`.
+
+**The experiment is the cwd.** The daemon was started from a directory that is neither the data directory nor `$HOME` — `<sandbox>/cwdprobe` — so `'.'` could only resolve to one of three places and each is distinguishable:
+
+```console
+$ readlink -f /proc/<daemon>/cwd
+<sandbox>/cwdprobe
+$ ls -la <sandbox>/cwdprobe                      # after 64 filtered requests
+total 0                                          # empty
+$ for f in /proc/<daemon>/fd/*; do readlink $f; done | grep har
+<sandbox>/adguard-cli/adguard.har
+```
+
+**So `'.'` is the data directory, not the working directory** — the same conclusion `access_log_file` reached, and the opposite of what a reader of the file would assume. The subsection above says three relative paths have no single base; this is the third of them, and it lands with `access_log_file` rather than with the cwd. The filename `adguard.har` is fixed: `location` names a **directory**, and nothing in the file names the file.
+
+**What the dump contains, and it decides the subtitle.** Valid HAR 1.2, complete and parseable *while the proxy is running* rather than only at shutdown:
+
+```console
+$ python3 -c "import json;d=json.load(open('adguard.har'));print(d['log']['creator'],len(d['log']['entries']))"
+{'name': 'AGProxy', 'version': '1.0'} 2
+```
+
+Full URLs, request headers, and **response bodies** — the page contents, not a summary of them. `-rw-rw-r--`, so it is **group- and world-readable**, unlike the licence in `adguard.conf`.
+
+**And it is heavier than "too heavy" suggested.** §9 above called full HAR dumps too heavy for an always-on capture on reasoning rather than on a number. The number:
+
+| After | Size |
+| --- | --- |
+| 2 requests | 6,137 B |
+| 64 requests over ~6 minutes of scripted browsing | **114,084,761 B** |
+
+That is ~1.8 MB per request of ordinary page loads, and **the files accumulate**: teardown found `adguard.har` alongside `adguard-1785668116.har` and `adguard-1785668569.har`, one per proxy run, with nothing pruning them. (Observed while deleting the sandbox rather than by a designed measurement — the rotation *rule* is not measured, only that more than one file survives more than one run.)
+
+So the row cannot be worded as a debugging convenience. It writes every page the user visits, in full, to a world-readable file in a directory the UI must name absolutely — because `'.'` tells the user nothing — and it does not stop growing.
+
 ---
 
 ## 10. Wrapper-layer checklist
@@ -1114,6 +1190,27 @@ Failed to start proxy server: An unknown error has occurred
 ```
 
 So the CLI has no route out of this state. The user is left with a proxy that is down, a UI that agrees it is down, and a Start button that does nothing for a minute — and `stop && killall adguard-cli` is the recovery people arrive at, of which only the `killall` does anything.
+
+### The symptom reproduces on demand — and the first two explanations for it were both wrong
+
+This section opens *"after the state arose on its own during ordinary use"*, which is why nothing here has ever been a controlled experiment. **On 2 August 2026 the symptom appeared on demand, twice, in the authorised sandbox run**, with stdout byte-identical to the block above and the daemon provably alive:
+
+```console
+$ adguard-cli stop                       # exit 0
+Failed to stop the AdGuard proxy server
+Failed to stop proxy server, it is not running
+$ ps -p <daemon> -o pid=,cmd=
+1861384 /home/potworny/.local/bin/adguard-cli start --no-fork
+```
+
+**First explanation, refuted by its own control.** The sandbox's `XDG_DATA_HOME` was 119 characters, and the daemon had warned at startup: `Socket name length 144 exceeds maximum allowed length 107. The name will be truncated` — a truncated `sun_path`, which is exactly the shape of a client that cannot find its server. Re-running on a 10-character path removed the warning entirely (`grep -c "Socket name length"` → `0`) and **`stop` failed identically**. So the truncation is real, and it is not the cause of this.
+
+**Second explanation, and it is a lead rather than an answer.** The one structural difference from a healthy install is that the sandbox data directory held `agcli.socket` and **no `adguard.pid`**, where the real one holds both. These runs were launched as `start --no-fork` directly; the real proxy is a `start` **parent** with a `start --no-fork` child, and `§11`'s own opening `ps` shows that parent/child pair. So the plausible reading is that the pid file is written by the wrapper and not by the child, and that `stop` consults it — which would mean **this run produced a look-alike rather than the organic bug**: same stdout, same exit 0, same live process, possibly a different cause. It is recorded that way deliberately. Reaching the organic state still needs it to arise on its own.
+
+**What is settled either way**, and both are useful:
+
+- **`SIGTERM` by PID worked every time** — four for four across this run — and takes the root helper with it, leaving no orphan. That is the cure this section already recommends, now exercised deliberately rather than observed once.
+- **The truncation is a separate, real trap.** A data directory whose path is long enough pushes the control-socket name past 107 bytes; the daemon says so in one WARN line at startup and then runs anyway. Any harness that sandboxes via a deep `XDG_DATA_HOME` — which is every harness in this project — should keep the path short, and a second start against the same directory then fails with `Failed to init control socket: Socket busy` rather than anything that names the real problem.
 
 ### The command line is not the signature; the contradiction is
 
