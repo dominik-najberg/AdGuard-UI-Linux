@@ -284,6 +284,41 @@ impl AdvancedPage {
         }
     }
 
+    /// Has this page ever painted? A page with no rows has nothing to patch,
+    /// which is the one case [`Self::reconcile`] answers with a rebuild.
+    ///
+    /// Public because a *hosted* table's rebuild belongs to its host: the bin
+    /// this page would rebuild into is not the widget anyone is looking at.
+    pub fn is_built(&self) -> bool {
+        !self.rows.borrow().is_empty()
+    }
+
+    /// Build this table's groups as a **prelude inside another page**,
+    /// unparented and ready to hand to [`crate::filters::Host`].
+    ///
+    /// The host contract is that a prelude returns **fresh** widgets on every
+    /// call, because the page they were added to is dropped when the catalogue
+    /// rebuilds and a widget cannot be re-parented out of a dying one.
+    /// [`Self::build`] already makes fresh groups each time, so the only extra
+    /// work is taking them back off the `PreferencesPage` it parents them to.
+    ///
+    /// Going through `build` rather than hand-rolling a group is the whole
+    /// point. The DNS page's prelude is hand-built and therefore carries its
+    /// own paint, its own write-then-re-read and its own reconcile; a second
+    /// hand-built prelude would be a third copy of rules that have already been
+    /// wrong once for being duplicated (`handoff.md` §3 item 13). This way the
+    /// Filters page's switch is written, verified and reconciled by exactly the
+    /// code that does it for the other forty rows.
+    pub fn host_groups(self: &Rc<Self>, config: &Config) -> Vec<adw::PreferencesGroup> {
+        let page = self.build(config);
+        let groups = self.groups.borrow().clone();
+        for group in &groups {
+            page.remove(group);
+        }
+        self.last.replace(Some(config.clone()));
+        groups
+    }
+
     fn build(self: &Rc<Self>, config: &Config) -> adw::PreferencesPage {
         self.rows.borrow_mut().clear();
         self.groups.borrow_mut().clear();

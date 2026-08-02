@@ -170,10 +170,6 @@ pub struct FiltersPage {
 }
 
 impl FiltersPage {
-    pub fn new(cli: Cli, toasts: adw::ToastOverlay, set: FilterSet) -> Rc<Self> {
-        Self::hosted(cli, toasts, set, None)
-    }
-
     /// A catalogue rendered inside another page's content. See [`Host`].
     pub fn hosted(
         cli: Cli,

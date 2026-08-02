@@ -836,6 +836,31 @@ pub const ADVANCED: [SettingGroup; 10] = [
     },
 ];
 
+/// The Filters page's settings half — one key, rendered above the catalogue.
+///
+/// A separate table rather than a group in [`ADVANCED`], because this key is
+/// about the list the user is looking at: it is a **writer of that catalogue**
+/// that runs whether or not any page renders it, and the row is the only brake
+/// on it. A user who finds a filter switched on that they never switched on
+/// looks at the Filters page, not at Advanced.
+///
+/// Rendered through the same [`crate::model::Setting`] machinery as the other
+/// two tables, so the write, the verify-by-re-read and the external-edit
+/// reconcile are the ones that already exist rather than a second copy of them.
+pub const FILTER_SETTINGS: [SettingGroup; 1] = [SettingGroup {
+    title: "Automatic filters",
+    description: "What AdGuard changes in this list on its own.",
+    settings: &[Setting {
+        key: crate::config::key::AUTO_ENABLE_LANGUAGE_FILTERS,
+        title: "Add filters for languages you browse in",
+        description: "Adds catalogue filters for the languages of the pages you visit and \
+                      for your system language, and switches them on, without asking. A \
+                      list you switched off stays off — but a list you removed can come \
+                      back, switched on",
+        kind: Kind::Switch,
+    }],
+}];
+
 /// The first-run assistant, in render order.
 ///
 /// These are the questions `adguard-cli configure` asks that are worth asking
@@ -1432,6 +1457,53 @@ mod tests {
         assert!(
             row.description.contains("not the folder you started"),
             "the row stopped ruling out the working directory, which is the whole finding"
+        );
+    }
+
+    /// One key, one switch. The table exists to be the Filters page's settings
+    /// half and nothing else; a second row here would be a settings *page*
+    /// growing on top of a catalogue, which is the shape `architecture.md` §5
+    /// rejected for userscripts.
+    #[test]
+    fn the_filters_table_is_one_switch() {
+        use crate::config::key;
+        assert_eq!(FILTER_SETTINGS.len(), 1);
+        assert_eq!(FILTER_SETTINGS[0].settings.len(), 1);
+        let row = FILTER_SETTINGS[0].settings[0];
+        assert_eq!(row.key, key::AUTO_ENABLE_LANGUAGE_FILTERS);
+        assert!(matches!(row.kind, Kind::Switch));
+        assert_eq!(row.requires(), None, "invented a dependency nothing measured");
+    }
+
+    /// The key is on **one** page. Rendering it on Advanced as well would give
+    /// the user two switches for one line of `proxy.yaml`, which is the
+    /// "second, contradictory way" the `filters` list is kept unrendered for.
+    #[test]
+    fn the_language_key_is_not_also_on_advanced() {
+        use crate::config::key;
+        assert!(
+            !advanced_settings()
+                .iter()
+                .any(|s| s.key == key::AUTO_ENABLE_LANGUAGE_FILTERS),
+            "the language switch appeared on Advanced as well as Filters"
+        );
+    }
+
+    /// **The measurement is the row.** `cli-contract.md` §6: the automatic add
+    /// keys on `is_installed`, so a `disable` survives it and a `remove` does
+    /// not. Both halves have to be in the subtitle, because they point opposite
+    /// ways and a user who reads only one gets the wrong model — and because
+    /// the asymmetry is the thing the row waited on a proxy run to learn.
+    #[test]
+    fn the_language_row_states_both_halves_of_the_asymmetry() {
+        let row = FILTER_SETTINGS[0].settings[0];
+        assert!(
+            row.description.contains("switched off stays off"),
+            "the row stopped saying a disabled list is respected"
+        );
+        assert!(
+            row.description.contains("removed can come back"),
+            "the row stopped saying a removed list is not respected"
         );
     }
 

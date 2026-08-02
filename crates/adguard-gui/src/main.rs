@@ -9,6 +9,7 @@ mod advanced;
 mod browser_integration;
 mod certificate;
 mod dns;
+mod filter_settings;
 mod filters;
 mod protection;
 mod root_helper;
@@ -21,7 +22,7 @@ mod worker;
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use adguard_core::{Cli, FilterSet, Toggle, ADVANCED, STEALTH};
+use adguard_core::{Cli, Toggle, ADVANCED, STEALTH};
 use adw::prelude::*;
 use gtk::gio;
 use gtk::glib;
@@ -544,7 +545,10 @@ fn main_view(cli: &Cli) -> MainView {
     // running the CLI at all.
     status.sweep();
     let protection = protection::ProtectionPage::new(cli.clone(), toasts.clone());
-    let filters = filters::FiltersPage::new(cli.clone(), toasts.clone(), FilterSet::Http);
+    // The HTTP catalogue plus the one `proxy.yaml` setting that writes it:
+    // `auto_enable_language_filters` adds and enables language filters on its
+    // own, so the page it changes is where its brake belongs (contract §6).
+    let filters = filter_settings::FilterSettingsPage::new(cli.clone(), toasts.clone());
     // The DNS catalogue plus the `dns_filtering` settings around it, on one
     // page: its user-rules row cannot go through `dns filters enable`
     // (contract §6), so that page owns the row and writes it with the list
@@ -559,7 +563,7 @@ fn main_view(cli: &Cli) -> MainView {
     let stack = gtk::Stack::new();
     stack.add_named(status.widget(), Some(PAGES[0].id));
     stack.add_named(protection.widget(), Some(PAGES[1].id));
-    stack.add_named(filters.widget(), Some(PAGES[2].id));
+    stack.add_named(&filters.widget(), Some(PAGES[2].id));
     stack.add_named(&dns.widget(), Some(PAGES[3].id));
     stack.add_named(stealth.widget(), Some(PAGES[4].id));
     stack.add_named(advanced.widget(), Some(PAGES[5].id));
@@ -704,6 +708,7 @@ fn main_view(cli: &Cli) -> MainView {
         &protection,
         &[advanced.clone(), stealth],
         &dns,
+        &filters,
         &toasts,
     );
 

@@ -44,6 +44,7 @@ use libadwaita as adw;
 
 use crate::advanced::AdvancedPage;
 use crate::dns::DnsPage;
+use crate::filter_settings::FilterSettingsPage;
 use crate::protection::ProtectionPage;
 use crate::status::StatusPage;
 use crate::{toast, worker};
@@ -77,6 +78,12 @@ struct State {
     /// Its settings half renders from `proxy.yaml` too; its catalogue half
     /// does not, and is left alone by this.
     dns: Rc<DnsPage>,
+    /// The Filters page, for the same reason as `dns` and no other: one
+    /// `proxy.yaml` switch above a catalogue this file says nothing about.
+    /// Without this entry the row would contribute 0 to `moved` and an edit
+    /// made in a terminal would never raise the toast — which is exactly what
+    /// `handoff.md` §3 item 12 warned would happen if the page were left out.
+    filters: Rc<FilterSettingsPage>,
     /// Where the one toast goes. The window's overlay, so it appears over
     /// whichever page is showing — including a page that is not the one whose
     /// row moved, which is the common case: the user is looking at Status while
@@ -94,6 +101,7 @@ pub fn install(
     protection: &Rc<ProtectionPage>,
     tables: &[Rc<AdvancedPage>],
     dns: &Rc<DnsPage>,
+    filters: &Rc<FilterSettingsPage>,
     toasts: &adw::ToastOverlay,
 ) -> Option<ConfigWatch> {
     let mut watch = Watch::on_config()?;
@@ -120,6 +128,7 @@ pub fn install(
         protection: protection.clone(),
         tables: tables.to_vec(),
         dns: dns.clone(),
+        filters: filters.clone(),
         toasts: toasts.clone(),
     });
 
@@ -177,6 +186,7 @@ fn look(state: &Rc<State>) {
                     moved += page.reconcile(&config);
                 }
                 moved += state.dns.reconcile(&config);
+                moved += state.filters.reconcile(&config);
 
                 // The only headless evidence that the churn filter works: this
                 // line appears for a real edit and not for the app's own

@@ -447,6 +447,18 @@ pub mod key {
     /// very sentence recommending it. [`is_port_list`] exists so a user never
     /// sees that sentence.
     pub const FILTERED_PORTS: &str = "filtered_ports";
+    /// A daemon-side automatic **add**, which the Filters page is the subject
+    /// of rather than the owner of — rows can turn themselves on with no user
+    /// action, and this key is the only brake.
+    ///
+    /// **Measured 2 August 2026** (`cli-contract.md` §6), which is what the row
+    /// waited for: the add path keys on `is_installed`, not `is_enabled`. A
+    /// filter the user **disabled** survives it — 64 German and French requests
+    /// over six minutes left German at `is_enabled = 0` — while a filter the
+    /// user **removed** was re-added *and enabled*. So removing a language
+    /// filter is **less** durable than disabling it, which is the opposite of
+    /// what the removal dialog's wording implies, and the row has to say so.
+    pub const AUTO_ENABLE_LANGUAGE_FILTERS: &str = "auto_enable_language_filters";
     pub const AD_BLOCKING: &str = "ad_blocking_enabled";
     pub const HTTPS_FILTERING: &str = "https_filtering.enabled";
     pub const STEALTH_MODE: &str = "stealthmode.enabled";
