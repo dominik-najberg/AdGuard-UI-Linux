@@ -351,7 +351,7 @@ Main file: `~/.local/share/adguard-cli/proxy.yaml`. Values below are this machin
 | `update_channel` | `release` | App update channel |
 | `send_crash_reports` | `false` | Crash telemetry |
 | `show_hints` | `true` | CLI hint text — measured, it lands between the echo and the confirmation of a `config set` (contract §5) |
-| `show_notifications` | `false` | **Unmeasured.** The file's comment says only *"show protection status notification"* and names no mechanism. An earlier revision of this row glossed it "desktop notifications"; that was this project's guess, and `handoff.md` §3 item 8 carries it as an open question because the answer decides whether it collides with this app's tray |
+| `show_notifications` | `false` | **Desktop** notifications — measured 2 August 2026, contract §5, after two revisions of this row said it and then withdrew it as a guess. The wording is `Protection started` / `Protection stopped`, sent by running `gdbus call … org.freedesktop.Notifications.Notify` as a subprocess, attributed to **`adguardvpn_cli`** and carrying no icon; it needs `gdbus`, `DISPLAY` and a session bus, all present here. Neither string reaches any log. What is still inferred is that *this key* gates *that call* — the same mechanism also carries the `auto_enable_language_filters` announcement |
 
 ### `listen_auth`
 

@@ -194,7 +194,7 @@ Notes that shape the widgets:
 
 **The count when it was taken: 80 leaf keys in the file, 58 rendered somewhere, 22 not.** And §7's prediction holds — the gap is smaller than "parity" sounds, because seven of the 22 should stay unrendered and two belong to a different item.
 
-**Since then eight have been built** — the *HTTPS filtering* group, `dns_filtering.block_ech`, `safebrowsing.send_anonymous_statistics` and `adguard_headers_enabled`, all below — so the live figures are **66 rendered, 14 not**. The enumeration's own counts are left as they were taken rather than edited in place: it is a measurement with a date on it, and rewriting the numbers would make the later work invisible.
+**Since then ten have been built** — the *HTTPS filtering* group, `dns_filtering.block_ech`, `safebrowsing.send_anonymous_statistics`, `adguard_headers_enabled`, `filtered_ports` and `outbound_interface`, all below — so the live figures are **68 rendered, 12 not**. The enumeration's own counts are left as they were taken rather than edited in place: it is a measurement with a date on it, and rewriting the numbers would make the later work invisible. **This running figure is the one exception and it has to be kept in step with the paragraph below it**, which is a lesson rather than a note: it said *eight built, 66 rendered* for as long as it took the next session to notice, while the paragraph two below already said ten and twelve. One section, two live counts, and nothing but reading catches it.
 
 **One measured caveat on the 58.** `send_crash_reports` is the only key rendered *exclusively* by the first-run assistant. It is reachable on the one screen a user sees once and can never return to, so a user who changes their mind about crash telemetry has no page to change it on. That is a gap of a different shape from the 22 and it is listed with them below.
 
@@ -310,12 +310,14 @@ So this row costs a change to `Kind::Text` — a shared type behind nine existin
 | `https_filtering.exclusions` | str | Names the file `https_exclusions.txt`, 72,563 B of it. The feature a user wants is editing the **list**; renaming the file is not that, and the list is a `--list-file` job of its own |
 | `https_filtering.certificates_cache` | str | A cache directory the trust check of §6 already reasons about by its real path. Letting a user point it elsewhere invites the same failure `root_certificate_name` was found to cause: a check aimed at a path nothing will create |
 
-#### Cannot be classified without a measurement (2)
+#### Still unclassified (2) — one for want of a measurement, one for want of a decision
+
+Both were *"cannot be classified without a measurement"* when this enumeration was taken. `show_notifications` has since had its measurement, and it did not put the key in a table — it moved it from a question an agent can answer to one only §7 can.
 
 | Key | Type | Stock | What is missing |
 | --- | --- | --- | --- |
 | `update_channel` | str | `'release'` | `adguard-cli` really does have `update` and `check-update` subcommands (measured from `--help` on 1.4.13), so the key has a consumer. What is **not** measured is whether either command is safe to expose from a GUI on a machine where `adguard-cli` was installed by a package manager, or what the three channels do to a working install |
-| `show_notifications` | bool | `false` | The file's own comment says *"show protection status notification"* and says nothing about who shows it. `adguard-cli.md` glosses it as "desktop notifications" — **that gloss is this project's writing and is unmeasured**. If it is desktop notifications, it collides head-on with this app's tray, and the row is a design question rather than a switch; if it is terminal output it belongs with `show_hints` above. One measurement decides which table it goes in |
+| `show_notifications` | bool | `false` | **Measured 2 August 2026 — contract §5, and the fork this row posed is closed.** It is a **desktop** notification: the binary's only notification path is a shell-out to `gdbus call … org.freedesktop.Notifications.Notify`, `Protection started` / `Protection stopped` are its wording, and neither string reaches any of the four logs. So it does not belong with `show_hints`, and what is missing is no longer a measurement but **the design call this row predicted** — a switch that turns off a desktop notification about protection status, in an app whose own tray reports protection status. §7's, not an agent's |
 
 #### Belongs to a different item (2)
 

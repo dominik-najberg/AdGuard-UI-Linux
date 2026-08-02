@@ -486,6 +486,71 @@ Manual DNS proxy is listening on 127.0.0.1:5353
 
 Range-checking is ours here as everywhere: `config set dns_filtering.listen_port` accepts `70000` and `3.5`, and the float then makes `Config::int_at` read nothing at all, so a value the CLI itself accepted renders as unavailable.
 
+### `show_notifications` is a desktop notification, and the mechanism is a shell-out to `gdbus`
+
+`proxy.yaml` says only *"show protection status notification"* and names no mechanism, which is why the key sat in `architecture.md` §5's *cannot be classified* table. `handoff.md` §3 item 8 posed the fork: a **desktop** notification, which collides with this app's own tray and makes the key a design question, or **terminal output**, which belongs beside `show_hints` and stays out. **Measured 2 August 2026**, from the shipped binary and this machine's state. It is a desktop notification — but the half worth reading is what is still *not* measured, at the end.
+
+**The binary is statically linked and stripped**, so `ldd` reports nothing and no `libnotify` is involved anywhere:
+
+```
+$ file $(readlink -f ~/.local/bin/adguard-cli)
+ELF 64-bit LSB executable, x86-64, statically linked, stripped
+```
+
+**There is exactly one notification mechanism in it, and it is a subprocess.** Two strings, adjacent in `.rodata`:
+
+```
+{}: Send notification failed: environment incomplete (geteuid={}, SUDO_USER={}, DISPLAY={}, DBUS_SESSION_BUS_ADDRESS={})
+{}env DBUS_SESSION_BUS_ADDRESS={} DISPLAY={} gdbus call --session --dest org.freedesktop.Notifications --object-path /org/freedesktop/Notifications --method org.freedesktop.Notifications.Notify 'adguardvpn_cli' {} '' {} {} [] {{}} {}
+```
+
+The second is a format string for a **command line**, not a D-Bus binding — AdGuard builds it and runs `gdbus`. Its arguments land exactly on `Notify`'s signature, which is what makes the reading certain rather than suggestive:
+
+| `Notify` parameter | What AdGuard passes |
+| --- | --- |
+| `app_name` | `'adguardvpn_cli'`, hard-coded — the **VPN** CLI's name, in AdGuard CLI |
+| `replaces_id` | `{}`, and it reads the id back out of `gdbus`'s stdout to replace its own previous notification: `Failed to parse notification ID from output: '{}'` |
+| `app_icon` | `''` — **empty**, so the notification carries no icon |
+| `summary`, `body` | `{}`, `{}` |
+| `actions` | `[]` — none, so it is not clickable |
+| `hints` | `{{}}` — an empty dict, escaped for the formatter |
+| `expire_timeout` | `{}` |
+
+Three consequences a UI has to know. **`gdbus` is an undeclared runtime dependency** — it ships with glib2 and is `/usr/bin/gdbus` here, but nothing in AdGuard's packaging asks for it, and without it notifications fail into `Send notification error`. The notification is attributed to **`adguardvpn_cli`**, which is the name a user sees in their notification centre *and* in their per-application notification settings. And the leading `{}` before `env`, together with the `geteuid`/`SUDO_USER` pair in the failure message, is a de-escalation for `sudo adguard-cli …`: the call needs a *session* bus and root does not have the user's.
+
+**The environment it demands is complete on this machine**, so none of the above is theoretical here:
+
+```
+$ command -v gdbus
+/usr/bin/gdbus
+$ tr '\0' '\n' < /proc/$(pidof -s adguard-cli)/environ | grep -E '^(DISPLAY|DBUS_SESSION_BUS_ADDRESS)='
+DISPLAY=:0
+DBUS_SESSION_BUS_ADDRESS=<set — masked, it is a socket path>
+$ ps -o euid= -p $(pidof -s adguard-cli)
+1000
+```
+
+**The protection wording exists, and never reaches a log.** `Protection started` and `Protection stopped` sit in the proxy-server region of the binary, among `start_dns_proxy`, `stop_dns_proxy`, `init_proxy_server` and `setup_auto_proxy`. Against the four log files, one of which records three clean `AGProxyServer::stop()` cycles on the day of measurement:
+
+```
+$ grep -c "Protection start\|Protection stop" ~/.local/share/adguard-cli/logs/*.log
+app_nm.log:0   access.log:0   app.log:0   proxy.log:0
+```
+
+Neither string carries the `{}: ` component tag every log format string around them has, which corroborates it — but only corroborates: two further untagged strings, `Protection manager not available` and `Protection reload failed, please start AG CLI again to restore`, are plainly CLI error messages, so an absent tag is not by itself a mark of a notification.
+
+So **there is no terminal or log path carrying protection status to a user at all.** Whatever `show_notifications` gates, the only protection-status message this binary has goes out over D-Bus — which answers the fork without needing the key's wiring, and puts it on the design side.
+
+**What is not measured, and the binary is what weakens it.** That the key gates *that call* is an inference. The mechanism has **more than one caller**: a fourth untagged string,
+
+```
+Language filter `{}` has been added automatically
+```
+
+is the `auto_enable_language_filters` announcement `handoff.md` §3 item 12 records as going over D-Bus rather than to a log — same shape, same absence from `app.log`, one shared `gdbus` path. *A notification mechanism exists* is therefore evidence about the mechanism and not about which switch silences which caller. Settling it needs a proxy start whose bus traffic can be captured, which is the second-proxy wall of §3 items 9 and 12.
+
+**Two smaller facts** for whoever takes it. `adguard_cli_nm` carries the same mechanism and neither `Protection` string, while `adguard_root_helper` carries neither — so a notification never originates in the privileged process. And a shim `gdbus` placed early on `PATH` is how an authorised run captures the call argument-for-argument without a real notification ever being raised.
+
 ### A change may not reach the running proxy
 
 Two strings in the binary — *"To apply changes, you need to restart the proxy server by running `… restart`"* and *"Failed to apply settings to running proxy server"* — mean the daemon could not take the setting live. They appear only while the proxy is running, so they are absent from every capture above. `Applied::restart_required` carries this up to a toast rather than swallowing it.
