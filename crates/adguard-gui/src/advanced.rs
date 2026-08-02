@@ -909,6 +909,20 @@ impl AdvancedPage {
             self.reset_row(row);
             return;
         }
+        // `config set har_writer.location "~/har-dumps"` stores the tilde
+        // literally at exit 0 — measured, `cli-contract.md` §9 — so the daemon
+        // would make a directory actually called `~`. Nothing goes through a
+        // shell here, so nothing else would expand it. This is the one place
+        // the page is deliberately *more* permissive than the CLI rather than
+        // stricter, and it is still the CLI that decides: the expanded path is
+        // what gets written, so a refusal is still worded by `settle`.
+        if row.setting.key == key::HAR_LOCATION {
+            let home = std::env::var("HOME").unwrap_or_default();
+            if !home.is_empty() {
+                self.write(row, adguard_core::config::expand_home(text, &home));
+                return;
+            }
+        }
         self.write(row, text.to_owned());
     }
 

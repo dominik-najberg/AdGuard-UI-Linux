@@ -630,6 +630,33 @@ pub mod key {
     pub const OUTBOUND_INTERFACE: &str = "outbound_interface";
     pub const WORKER_THREADS: &str = "worker_threads";
     pub const LOG_LEVEL: &str = "log_level";
+
+    /// `proxy.yaml` says only *"Write HTTP requests to the HAR file for
+    /// debugging purposes"*. Measured 2 August 2026 against a real proxy
+    /// (`cli-contract.md` §9), that sentence understates it three ways and the
+    /// group description exists to correct each: it captures **response
+    /// bodies**, not just requests; the file is written `-rw-rw-r--`, so every
+    /// account on the machine can read it; and *the* file is really one file
+    /// **per proxy run**, with nothing pruning the old ones.
+    ///
+    /// The size is the reason the switch cannot be worded as a convenience:
+    /// 6,137 B after two requests, **114,084,761 B after 64** over about six
+    /// minutes of ordinary page loads.
+    pub const HAR_ENABLED: &str = "har_writer.enabled";
+
+    /// A **directory**, not a file — the name `adguard.har` is fixed and
+    /// appears nowhere in `proxy.yaml`.
+    ///
+    /// **The shipped `'.'` is the data directory, not the working directory.**
+    /// Measured 2 August 2026 by starting a proxy from a directory that was
+    /// neither, and finding it still empty while the dump appeared under
+    /// `<data>/adguard-cli/`. So it resolves like `access_log_file` rather than
+    /// like a shell would, and a row that shows `.` unexplained tells the user
+    /// the one thing they cannot guess. `cli-contract.md` §9.
+    ///
+    /// **Unvalidated in every respect, and `~` is stored literally** — which is
+    /// why [`expand_home`] runs before the write rather than after.
+    pub const HAR_LOCATION: &str = "har_writer.location";
     pub const OUTBOUND_ENABLED: &str = "outbound_proxy.enabled";
     pub const OUTBOUND_MODE: &str = "outbound_proxy.mode";
     pub const OUTBOUND_HOST: &str = "outbound_proxy.host";
@@ -739,6 +766,27 @@ pub fn is_port_list(value: &str) -> bool {
             },
         }
     })
+}
+
+/// Expand a leading `~` against `home`, for the one key that needs it.
+///
+/// `config set har_writer.location "~/har-dumps"` is accepted at exit 0 and
+/// stores the tilde **literally** — measured, `cli-contract.md` §9 — so a
+/// daemon that later honours it creates a directory actually named `~` in
+/// whatever it resolves against. Nothing in the CLI expands it and no shell is
+/// involved, because the wrapper never goes through one.
+///
+/// This is the rare case where the GUI is deliberately *more* permissive than
+/// the CLI rather than stricter: the alternative the contract offers is to
+/// refuse `~`, which would reject a path every other Linux program accepts.
+/// Only a leading `~/`, or a bare `~`, is touched — `~backup` is a legal
+/// directory name and a mid-path tilde is never a home reference.
+pub fn expand_home(value: &str, home: &str) -> String {
+    match value.strip_prefix('~') {
+        Some("") => home.to_owned(),
+        Some(rest) if rest.starts_with('/') => format!("{home}{rest}"),
+        _ => value.to_owned(),
+    }
 }
 
 /// Is this listen address confined to the local machine?
@@ -1846,5 +1894,48 @@ mod port_list_tests {
     #[test]
     fn the_shipped_default_is_writable() {
         assert!(is_port_list("80:5221,5300:49151"));
+    }
+}
+
+#[cfg(test)]
+mod expand_home_tests {
+    use super::expand_home;
+
+    /// The case the function exists for: the CLI stores this tilde literally.
+    #[test]
+    fn a_leading_tilde_slash_becomes_the_home_directory() {
+        assert_eq!(expand_home("~/har-dumps", "/home/someone"), "/home/someone/har-dumps");
+    }
+
+    /// A bare `~` is a directory in its own right and has to expand too, or the
+    /// one-character case is the one that writes a literal tilde.
+    #[test]
+    fn a_bare_tilde_is_the_home_directory() {
+        assert_eq!(expand_home("~", "/home/someone"), "/home/someone");
+    }
+
+    /// `~backup` is a legal directory name. Expanding it would invent a home
+    /// directory for a user who may not exist, which is worse than leaving a
+    /// path the user typed exactly as they typed it.
+    #[test]
+    fn a_tilde_that_is_not_a_home_reference_is_left_alone() {
+        assert_eq!(expand_home("~backup", "/home/someone"), "~backup");
+        assert_eq!(expand_home("~user/dumps", "/home/someone"), "~user/dumps");
+    }
+
+    /// A tilde anywhere but the front is never a home reference, in any shell.
+    #[test]
+    fn a_mid_path_tilde_is_left_alone() {
+        assert_eq!(expand_home("/var/~/dumps", "/home/someone"), "/var/~/dumps");
+    }
+
+    /// Every value that is not a tilde path is returned byte-identically —
+    /// including the shipped `.`, which must not become an absolute path
+    /// behind the user's back. The row explains `.`; it does not rewrite it.
+    #[test]
+    fn ordinary_paths_including_the_shipped_default_are_untouched() {
+        for value in [".", "", "/tmp/har", "relative/dir", "/home/someone"] {
+            assert_eq!(expand_home(value, "/home/someone"), value);
+        }
     }
 }

@@ -548,7 +548,7 @@ pub const STEALTH: [SettingGroup; 5] = [
 /// had no documentation at all — `cargo doc` is what proves it, not reading.
 /// A blank line does *not* separate two `///` runs; only an intervening item
 /// does. Moved here 2 August 2026.
-pub const ADVANCED: [SettingGroup; 9] = [
+pub const ADVANCED: [SettingGroup; 10] = [
     SettingGroup {
         title: "Proxy mode",
         description: "Manual mode listens on the ports below and leaves it to you \
@@ -801,6 +801,36 @@ pub const ADVANCED: [SettingGroup; 9] = [
                               their way to your browser, naming the rule that matched. The \
                               sites you visit never see them",
                 kind: Kind::Switch,
+            },
+        ],
+    },
+    // Its own group rather than two more rows in Diagnostics, because the
+    // description below is the whole point of the feature and would be false
+    // if it sat over "Worker threads". `location` declares no `requires()`:
+    // its dependency is the switch above it, in its own section, which is the
+    // case `the_https_filtering_group_declares_no_dependency` settled.
+    SettingGroup {
+        title: "Traffic capture",
+        description: "Records the pages you load, in full, to a file — the addresses and \
+                      what came back, not a summary. Six minutes of ordinary browsing \
+                      wrote 114 MB, every account on this machine can read the file, and \
+                      each time the proxy starts it writes another one and keeps the old \
+                      ones. Turn it on to collect something for a bug report, then turn \
+                      it off.",
+        settings: &[
+            Setting {
+                key: crate::config::key::HAR_ENABLED,
+                title: "Capture traffic to a file",
+                description: "Off is how it ships",
+                kind: Kind::Switch,
+            },
+            Setting {
+                key: crate::config::key::HAR_LOCATION,
+                title: "Capture folder",
+                description: "The folder the files go in, named adguard.har. A single dot \
+                              means AdGuard's own data folder — not the folder you started \
+                              it from",
+                kind: Kind::Text { secret: false },
             },
         ],
     },
@@ -1348,6 +1378,63 @@ mod tests {
         assert_eq!(keys.len(), count, "duplicate key in ADVANCED");
     }
 
+    /// The HAR pair is one group with one switch, and the switch comes first.
+    /// Order is load-bearing here in a way it is not elsewhere on the page: the
+    /// folder row is inert until the switch is on, and a folder row rendered
+    /// above the switch that governs it reads as a setting that already
+    /// applies.
+    #[test]
+    fn traffic_capture_is_a_switch_then_a_folder() {
+        use crate::config::key;
+        let group = ADVANCED
+            .iter()
+            .find(|group| group.title == "Traffic capture")
+            .expect("the Traffic capture group vanished");
+
+        let keys: Vec<&str> = group.settings.iter().map(|s| s.key).collect();
+        assert_eq!(keys, vec![key::HAR_ENABLED, key::HAR_LOCATION]);
+        assert!(matches!(group.settings[0].kind, Kind::Switch));
+        assert!(matches!(group.settings[1].kind, Kind::Text { secret: false }));
+    }
+
+    /// The cost is measured (`cli-contract.md` §9) and the group description is
+    /// the only place a user meets it, so it may not quietly lose the parts
+    /// that make capture different from every other switch on the page. Each
+    /// clause here is a separate measurement and each was a surprise.
+    #[test]
+    fn the_capture_group_states_what_capture_costs() {
+        let group = ADVANCED
+            .iter()
+            .find(|group| group.title == "Traffic capture")
+            .expect("the Traffic capture group vanished");
+
+        for claim in ["114 MB", "every account", "keeps the old"] {
+            assert!(
+                group.description.contains(claim),
+                "the capture group stopped saying {claim:?}"
+            );
+        }
+    }
+
+    /// `.` is the data directory, not the working directory, and that is the
+    /// one thing about this row a user cannot guess — measured 2 August 2026
+    /// by starting a proxy from a third directory that stayed empty.
+    #[test]
+    fn the_folder_row_explains_the_shipped_dot() {
+        use crate::config::key;
+        let row = advanced_settings()
+            .into_iter()
+            .find(|s| s.key == key::HAR_LOCATION)
+            .expect("the capture folder row vanished");
+
+        assert!(row.description.contains("dot"));
+        assert!(row.description.contains("data folder"));
+        assert!(
+            row.description.contains("not the folder you started"),
+            "the row stopped ruling out the working directory, which is the whole finding"
+        );
+    }
+
     /// Exactly the two settings `proxy.yaml` documents as needing
     /// `dns_filtering`, and nothing else. A dependency the GUI invents would be
     /// as wrong as one it misses.
@@ -1451,6 +1538,8 @@ mod tests {
             key::HTTPS_HTTP3,
             key::FILTERED_PORTS,
             key::OUTBOUND_INTERFACE,
+            key::HAR_ENABLED,
+            key::HAR_LOCATION,
         ] {
             assert!(keys.contains(&expected), "{expected} is missing from ADVANCED");
         }
