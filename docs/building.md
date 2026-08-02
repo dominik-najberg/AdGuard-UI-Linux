@@ -332,6 +332,32 @@ Resize once after the window maps, re-read the geometry from `xwininfo` afterwar
 
 The unmet certificate, root-helper and browser-integration groups are invisible on this machine, so a screenshot of them needs the overrides above — but check what the *command* row ends up saying before shipping the frame. Pointing `$ADGUARD_ROOT_HELPER` at `/bin/true` renders `sudo /bin/true -s`, which is a real rendering of a fake install and reads as a real instruction.
 
+### Selecting a sidebar page over AT-SPI
+
+Walking a page headlessly means getting to it first, and **the sidebar row cannot be pressed**. Measured 2 August 2026 while verifying the Advanced page's new *HTTPS filtering* group:
+
+```text
+--- candidates for 'Advanced' ---
+  role=list item    depth=10  actions=[]
+  role=label        depth=12  actions=[(0, 'clipboard.copy'), (1, 'selection.delete'),
+                                       (2, 'clipboard.paste'), (3, 'link.open'),
+                                       (4, 'clipboard.cut'),  (5, 'link.copy'),
+                                       (6, 'menu.popup'),     (7, 'selection.select-all')]
+```
+
+**The row itself offers no actions at all, and the label inside it offers eight that do nothing to it.** This is the same shape as the switch-row trap in `handoff.md` §4 — three nodes carry the name, the useful one is not the first — but with a sharper ending: for a switch there *is* a node carrying `toggle`, and here there is no actionable node anywhere. A harness that takes the first name match and presses action 0 will copy the row's title to the clipboard, report success, and walk the page it started on. That failure is silent and reads exactly like a page that will not render.
+
+**Use the parent list's Selection interface**, which is what actually works:
+
+```python
+parent = row.get_parent()                       # the GtkListBox, role "list"
+Atspi.Selection.select_child(parent.get_selection_iface(), row.get_index_in_parent())
+```
+
+Confirm by re-walking and looking for a heading that only the target page has, rather than by the call returning. A synthetic `Atspi.generate_mouse_event(x, y, "b1c")` at the row's centre from `Component.get_extents` is the fallback if a future page is not a list — but prefer the selection interface, because a click lands wherever the widget happens to be and a page that scrolled is a click on something else. `grab_focus` is not an option: `handoff.md` §4 records it failing with a bare `atspi_error` under GTK4.
+
+**The a11y bus must be the one the app is on.** `gsettings get org.gnome.desktop.interface toolkit-accessibility` is `false` on this machine, and the app's own complaint when the bus is missing is explicit — *Unable to connect to the accessibility bus at `unix:path=/run/user/1000/at-spi/bus`*. Launch `/usr/libexec/at-spi-bus-launcher --launch-immediately` **inside** the same `dbus-run-session` as the app and the probe, with `GTK_A11Y=atspi` exported, and the walk finds it.
+
 ### Taking focus away and giving it back
 
 The three checks that live outside `proxy.yaml` — the root helper, the certificate, and browser integration — all re-read themselves from one `connect_is_active_notify` handler in `main.rs` (`architecture.md` §6). For a long time the handler was the one line in this application nothing had ever exercised, because the note in this section said focus needed `xdotool`, and there is no `xdotool` here, no `wmctrl`, and no window manager on the Xvfb display at all.

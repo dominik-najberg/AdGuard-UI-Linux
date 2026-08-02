@@ -303,14 +303,6 @@ pub const SECURE_DNS_MODES: &[&str] = &["off", "transparent", "redirect"];
 /// renderable as well as preventable: a terminal can put the file into it.
 pub const PROXY_MODES: &[&str] = &["manual", "auto"];
 
-/// The Advanced page, in render order — `architecture.md` §5: ports, listen
-/// address, auth, outbound proxy, worker threads, log level.
-///
-/// `listen_address` and `listen_auth.enabled` appear here for their wording and
-/// their control type, but the page does **not** write them through the generic
-/// path: both are gated by [`crate::config::listen_address_plan`], because
-/// exposing the proxy beyond loopback has a precondition the CLI enforces by
-/// silently doing nothing.
 /// The Stealth page — the ~26 settings behind the single `stealthmode.enabled`
 /// switch the Protection page shows.
 ///
@@ -512,7 +504,28 @@ pub const STEALTH: [SettingGroup; 5] = [
     },
 ];
 
-pub const ADVANCED: [SettingGroup; 6] = [
+/// The Advanced page, in render order — `architecture.md` §5: proxy mode, HTTPS
+/// filtering, secure DNS filtering, ports, listen address, auth, outbound proxy,
+/// worker threads, log level.
+///
+/// The *HTTPS filtering* group is the parity enumeration's first slice
+/// (`architecture.md` §5, *What the pages do not render*): five booleans that
+/// were in `proxy.yaml` and on no page. It sits above *Secure DNS filtering*
+/// because that group is a specialisation of it — both are `https_filtering.*`
+/// keys, and the narrower one reads better after the general one.
+///
+/// `listen_address` and `listen_auth.enabled` appear here for their wording and
+/// their control type, but the page does **not** write them through the generic
+/// path: both are gated by [`crate::config::listen_address_plan`], because
+/// exposing the proxy beyond loopback has a precondition the CLI enforces by
+/// silently doing nothing.
+///
+/// **This block used to sit above `STEALTH`**, with no blank line between the
+/// two runs of `///`, so all of it documented the Stealth table and `ADVANCED`
+/// had no documentation at all — `cargo doc` is what proves it, not reading.
+/// A blank line does *not* separate two `///` runs; only an intervening item
+/// does. Moved here 2 August 2026.
+pub const ADVANCED: [SettingGroup; 7] = [
     SettingGroup {
         title: "Proxy mode",
         description: "Manual mode listens on the ports below and leaves it to you \
@@ -527,6 +540,46 @@ pub const ADVANCED: [SettingGroup; 6] = [
                 options: PROXY_MODES,
             },
         }],
+    },
+    SettingGroup {
+        title: "HTTPS filtering",
+        description: "HTTPS filtering must be on for any of this to apply — the \
+                      switch is on the Protection page. These change how AdGuard \
+                      treats certificates and protocols once it is.",
+        settings: &[
+            Setting {
+                key: crate::config::key::HTTPS_FILTER_EV,
+                title: "Filter EV certificate sites",
+                description: "By default AdGuard does not filter sites with EV \
+                              certificates; this enables it",
+                kind: Kind::Switch,
+            },
+            Setting {
+                key: crate::config::key::HTTPS_TLS13,
+                title: "TLS 1.3 support",
+                description: "Enable TLS1.3 support",
+                kind: Kind::Switch,
+            },
+            Setting {
+                key: crate::config::key::HTTPS_OCSP,
+                title: "OCSP checks",
+                description: "Enable OCSP checks for domains",
+                kind: Kind::Switch,
+            },
+            Setting {
+                key: crate::config::key::HTTPS_CERT_TRANSPARENCY,
+                title: "Certificate Transparency",
+                description: "Enforce Certificate Transparency Timestamps checks, \
+                              like Chrome does",
+                kind: Kind::Switch,
+            },
+            Setting {
+                key: crate::config::key::HTTPS_HTTP3,
+                title: "Filter HTTP/3",
+                description: "Filter HTTP/3 (experimental)",
+                kind: Kind::Switch,
+            },
+        ],
     },
     SettingGroup {
         title: "Secure DNS filtering",
@@ -1332,9 +1385,49 @@ mod tests {
             key::OUTBOUND_PORT,
             key::WORKER_THREADS,
             key::LOG_LEVEL,
+            // The parity enumeration's first slice — `architecture.md` §5.
+            key::HTTPS_FILTER_EV,
+            key::HTTPS_TLS13,
+            key::HTTPS_OCSP,
+            key::HTTPS_CERT_TRANSPARENCY,
+            key::HTTPS_HTTP3,
         ] {
             assert!(keys.contains(&expected), "{expected} is missing from ADVANCED");
         }
+    }
+
+    /// None of the five parity rows claims a `requires()`. Their dependency is
+    /// `https_filtering.enabled` — the section they live in, not another one —
+    /// which the group description states, the way Stealth's groups state
+    /// theirs. A `requires()` here would be the invented dependency
+    /// `only_the_documented_settings_declare_a_dependency` exists to catch.
+    ///
+    /// The count is asserted because the loop alone would pass just as happily
+    /// against a table the group had been deleted from.
+    #[test]
+    fn the_https_filtering_group_declares_no_dependency() {
+        use crate::config::key;
+        let group = [
+            key::HTTPS_FILTER_EV,
+            key::HTTPS_TLS13,
+            key::HTTPS_OCSP,
+            key::HTTPS_CERT_TRANSPARENCY,
+            key::HTTPS_HTTP3,
+        ];
+        let mut seen = 0;
+        for setting in advanced_settings() {
+            if group.contains(&setting.key) {
+                seen += 1;
+                assert!(setting.key.starts_with("https_filtering."));
+                assert_eq!(setting.requires(), None, "{} invented a dependency", setting.key);
+                assert!(
+                    matches!(setting.kind, Kind::Switch),
+                    "{} is a boolean in proxy.yaml and must render as a switch",
+                    setting.key
+                );
+            }
+        }
+        assert_eq!(seen, group.len(), "the HTTPS filtering group lost a row");
     }
 
     /// Both passwords must be marked secret, and nothing else should be. The

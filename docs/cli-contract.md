@@ -1010,6 +1010,27 @@ Two guards make that safe, both in `orphan.rs`:
 - **Signal nothing newer than the attempt.** A start forks a daemon that looks identical to the wedged one, so the caller lists daemons *before* running `start` and only ever signals from that list.
 - **Signal nothing that has been recycled.** A pid is unique only among live processes, and the two reads are separated by a command that can take a minute, so the start time from `/proc/<pid>/stat` field 22 is carried alongside the pid and re-checked. A zombie counts as gone: it keeps an unchanged start time, and waiting for one to exit again would wait forever.
 
+### Why it gets reparented, measured: there is a systemd user unit, and it has lost the daemon
+
+This section opened by observing that the stray daemon *"has been reparented to `systemd --user`"* without saying why. Measured 2 August 2026: **this machine has `~/.config/systemd/user/adguard-cli.service`**, enabled, and it explains both the reparenting and a hazard the section did not name.
+
+```
+$ systemctl --user status adguard-cli.service
+   Active: active (exited) since Sat 2026-08-01 09:24:57 CEST; 22h ago
+  Process: 6901 ExecStart=…/adguard-cli start (code=exited, status=0/SUCCESS)
+ Main PID: 6925 (code=exited, status=0/SUCCESS)
+```
+
+The unit is `Type=forking` with `RemainAfterExit=yes` and `Restart=on-failure`. `adguard-cli start` forks a daemon and returns, systemd reaps the launcher, and — because the daemon is not the pid systemd tracked — **`MainPID` becomes 0 and systemd stops following it entirely**. The service reads `active (exited)` forever afterwards, whatever the daemon does.
+
+Three consequences, and the third is the one that bites:
+
+- **The reparenting is ordinary.** The daemon's real parent exits immediately, so PID 1 for the user session — `systemd --user`, pid 2968 here — adopts it. A `PPID` of `systemd --user` is therefore *not* evidence that systemd started or manages that process.
+- **`Restart=on-failure` cannot fire.** It never saw a failure, because as far as it is concerned the service succeeded on 1 August. Measured: the daemon died twice during this session and `journalctl --user -u adguard-cli.service` recorded **nothing at all** on 2 August. A unit that looks like a supervisor and supervises nothing is worse than no unit, because it invites the assumption that something is watching.
+- **`WorkingDirectory` in the unit is not the daemon's working directory.** The unit sets `%h/.local/opt/adguard-cli`; the running daemon's `/proc/<pid>/cwd` is `/home/potworny` — measured on two independent daemons fifteen hours apart. §9's conclusion that a relative `har_writer.location` resolves against something unpredictable therefore survives contact with the unit, and is strengthened by it: **even an explicit `WorkingDirectory` does not reach the daemon a user ends up with**, because that daemon was not launched from it.
+
+Nothing here changes `orphan.rs`, whose two guards already reason from pids and start times rather than from parentage. What it changes is the diagnosis: **`systemctl --user restart adguard-cli` is not a recovery for §11's wedged state** — it would run `ExecStop` (`adguard-cli stop`, the measured no-op above) against a daemon systemd is not tracking, then `ExecStart` into ports still held.
+
 ---
 
 ## 12. Browser integration is a separate step, and quietly conditional

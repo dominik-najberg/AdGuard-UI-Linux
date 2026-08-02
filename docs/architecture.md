@@ -150,7 +150,7 @@ An `AdwApplicationWindow` with `AdwNavigationSplitView`, plus `AdwToastOverlay` 
 | **Protection** | `AdwSwitchRow`s: ad blocking, HTTPS filtering, stealth mode, DNS filtering, Safe Browsing, CRLite; the certificate-trust check under them | `proxy.yaml` → `config set`, plus the system trust store (§6) |
 | **Filters** | `AdwPreferencesGroup` per `filter_group`, switch per filter, custom-filter add | `agflm_standard.db` → `filters …` |
 | **DNS** | DNS filter list, user rules, upstream/fallback/bootstrap servers, listen port | `agflm_dns.db`, `dns_filtering.*` |
-| **Advanced** | Proxy mode, secure DNS filtering, ports, listen address, auth, outbound proxy, worker threads, log level | `proxy.yaml` → `config set` |
+| **Advanced** | Proxy mode, HTTPS filtering, secure DNS filtering, ports, listen address, auth, outbound proxy, worker threads, log level | `proxy.yaml` → `config set` |
 | **Stealth** | The 26 settings behind the one `stealthmode.enabled` switch Protection shows: cookies, tracking, identity, browser APIs, anti-DPI | `proxy.yaml` → `config set` |
 
 Notes that shape the widgets:
@@ -192,21 +192,25 @@ Notes that shape the widgets:
 
 §7 makes this enumeration the **first task** of the advanced-parity item and says plainly that it is not code. It was taken on 2 August 2026. The walk is mechanical rather than by eye: every leaf path of `proxy.yaml` on one side, every `key:` literal reachable from `ADVANCED`, `STEALTH`, `SETUP` and `Toggle::key` on the other, resolved through `config::key` so the table cannot drift from the source the way a retyped one would.
 
-**The count: 80 leaf keys in the file, 58 rendered somewhere, 22 not.** And §7's prediction holds — the gap is smaller than "parity" sounds, because seven of the 22 should stay unrendered and two belong to a different item.
+**The count when it was taken: 80 leaf keys in the file, 58 rendered somewhere, 22 not.** And §7's prediction holds — the gap is smaller than "parity" sounds, because seven of the 22 should stay unrendered and two belong to a different item.
+
+**Since then five have been built** (the *HTTPS filtering* group, below), so the live figures are **63 rendered, 17 not**. The enumeration's own counts are left as they were taken rather than edited in place: it is a measurement with a date on it, and rewriting the numbers would make the later work invisible.
 
 **One measured caveat on the 58.** `send_crash_reports` is the only key rendered *exclusively* by the first-run assistant. It is reachable on the one screen a user sees once and can never return to, so a user who changes their mind about crash telemetry has no page to change it on. That is a gap of a different shape from the 22 and it is listed with them below.
 
 Everything in the *Key*, *Type* and *Stock* columns is read from the file; every key marked addressable answered `config get` with `key = value` at exit 0, measured against the live install with `proxy.yaml`'s hash taken either side and unmoved (contract §5 for the three that refuse). **The *Verdict* column is a proposal, not a measurement** — it is the reasoning this enumeration exists to produce, and §7 remains the authority over whether any of it becomes a row.
 
-#### Should become rows (11)
+#### Should become rows — 11 proposed, **5 built**
+
+**The first five are done**, as of 2 August 2026: they are the *HTTPS filtering* group on the Advanced page, between *Proxy mode* and *Secure DNS filtering*. All five were measured writable through `config set` before the code was written — surgical, one line each, the file's 220 unchanged — and the group was then verified rendering headlessly, with each switch's state matching the file. **So the gap is now 17 unrendered keys, not 22**, and this table is the record of why each of the rest is or is not next.
 
 | Key | Type | Stock | Where it belongs, and what it depends on |
 | --- | --- | --- | --- |
-| `https_filtering.filter_ev_certificates` | bool | `false` | Advanced, a new *HTTPS filtering* group. Depends on `https_filtering.enabled` |
-| `https_filtering.enable_tls13` | bool | `true` | same group, same dependency |
-| `https_filtering.ocsp_check_enabled` | bool | `true` | same group, same dependency |
-| `https_filtering.enforce_certificate_transparency` | bool | `true` | same group, same dependency |
-| `https_filtering.http3_filtering_enabled` | bool | `true` | same group, same dependency. The file calls it *experimental*; the row should too |
+| ~~`https_filtering.filter_ev_certificates`~~ | bool | `false` | **Built** — Advanced ▸ *HTTPS filtering* |
+| ~~`https_filtering.enable_tls13`~~ | bool | `true` | **Built** — same group |
+| ~~`https_filtering.ocsp_check_enabled`~~ | bool | `true` | **Built** — same group |
+| ~~`https_filtering.enforce_certificate_transparency`~~ | bool | `true` | **Built** — same group |
+| ~~`https_filtering.http3_filtering_enabled`~~ | bool | `true` | **Built** — same group, and the row carries the file's *experimental* |
 | `dns_filtering.block_ech` | bool | `false` | **DNS page**, not Advanced — it sits beside the other `dns_filtering.*` keys that page already owns |
 | `safebrowsing.send_anonymous_statistics` | bool | `false` | **Protection**, under the Safe Browsing switch it qualifies |
 | `auto_enable_language_filters` | bool | `true` | **Filters page** — it decides what that page's catalogue turns on, and `locale.rs` already holds the matching logic |
@@ -214,7 +218,9 @@ Everything in the *Key*, *Type* and *Stock* columns is read from the file; every
 | `filtered_ports` | str | `'80:5221,5300:49151'` | Advanced *Proxy mode*. Auto mode only, so it depends on `proxy_mode` — and its compound range syntax is ours to validate, since `config set` type-checks strings not at all |
 | `outbound_interface` | null | `null` | Advanced *Outbound proxy*. Needs a design for the null case before it is a row: how an empty text field writes back `null` is unmeasured |
 
-Five of the eleven are one coherent block — the `https_filtering.*` group — which makes it the obvious first slice, and all five carry the same dependency the Advanced page already states for `filter_secure_dns_mode` and `encrypted_client_hello`. That is the pattern §7 says to extend rather than replace.
+Five of the eleven were one coherent block — the `https_filtering.*` group — which is what made it the obvious first slice, and it is the one that got built.
+
+**Its dependency is stated in the group description, not on each row, and that is deliberate.** All five are inert unless `https_filtering.enabled` is on, but that switch is the *section they live in* rather than another section — which is not what `Setting::requires()` models. `requires()` exists for the cross-section dependencies `proxy.yaml` states in words and the CLI does not enforce, and `only_the_documented_settings_declare_a_dependency` asserts there are exactly two of those. The right precedent is Stealth: its twenty-six settings all depend on `stealthmode.enabled`, and every group there says so in its description rather than marking twenty-six rows. Extending that is what §7 asked for; adding a sixth and seventh `requires()` would have been the *dependency the GUI invents* that same test exists to catch.
 
 **`dns_filtering.block_ech` names an inconsistency worth fixing while it is cheap.** Its counterpart `https_filtering.encrypted_client_hello` is on Advanced, under *Secure DNS filtering*, while this one would sit on the DNS page — two halves of ECH handling on two pages. Whichever way it is resolved, it should be resolved deliberately.
 

@@ -423,6 +423,25 @@ pub mod key {
     pub const HTTPS_ECH: &str = "https_filtering.encrypted_client_hello";
     pub const FILTER_SECURE_DNS_MODE: &str = "https_filtering.filter_secure_dns_mode";
 
+    // The rest of the `https_filtering` section, from the parity enumeration in
+    // `architecture.md` §5 — five booleans that were in the file and on no
+    // page. All five measured readable with `config get` and writable with
+    // `config set` on 1.4.13, each a single line the write replaces without
+    // moving the file's 220.
+    //
+    // None declares a `requires()`. Their dependency is on
+    // `https_filtering.enabled`, which is the *section they live in* rather
+    // than another section — the same shape as Stealth's 26 settings under
+    // `stealthmode.enabled`, where the group description carries it. That
+    // mechanism is for cross-section dependencies `proxy.yaml` states in
+    // words, and inventing one here would be the "dependency the GUI invents"
+    // `only_the_documented_settings_declare_a_dependency` exists to catch.
+    pub const HTTPS_FILTER_EV: &str = "https_filtering.filter_ev_certificates";
+    pub const HTTPS_TLS13: &str = "https_filtering.enable_tls13";
+    pub const HTTPS_OCSP: &str = "https_filtering.ocsp_check_enabled";
+    pub const HTTPS_CERT_TRANSPARENCY: &str = "https_filtering.enforce_certificate_transparency";
+    pub const HTTPS_HTTP3: &str = "https_filtering.http3_filtering_enabled";
+
     /// Read, never written — and **no longer the cosmetic key `model::SETUP`
     /// calls it**. It names the CA *file* as well as the certificate, so
     /// changing it points [`crate::trust`] at a path nothing will ever create:
