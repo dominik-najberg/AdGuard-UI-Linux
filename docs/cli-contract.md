@@ -1159,3 +1159,33 @@ Settings successfully imported from zip: <zip>          # exit 0, identical word
 `proxy.yaml` is created — it was in the logs bundle — so configuration really is restored. But `app.log`, `proxy.log`, `proxy.log.1` and `app_nm.log` are unpacked **into the data directory root** rather than into `logs/`, and `browsers.yaml`, `https_exclusions.txt`, `user.txt` and `userscripts/` never arrive at all, because they were never in that zip.
 
 **The result is a partial install reported as a complete success, in wording indistinguishable from the correct case.** This is *the confirmation is not the evidence* in its sharpest form yet: there is no exit code, no message and no filename that separates the right artifact from the wrong one. **A file picker handed straight to `import-settings` is not a safe design** — the manifest is the only discriminator (`filters.yaml` and `agflm_standard.db` for settings; `app.log` for logs), and reading it is a zip listing, not a protocol.
+
+### What an import does *not* destroy
+
+The confirmation dialog `architecture.md` §7 requires has to name what an import replaces, which means knowing what it leaves alone. Measured against a **configured, licensed** sandbox — a scratch `XDG_DATA_HOME` holding copies of `proxy.yaml`, `adguard.conf`, `AdGuard CLI CA.pem` and `SSL/`, with the sandbox first driven *away* from the zip's contents so that a restored value proves the import really wrote:
+
+```
+config set worker_threads 9      →  worker_threads: 9
+import-settings -i <settings zip> →  worker_threads: 4      # the zip's value; the write is real
+```
+
+With the write thereby demonstrated rather than assumed:
+
+| | Before | After |
+| --- | --- | --- |
+| `proxy.yaml` | diverged | replaced by the zip's |
+| `adguard.conf` | `715f09b5…` | `715f09b5…` — **unchanged** |
+| `AdGuard CLI CA.pem` | `65d7b3db…` | `65d7b3db…` — **unchanged** |
+| `license` | owner shown | owner shown — **still active** |
+
+**So an import is not a licence risk and not a certificate risk.** It replaces configuration and leaves credentials alone. A dialog that warned the user they were about to lose their licence would be saying something false, and this is the measurement that forbids it.
+
+`config set` was checked in the same run and also leaves `adguard.conf` untouched, so neither write path disturbs it.
+
+**`import-settings` is not licence-gated, where `configure` is.** It ran to completion on a virgin directory with no `adguard.conf` at all (above), which is the state §7 records `configure` refusing. That asymmetry is what makes a restore reachable by a user the first-run assistant would otherwise turn away.
+
+### `adguard.conf`'s hash is not a stable fingerprint
+
+Worth knowing before anyone builds a change-detector on it, in the way `proxy.yaml`'s hash is used throughout this project. **The real install's `adguard.conf` moved on its own during this session** — `a8678688…` when copied at 05:02, `fc8b693b…` when read again at 05:05 — across nothing but ordinary invocations and a running proxy. Its *size* stayed 3,116 B throughout.
+
+**What causes it was not isolated, and is not guessed at here.** `config get`, `config set`, `license` and `import-settings` were each checked against a settled sandbox copy and none of them moved it; something else does. The usable conclusion is the negative one: **do not hash `adguard.conf` to detect anything**, and do not treat a moved hash there as evidence of a licence change. §4's rule about `proxy.yaml` — a moved hash means nothing until it has been diffed — applies here with no way to take the diff, since the file must not be read at all (`handoff.md` §4).

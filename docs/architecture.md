@@ -245,6 +245,73 @@ Five of the eleven are one coherent block — the `https_filtering.*` group — 
 
 `send_crash_reports` — see the caveat above. Whether it gets a permanent home is a smaller decision than the eleven, and it is the only one on this page that costs nothing to reason about: the assistant's own table already argues the key is worth asking about, and that argument does not expire when the assistant closes.
 
+### Import and export, and the first-run collision
+
+§7 puts import/export in v2 and requires **the first-run collision to be designed before either half is built**. This is that design. It is written against contract §13, which was measured first, and it decides layout and behaviour only — **whether to build it is §7's call and the owner's**, and the three forks that are genuinely scope rather than design are marked as such at the end.
+
+#### Where the three commands live
+
+**Not a new page.** Three buttons is the case §7 already reasoned about for userscripts — *a sidebar page for that is navigation without content*. They go on Advanced, in two groups, and the split is by purpose rather than by which binary subcommand they call:
+
+- **Backup and restore** — `export-settings` and `import-settings`.
+- **Diagnostics** — `export-logs`, beside `log_level`, which is the setting that decides what ends up in it. That group already exists and the parity enumeration proposes `adguard_headers_enabled` and the HAR pair for it too, which makes it the coherent home for *give me something to send to support*.
+
+One caveat for whoever builds it: if parity's eleven rows and the HAR group all land, Advanced becomes long enough that a separate page is arguable again. That is a reversible decision and should not be pre-empted now.
+
+#### The collision, and why the assistant has to own it
+
+The assistant's entire trigger is `proxy.yaml`'s absence. **`import-settings` creates that file** (contract §13), so an import is a second path through first run whether or not the assistant acknowledges one. Two further measurements decide the shape:
+
+- **`import-settings` is not licence-gated; `configure` is.** So a restore is reachable by exactly the user the assistant currently turns away — someone rebuilding a machine who has their backup but has not yet activated. Ignoring the import would leave the app refusing to help a user the CLI would have helped.
+- **The install an import leaves is unlicensed and has no certificate**, while the `proxy.yaml` it writes says `https_filtering.enabled: true`.
+
+So: **the welcome screen offers a second, secondary action — *Restore from a backup* — beside *Set up AdGuard***, and it is offered *before* the licence check gates the primary one, because it does not need a licence.
+
+**A restore does not then hand the window silently to the pages, the way a completed `configure` does.** It ends on a screen naming the two things the backup could not carry, because both are states this application already renders and neither is the user's mistake:
+
+- **No licence** — the activation affordance the Status page already owns.
+- **No certificate, with HTTPS filtering reading on** — the certificate-trust group the assistant already carries under its own HTTPS question, and Protection carries permanently.
+
+That is §6's detect-and-instruct pattern pointed at a state *this app just created* rather than one it found. It is also the same rule as everywhere else here: **a switch that reads on and cannot work is marked**, and an import produces that state by the supported route.
+
+#### The wrong-zip guard, which is not optional
+
+Contract §13 measured that the two exports **share one filename** (`adguard-cli_<date>_<time>.zip`) and that `import-settings` accepts a *logs* zip at exit 0, with wording identical to the correct case, leaving a partial install. There is no exit code, no message and no filename that separates the two.
+
+**So a file picker is never handed straight to `import-settings`.** The GUI reads the zip's central directory first and classifies it:
+
+| Manifest contains | Verdict |
+| --- | --- |
+| `filters.yaml` **and** `agflm_standard.db` | a settings backup — proceed |
+| `app.log` | a **logs** export — refuse, and say which button made it |
+| neither | not an AdGuard export — refuse |
+
+Reading a listing is not speaking a protocol, which is the same line §1 draws for browser integration and §6 draws for `filters list`: **read the manifest, never the wire format.** The check costs four filenames and removes the only failure mode in this feature that is silent.
+
+#### The confirmation, and what it may not say
+
+Import onto a *configured* install replaces everything, so it takes the discipline custom-filter removal got (§5 above): an `AdwAlertDialog` naming what is about to be replaced — settings, filter selections, custom filters, userscripts and HTTPS exclusions.
+
+Two things make it a better dialog than the removal one, and both come from measurement:
+
+- **There is a real undo here, and the dialog offers it.** Custom-filter removal had none, which is what made its confirmation the only honest place for the decision. Here, *Export current settings first* is a complete escape, and the dialog offers it as an action rather than as advice.
+- **It must not warn about the licence or the certificate.** Contract §13 measured that an import leaves `adguard.conf` and the CA untouched and the licence still active. A dialog that said otherwise would be frightening the user with something false — and this project's rule is that a warning is a measurement, not a mood.
+
+It **does** have to say what a backup silently does not restore: **the DNS filter selections and the DNS user rules**, neither of which is in the bundle, while every `dns_filtering.*` setting in `proxy.yaml` is. A user restoring a machine gets their DNS servers back and not their DNS filters, and nothing else in the flow would tell them.
+
+#### What the two export buttons say
+
+The wording rule is §6's — say what the command will do, in the CLI's own terms where it has them:
+
+- **Export settings** carries no licence and no certificate (`adguard.conf` is not in the bundle), so it is safe to keep or hand to someone else. It is also large — 51 of its 52 MB are the filter catalogue, which is redownloadable — so the button should not imply the wait is about the user's settings.
+- **Export logs** contains the **configuration** as well as the logs, and does **not** contain the browsing access log. That is the inverse of what this project assumed before measuring it (`overnight-v2.md` §2.3, struck), and it is the sentence the button exists to get right.
+
+#### Three forks that are the owner's, not this document's
+
+1. **Whether restore-at-first-run ships at all.** The alternative is import only after setup, which is simpler and never produces the configured-but-unlicensed state — at the cost of turning away the user with a backup and no licence, which is the case the feature is most for.
+2. **How a zip gets read.** The `zip` crate (a dependency), shelling out to `unzip` (a runtime dependency the project does not currently have), or hand-rolling the central-directory read (~100 lines, none). This project's habit is to read files itself rather than take a dependency or parse another program's output, which points at the third — but a dependency decision is not a design decision.
+3. **Whether any of it is v2 at all.** §7 says it is; this section changes nothing about that and adds no scope.
+
 ### GNOME dock icon grouping
 
 Set the GTK application ID, the `.desktop` filename, and `StartupWMClass` to the **same** reverse-DNS string. On GNOME a mismatch makes the running window fail to group with its pinned launcher — a duplicate icon appears below the favourites separator. This is a known recurring annoyance on this machine, so get it right from the first commit.
