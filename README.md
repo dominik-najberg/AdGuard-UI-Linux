@@ -57,6 +57,8 @@ adguard-ui --background
 
 `--background` registers the tray and presents no window, which is what the autostart entry in `data/autostart/` runs at login. Launching the application again activates the running copy instead of starting a second one — two copies would be two writers to `proxy.yaml`.
 
+**Start at login** at the foot of the Advanced page turns that into a switch: it writes `~/.config/autostart/io.github.dominik-najberg.AdGuardUI.desktop` running this binary with `--background`, and switching it off deletes the file again. It is the same entry `data/autostart/` ships and the same one a startup-applications editor lists, so the three cannot disagree — disable it out there and the switch reads off. Because a background start has no window, it needs a tray to appear in; the row says so when this session has none.
+
 While the tray is present, closing the window only hides it and *Quit* in the tray menu exits. If the tray could not register, closing quits as usual, so there is no way to end up with a hidden application you cannot reach.
 
 ---
@@ -85,13 +87,15 @@ While the tray is present, closing the window only hides it and *Quit* in the tr
 
 ![The Advanced page](docs/screenshots/advanced.png)
 
-Two groups at the foot of that page do more than set a key:
+Three groups at the foot of that page do more than set a key:
 
 **Traffic capture** writes a HAR file of everything filtered, and it ships off. Its description is the feature: the capture records response bodies, the files are world-readable, and a measured run produced 114 MB in six minutes — one file per run, with nothing pruning them.
 
+**Start at login** writes the autostart entry described above, and is the only control here that changes nothing in `proxy.yaml`. It neither starts nor stops AdGuard's protection — what runs the proxy at login is AdGuard's own arrangement, not this — and it is painted from the file every time the window is focused, so it agrees with whatever a startup-applications editor last did. The Status page carries a read-only row reporting it, which leads here.
+
 **Backup and restore** exports your settings to a zip and restores one, with a third button beside the log level that bundles the logs for a bug report. Each of the three says the thing you would otherwise have to find out: a round trip **loses your DNS filter choices and DNS user rules**, because only `proxy.yaml` is exported; a restore leaves the **licence and the certificate untouched**; and the logs bundle **includes your configuration and not your browsing record**. A chosen zip is identified before anything happens to it, so handing the restore a logs bundle is refused with an explanation rather than accepted and half-applied.
 
-![Traffic capture and Backup and restore, at the foot of the Advanced page](docs/screenshots/advanced-backup.png)
+![Traffic capture, Start at login, and Backup and restore, at the foot of the Advanced page](docs/screenshots/advanced-backup.png)
 
 A **first-run assistant** covers the other end: on a machine with no `proxy.yaml` at all it checks the licence, seeds a configuration with one guarded `configure`, asks four questions, and writes the answers before handing over to the pages above. It also offers **restore from a backup**, in every branch including the two that will not set anything up — restoring is not licence-gated where seeding a configuration is, so it is reachable by exactly the user that screen otherwise turns away.
 

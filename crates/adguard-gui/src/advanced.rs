@@ -40,6 +40,7 @@ use gtk::glib;
 use gtk4 as gtk;
 use libadwaita as adw;
 
+use crate::autostart::AutostartView;
 use crate::root_helper::{join_with_and, RootHelperView};
 use crate::{abbreviate, toast, worker};
 
@@ -159,6 +160,15 @@ pub struct AdvancedPage {
     /// without `proxy_mode`, which is how the Stealth page gets none of this
     /// for free.
     helper_view: RefCell<Option<Rc<RootHelperView>>>,
+    /// The *Start at login* switch, built only for the Advanced table — the
+    /// same rule the backup group follows, and for the same reason: it is not a
+    /// setting, and Stealth is not where anyone looks for it.
+    autostart_view: RefCell<Option<Rc<AutostartView>>>,
+    /// Whether a tray registered in this session, which the login switch has to
+    /// say — see [`AutostartView::set_tray_available`]. Held here because the
+    /// answer arrives after this page is built and again after every rebuild,
+    /// so the view cannot simply be told once.
+    tray_available: Cell<bool>,
     /// Where the helper check is read from.
     ///
     /// A field rather than a call to [`RootHelper::detect`] so a test — or
@@ -181,6 +191,8 @@ impl AdvancedPage {
             last: RefCell::new(None),
             listen_group: RefCell::new(None),
             helper_view: RefCell::new(None),
+            autostart_view: RefCell::new(None),
+            tray_available: Cell::new(true),
             // Read once, here, rather than at every check: an override that
             // changed underneath a running window would make the row's history
             // impossible to follow. Absent — the normal case — means AdGuard's
@@ -324,6 +336,7 @@ impl AdvancedPage {
         self.groups.borrow_mut().clear();
         self.listen_group.replace(None);
         self.helper_view.replace(None);
+        self.autostart_view.replace(None);
 
         let page = adw::PreferencesPage::new();
 
@@ -372,10 +385,18 @@ impl AdvancedPage {
             }
         }
 
-        // Backup and restore, after the last group. Only on the Advanced
-        // table: `STEALTH` and the Filters settings share this page type and
-        // neither is where a user looks for a backup.
+        // The two groups that are not settings at all, after the last one that
+        // is. Only on the Advanced table: `STEALTH` and the Filters settings
+        // share this page type and neither is where a user looks for a backup,
+        // or for what the application does at login.
         if self.table.iter().any(|g| g.settings.iter().any(|s| s.key == key::LOG_LEVEL)) {
+            let autostart = AutostartView::new(&self.toasts);
+            // Before the group is on screen, so a session with no tray never
+            // renders the row once without its caveat and then corrects itself.
+            autostart.set_tray_available(self.tray_available.get());
+            page.add(autostart.widget());
+            self.autostart_view.replace(Some(autostart));
+
             let view = crate::backup::BackupView::new(&self.cli, &self.toasts);
             page.add(view.widget());
         }
@@ -411,6 +432,43 @@ impl AdvancedPage {
         if let (Some(row), Some(config)) = (mode_row, self.last.borrow().clone()) {
             self.repaint(&row);
             self.render(&row, &config);
+        }
+    }
+
+    /// Scroll to the *Start at login* switch and mark it, as the row on the
+    /// Status page asks.
+    ///
+    /// [`Self::reveal`]'s counterpart for the one group here that no setting key
+    /// names: it is not in the table, so there is nothing to address it by
+    /// except the view itself. Silently does nothing while the page is still
+    /// building, or on a table that has no such group — the same two cases, with
+    /// the same reasoning, as `reveal`.
+    pub fn reveal_autostart(&self) {
+        if let Some(view) = self.autostart_view.borrow().as_ref() {
+            crate::reveal(view.widget());
+        }
+    }
+
+    /// Re-read the login entry and repaint the switch that reports it.
+    ///
+    /// The focus re-check, as for the root helper above: the user's other route
+    /// to this file is a startup-applications editor, and coming back to this
+    /// window is when the answer has changed. Silently does nothing on a table
+    /// that has no such switch, which is every table but `ADVANCED`.
+    pub fn recheck_autostart(&self) {
+        if let Some(view) = self.autostart_view.borrow().as_ref() {
+            view.paint();
+        }
+    }
+
+    /// Tell the login switch whether a tray registered in this session.
+    ///
+    /// Kept even when there is no switch to tell: the tray's fate is known once
+    /// per launch, and this page is rebuilt every time its config is re-read.
+    pub fn set_tray_available(&self, available: bool) {
+        self.tray_available.set(available);
+        if let Some(view) = self.autostart_view.borrow().as_ref() {
+            view.set_tray_available(available);
         }
     }
 

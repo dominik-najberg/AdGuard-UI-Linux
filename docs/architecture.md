@@ -35,6 +35,7 @@ adguard-ui/
 │   ├── adguard-core/           # no GTK dependency — pure logic, unit-testable
 │   │   ├── cli.rs              # process wrapper: spawn, ANSI strip, error mapping, timeouts
 │   │   ├── config.rs           # read proxy.yaml (yaml-rust2); writes delegate to cli.rs
+│   │   ├── autostart.rs        # the ~/.config/autostart entry: write, read, remove, §4
 │   │   ├── filters.rs          # read-only rusqlite over agflm_*.db
 │   │   ├── model.rs            # ProxyStatus, Filter, FilterGroup, License, Toggles, settings tables
 │   │   └── paths.rs            # locate binary + data dir, XDG-aware
@@ -135,6 +136,27 @@ The single-instance behaviour that `adw::Application` gives us for free matters 
 - **A tray that will not register is fatal here, and only here.** The rule above is that the application carries on windowed; with `--background` there is no window to carry on with, so the process would be left with nothing on screen and no way to be reached or quit. It reports why and exits 1. Being the inverse of the surrounding rule, it is stated in the code rather than left to be inferred.
 
 The Status page is told the window is hidden before the first poll rather than after the first close, so a background session polls at the 10 s rate from the start.
+
+### The switch that installs the login entry
+
+*Start at login*, at the foot of the Advanced page, writes and removes `~/.config/autostart/io.github.dominik-najberg.AdGuardUI.desktop`. `adguard_core::autostart` owns the file and `adguard-gui/src/autostart.rs` owns the row. Four decisions are worth stating, because each rules out something more obvious:
+
+- **It writes `--background`, not a flag of its own.** The request that prompted it asked for `--silent` or `--quiet`; that behaviour already exists under the name the shipped entry has been running since v1.0. A synonym would be a second thing to keep in step with `HANDLES_COMMAND_LINE`, and a third spelling for one behaviour in the documentation.
+- **It writes the name the packaging already installs.** `packaging/tarball.sh --autostart` and `building.md` §4 put the same file at the same path, so the switch, the shipped example and a startup-applications editor are all looking at one entry. Any other name would be a *second* login entry beside it — two launches, and a switch reading "off" while the tray came up anyway.
+- **Off means the file is gone.** `X-GNOME-Autostart-enabled=false` is honoured on the way in, because that is what an editor out there writes, but writing it ourselves would leave a dead `Exec` naming a binary that may since have moved. Reading is correspondingly stricter than "the file exists": an entry with no `Exec`, or one an editor disabled, starts nothing and so reads as off.
+- **`Exec` names this binary's own path**, from `current_exe`, rather than the bare `adguard-ui` the shipped example bets on `$PATH` for. A session manager's `$PATH` need not carry `~/.local/bin`, and an entry it cannot resolve fails at login with nothing on screen to say so.
+
+The group also carries the one caveat this flag has, and carries it as a fact about *this* session rather than as a general warning: with no StatusNotifierItem host, a background start has nowhere to appear and exits 1. The window knows whether the tray registered — it is the same process — so the page is told, and the group description says so beside the switch instead of leaving the user to find it in the journal. It goes in the *description* rather than the row's subtitle for the reason the listen-address group's credential requirement does: the row already names a path, and a path plus that caveat is four lines in a row that shows three.
+
+**Neither the switch nor its documentation says whether AdGuard's protection starts at login**, and the omission is deliberate. On the reference machine an enabled `adguard-cli.service` user unit brings the proxy up, but this application does not install, read or depend on that — so "your protection starts either way" is a reassurance it cannot check, and it would be false on a machine without one. What is checkable is the direction the claim actually needs: the entry runs `adguard-ui --background`, which never calls `start`. So every string says what this switch does *not* do, and leaves the proxy's own arrangements to AdGuard.
+
+### And it is reported on Status
+
+The switch is at the foot of a forty-row page, and Status is the page people land on, so Status carries a read-only row for it — *Start at login: Yes/No*, leading to the switch through the `Destination` mechanism §5 describes. Three things about it are not the same as the rows above it:
+
+- **It is a link, not a control**, which is the rule the whole page keeps: one writer per setting, and this one lives on Advanced. See `status.rs`'s header.
+- **It needs a `Destination` of its own.** Every other link to that page names a `proxy.yaml` key and `AdvancedPage::reveal` finds the group holding it; this group is not in the settings table at all, so there is no key to name it by and it is asked for by name instead.
+- **Its group description draws the line the page's question would otherwise blur.** On a page that answers *am I protected?*, a row reading "Start at login — No" invites one wrong conclusion, so the group says what it is about — the window and the tray icon — before the row says anything. Its value word is also dim in both states, where every other value on that page goes green for the good news: neither answer here is protection.
 
 Fast reads (`status`, `config get`) can be `tokio::process::Command` awaits. Network commands (`check-update`, `filters update`, `update`) need a visible progress state and a generous timeout — a real `HttpClientNetworkError` reaching `filters.adtidy.org` is already in this machine's logs, so failure is a normal path, not an edge case.
 

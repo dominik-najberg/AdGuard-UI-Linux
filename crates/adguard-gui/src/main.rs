@@ -6,6 +6,7 @@
 //! measured CLI behaviour the wrapper encodes.
 
 mod advanced;
+mod autostart;
 mod backup;
 mod browser_integration;
 mod certificate;
@@ -44,6 +45,10 @@ const APP_ID: &str = "io.github.dominik-najberg.AdGuardUI";
 /// from login without a window opening in the user's face. The launcher entry
 /// in `data/` keeps its plain `Exec`, because clicking a dock icon means the
 /// opposite.
+///
+/// It is also what the *Start at login* switch on the Advanced page writes into
+/// the entry it creates (see [`autostart`]) — one flag, spelled one way, for
+/// what is one behaviour.
 const BACKGROUND: &str = "background";
 
 fn main() -> glib::ExitCode {
@@ -252,6 +257,13 @@ fn start(
         Err(reason) => Err(reason.clone()),
     };
 
+    // The *Start at login* switch offers a windowless start, which needs
+    // somewhere for the application to appear. Whether there is one is settled
+    // here and nowhere else, so the page is told rather than left to guess.
+    if let Ok(view) = &view {
+        view.advanced.set_tray_available(tray.is_ok());
+    }
+
     if let Err(reason) = tray {
         if background {
             // Nothing on screen and nothing on the bus: the process could not
@@ -295,7 +307,9 @@ fn install_main_view(
     window.set_content(Some(&view.root));
     connect_focus_rechecks(window, &view);
 
-    if let Err(reason) = connect_tray(app, window, &view) {
+    let tray = connect_tray(app, window, &view);
+    view.advanced.set_tray_available(tray.is_ok());
+    if let Err(reason) = tray {
         eprintln!("adguard-ui: continuing without a tray icon ({reason})");
     }
 
@@ -489,6 +503,13 @@ pub enum Destination {
     DnsProxy,
     /// The Advanced page, at the group holding this setting.
     Advanced(&'static str),
+    /// The Advanced page, at the *Start at login* switch.
+    ///
+    /// Its own variant rather than an [`Self::Advanced`] carrying a key,
+    /// because that group is not in the settings table at all — it writes a
+    /// desktop entry, not `proxy.yaml`, so there is no key to name it by and
+    /// `AdvancedPage::reveal` could not find it.
+    Autostart,
 }
 
 impl Destination {
@@ -498,7 +519,7 @@ impl Destination {
             Self::Protection => "protection",
             Self::WebFilters => "filters",
             Self::DnsFilters | Self::DnsProxy => "dns",
-            Self::Advanced(_) => "advanced",
+            Self::Advanced(_) | Self::Autostart => "advanced",
         }
     }
 
@@ -670,6 +691,13 @@ fn main_view(cli: &Cli) -> MainView {
                         advanced.reveal(setting);
                     }
                 }
+                // The one group on that page a setting key cannot address, so
+                // it is asked for by name.
+                Destination::Autostart => {
+                    if let Some(advanced) = advanced.upgrade() {
+                        advanced.reveal_autostart();
+                    }
+                }
                 Destination::DnsProxy => {
                     if let Some(dns) = dns.upgrade() {
                         dns.reveal();
@@ -722,15 +750,18 @@ fn main_view(cli: &Cli) -> MainView {
     }
 }
 
-/// Re-read the three checks that live outside `proxy.yaml` whenever the window
+/// Re-read the four checks that live outside `proxy.yaml` whenever the window
 /// regains focus: AdGuard's root helper, whether its certificate is trusted,
-/// and whether its browser integration is installed.
+/// whether its browser integration is installed, and whether the login entry is
+/// in place.
 ///
-/// The user's way out of any of these unmet states is a command they run in a
+/// The user's way out of the first three unmet states is a command they run in a
 /// terminal, so the moment they come back to this window is exactly the moment
 /// the answer has changed — and hunting for a refresh button to be told so
 /// would make the instruction feel like it had not worked
-/// (`architecture.md` §6).
+/// (`architecture.md` §6). The fourth is the same shape with a different other
+/// window: a startup-applications editor writes the file this application's
+/// login switch reads, and the two disagreeing would be worse than either.
 ///
 /// **The browser check has a second trigger the other two do not**, and it is
 /// the reason it is here rather than read once when the page is built:
@@ -749,9 +780,15 @@ fn main_view(cli: &Cli) -> MainView {
 fn connect_focus_rechecks(window: &adw::ApplicationWindow, view: &MainView) {
     let advanced = view.advanced.clone();
     let protection = view.protection.clone();
+    let status = view.status.clone();
     window.connect_is_active_notify(move |window| {
         if window.is_active() {
             advanced.recheck_helper();
+            // Both ends of the login entry: the switch that writes it and the
+            // row on Status that reports it. Whichever page is showing, one of
+            // the two is the one the user is looking at.
+            advanced.recheck_autostart();
+            status.recheck_autostart();
             protection.recheck_certificate();
             protection.recheck_browser_integration();
         }
@@ -930,6 +967,7 @@ mod tests {
             Destination::DnsFilters,
             Destination::DnsProxy,
             Destination::Advanced(adguard_core::config::key::PROXY_MODE),
+            Destination::Autostart,
         ] {
             assert!(
                 destination.page_index().is_some(),

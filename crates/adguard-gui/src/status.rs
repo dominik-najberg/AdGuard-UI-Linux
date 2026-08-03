@@ -64,8 +64,8 @@ use std::time::Duration;
 
 use adguard_core::config::key;
 use adguard_core::{
-    orphan, Activation, Catalogue, Cli, Config, Daemon, FilterSet, License, ProxyStatus, RootHelper,
-    Toggle,
+    orphan, Activation, Autostart, Catalogue, Cli, Config, Daemon, FilterSet, License, ProxyStatus,
+    RootHelper, Toggle,
 };
 use adw::prelude::*;
 use gtk::glib;
@@ -186,6 +186,14 @@ pub struct StatusPage {
     manual_dns: StateRow,
     system_filtering: StateRow,
     system_dns: StateRow,
+
+    /// The login entry, read but never written here — the switch that writes it
+    /// is on the Advanced page, and this row leads there. `None` in a session
+    /// with nowhere to put one, which the row reports rather than hides.
+    autostart: Option<Autostart>,
+    /// The word beside that row. Not a [`StateRow`], because its two states are
+    /// not "enabled" and "disabled" and neither of them is good news.
+    autostart_value: gtk::Label,
 
     licence_state: adw::ActionRow,
     licence_owner: adw::ActionRow,
@@ -436,12 +444,46 @@ impl StatusPage {
         }
         licence_group.add(&licence_buttons);
 
+        // ---- the application, which is not the protection ----
+        //
+        // Last, and below the licence, because it is the one thing on this page
+        // that does not depend on it — and because it is not an answer to the
+        // question the page asks. It is here for reach: the switch is at the
+        // foot of a forty-row page, and this is the page people land on.
+        //
+        // **The description is the reason this row can be here at all.** On a
+        // page that answers *am I protected?*, a row reading "Start at login —
+        // No" invites exactly one wrong conclusion, and the entry this reports
+        // starts `adguard-ui --background`, which never runs `start`. So the
+        // line is drawn in the group description rather than left to be
+        // inferred, and it says what this application does rather than what
+        // AdGuard does — whether AdGuard's own proxy comes up at login is
+        // AdGuard's arrangement, not ours to claim either way.
+        let app_group = adw::PreferencesGroup::builder()
+            .title("This application")
+            .description(
+                "Whether the AdGuard UI window and tray icon come back when you log in. \
+                 It does not start or stop AdGuard's protection.",
+            )
+            .build();
+        let autostart_row = link_row("Start at login");
+        autostart_row.set_subtitle("Set at the foot of the Advanced page");
+        let autostart_value = gtk::Label::builder().valign(gtk::Align::Center).build();
+        // Dim in **both** states, unlike every other value on this page. The
+        // green there means "you are protected"; there is no protection in this
+        // row either way, and colouring "Yes" would say there was.
+        autostart_value.add_css_class("dim-label");
+        autostart_row.add_suffix(&autostart_value);
+        autostart_row.add_suffix(&chevron());
+        app_group.add(&autostart_row);
+
         for g in [
             &hero_group,
             &stats_group,
             &endpoint_group,
             &filtering_group,
             &licence_group,
+            &app_group,
         ] {
             page.add(g);
         }
@@ -472,6 +514,8 @@ impl StatusPage {
             manual_dns,
             system_filtering,
             system_dns,
+            autostart: Autostart::locate(),
+            autostart_value,
             licence_state,
             licence_owner,
             licence_key,
@@ -536,6 +580,9 @@ impl StatusPage {
                 Destination::Advanced(key::PROXY_MODE),
             ),
             (&this.system_dns.row, Destination::Advanced(key::PROXY_MODE)),
+            // The one destination that is not a `proxy.yaml` key, and the one
+            // link on this page that leads to something which is not a setting.
+            (&autostart_row, Destination::Autostart),
         ] {
             row.connect_activated({
                 let this = Rc::downgrade(&this);
@@ -581,6 +628,9 @@ impl StatusPage {
         // the log-in link are absent until there is something to put in them.
         this.render_runtime();
         this.render_licence();
+        // Reads a file rather than waiting on the CLI, so it can be answered
+        // now instead of by a placeholder.
+        this.recheck_autostart();
 
         this.start_polling();
         this.reload();
@@ -641,6 +691,33 @@ impl StatusPage {
     pub fn refresh_stats(self: &Rc<Self>) {
         let this = self.clone();
         worker::run(Stats::read, move |stats: Stats| this.apply_stats(&stats));
+        // Read here rather than in the worker beside the figures: it is one
+        // small file in the user's own configuration directory, and the answer
+        // is wanted in the same frame the page appears in rather than one hop
+        // later. Arriving at this page is exactly the moment it can have gone
+        // stale — the switch that writes it is two pages away.
+        self.recheck_autostart();
+    }
+
+    /// Repaint the login row from the file.
+    ///
+    /// Public for the window's focus handler, which is the other moment the
+    /// answer can have changed without this application doing anything: a
+    /// startup-applications editor writes the same file (`architecture.md` §4).
+    pub fn recheck_autostart(&self) {
+        let Some(entry) = &self.autostart else {
+            // No configuration directory at all. Reported rather than hidden,
+            // and the link still leads to the switch that explains why.
+            self.autostart_value.set_label("Unavailable");
+            return;
+        };
+        self.autostart_value.set_label(match entry.is_enabled() {
+            Ok(true) => "Yes",
+            Ok(false) => "No",
+            // There and unreadable, which is neither. The same three-way answer
+            // the switch itself gives, in one word.
+            Err(_) => "Unavailable",
+        });
     }
 
     /// Repaint the module count from a reading of `proxy.yaml` this page did not

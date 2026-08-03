@@ -13,6 +13,46 @@ This file is the one changelog.
 
 ## Unreleased
 
+### Start at login, as a switch
+
+Asked for from the outside: an option to start with the session, writing a
+`.desktop` file into `~/.config/autostart`, with a flag that keeps the main
+window closed.
+
+The flag was already there. `adguard-ui --background` has registered the tray
+and presented no window since 1.0, and it is what the entry in
+`data/autostart/` — installed by `packaging/tarball.sh --autostart` — has been
+running at login all along. What was missing was a way to install that entry
+without a terminal, so that is what this adds:
+
+- **Start at login**, at the foot of the Advanced page. Switching it on writes
+  `~/.config/autostart/io.github.dominik-najberg.AdGuardUI.desktop`; switching
+  it off deletes it. The name is the one the packaging already installs, so the
+  switch, the shipped entry and whatever a startup-applications editor lists are
+  all one file — disable it out there and the switch reads off, and the row
+  re-reads itself every time the window is focused.
+- **The entry runs this binary's own path**, not the bare `adguard-ui` that the
+  shipped example resolves against `$PATH`. A session manager's `$PATH` need not
+  include `~/.local/bin`, where the per-user install puts things, and an entry
+  it cannot resolve fails at login with nothing on screen to say so.
+- **The row says when a background start would have nowhere to appear.** With no
+  tray icon — GNOME without an AppIndicator extension — `--background` leaves
+  the application unreachable and exits instead, which is the one place a tray
+  that will not register is fatal. The window knows whether the tray registered,
+  so the switch says so beside itself rather than leaving it for the journal.
+
+- **It is reported on the Status page too**, as a read-only row at the foot that
+  leads to the switch. That page answers *am I protected?* and owns no settings,
+  so it reports and links rather than offering a second control — and the group
+  it sits in says plainly that this is about the window and the tray icon, since
+  a row reading "Start at login — No" on that page invites exactly one wrong
+  conclusion.
+
+No new flag: `--silent` and `--quiet` would have been synonyms for
+`--background`, and one behaviour with three names is one more thing to keep in
+step. This switch neither starts nor stops AdGuard's protection: what runs the
+proxy at login is AdGuard's own arrangement, not this.
+
 ### The Annoyances group could not be switched on at all
 
 Reported from the outside: the five `AdGuard …` annoyance filters could not be

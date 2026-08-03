@@ -118,6 +118,8 @@ install -Dm644 data/autostart/*.desktop ~/.config/autostart/
 
 It runs `adguard-ui --background` off `$PATH`, so it needs the `~/.local/bin` install in §4. Remove the file to undo it, or flip `X-GNOME-Autostart-enabled` in a startup-applications editor.
 
+**Or use the switch.** *Start at login*, at the foot of the Advanced page, writes and removes that same file — same directory, same name, so the two cannot end up as separate entries. It differs from the command above in one way that matters while iterating: its `Exec` is the running binary's own path, so a switch flipped from `cargo run` writes `target/debug/adguard-ui` into the entry and keeps starting *that* build at login. Flip it off, or overwrite the file with the command above, before relying on an installed copy.
+
 **`--background` is the one place where a tray that will not register is fatal.** Everywhere else a missing AppIndicator extension is one line on stderr and a windowed app. Here there is no window either, so the process would be running with nothing on screen and no way to reach or quit it — it says so and exits 1 instead. Started from the autostart entry that message goes to the session journal:
 
 ```bash
@@ -330,7 +332,19 @@ int main(int argc, char **argv) {
 
 Resize once after the window maps, re-read the geometry from `xwininfo` afterwards rather than assuming the request was honoured, and crop each frame to it.
 
+**Two things about the environment, both measured 3 August 2026 while re-taking the 1.1.0 frames for the login switch, and both of which produce a frame that is wrong rather than one that fails.**
+
+**The committed set is light and this machine is dark.** `ADW_DEBUG_COLOR_SCHEME=force-light` does *not* do it: the colour scheme comes from the settings portal, which `xdg-desktop-portal-gnome` answers by reading this machine's real `org.gnome.desktop.interface color-scheme`. The portal is dbus-activated on the private bus and so inherits the *bus daemon's* environment, not the one exported inside the session — so the override has to go before `dbus-run-session`, where a memory backend leaves the schema at its default, which is light:
+
+```bash
+env -u DISPLAY -u WAYLAND_DISPLAY GSETTINGS_BACKEND=memory dbus-run-session -- …
+```
+
+**A private bus has no `org.kde.StatusNotifierWatcher`, and the login group says so.** That absence is the state this section uses on purpose to provoke the no-tray path — and it is exactly wrong for a screenshot, because the *Start at login* group's description then carries "no tray icon could be registered in this session" and a committed frame would tell every reader that about their own. Own the name with a stub before launching the app: a `Gio.bus_own_name` on `org.kde.StatusNotifierWatcher` answering `RegisterStatusNotifierItem` and three properties is enough for `ksni` to register, and the pass/fail signal is exact — the app prints `continuing without a tray icon` when it did not work.
+
 **Three values in those frames belong to this machine and none of them may be committed**: the licence owner's e-mail and the four unmasked characters of the key, both on the Status page, and the Stealth page's custom `X-Forwarded-For` address. `handoff.md` §4's redactor covers a *terminal* dump and does nothing for a PNG. Repaint them instead — Noto Sans at 11 px for a row subtitle and 13 px for an entry-row value is what the app rendered with here, since that is what Cantarell resolves to on this machine, so a placeholder drawn that way is indistinguishable from a real row.
+
+The licence rows were **not** repainted by hand this time. The layout above them is pixel-identical between runs, so the two placeholder regions were spliced across from the frame already in the repository — no font matching, and the redaction cannot drift from the one that was reviewed. Assert it afterwards rather than trusting the paste: the two regions must compare equal to the committed frame's.
 
 The unmet certificate, root-helper and browser-integration groups are invisible on this machine, so a screenshot of them needs the overrides above — but check what the *command* row ends up saying before shipping the frame. Pointing `$ADGUARD_ROOT_HELPER` at `/bin/true` renders `sudo /bin/true -s`, which is a real rendering of a fake install and reads as a real instruction.
 
@@ -358,7 +372,11 @@ Walking a page headlessly means getting to it first, and **the sidebar row canno
 
 **The row itself offers no actions at all, and the label inside it offers eight that do nothing to it.** This is the same shape as the switch-row trap in `handoff.md` §4 — three nodes carry the name, the useful one is not the first — but with a sharper ending: for a switch there *is* a node carrying `toggle`, and here there is no actionable node anywhere. A harness that takes the first name match and presses action 0 will copy the row's title to the clipboard, report success, and walk the page it started on. That failure is silent and reads exactly like a page that will not render.
 
-**Use the parent list's Selection interface**, which is what actually works:
+**The rows on the Status page are the same shape, and the documented fallback cannot be aimed at them.** Measured 3 August 2026 while verifying the login row: an activatable `AdwActionRow` reports `n_actions = 0` exactly as a sidebar row does — checked against the shipped `Manual DNS proxy`, `System-wide filtering` and `HTTP` links, so it is the widget and not the new row — and those rows are in a `GtkListBox` that offers no `Selection` either. That leaves the synthetic click below, and **`Atspi.Component.get_extents` returns `0,0` for every node under Xvfb** with the *sizes* correct, including the window's own. So a click computed from the tree lands in the top-left corner, which on this window is the sidebar.
+
+The way through is to take a frame first and read the coordinate off it, which is one `ffmpeg` grab and costs nothing beyond what a screenshot run already does. `xresize` the window taller than the page before grabbing, or the row you are aiming at is below the fold and the click lands on whatever scrolled into its place.
+
+**Use the parent list's Selection interface** where there is one — the sidebar — which is what actually works:
 
 ```python
 parent = row.get_parent()                       # the GtkListBox, role "list"

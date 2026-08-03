@@ -5,6 +5,7 @@
 //!
 //! See `docs/cli-contract.md` for the measured CLI behaviour this encodes.
 
+pub mod autostart;
 pub mod browser;
 pub mod cli;
 pub mod config;
@@ -17,6 +18,7 @@ pub mod paths;
 pub mod trust;
 pub mod zip;
 
+pub use autostart::Autostart;
 pub use browser::BrowserIntegration;
 pub use cli::{Activation, Applied, Cli, Error};
 pub use config::{AddressPlan, AuthState, Config, DnsListenPort, Watch};
