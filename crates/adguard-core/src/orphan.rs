@@ -372,13 +372,11 @@ mod tests {
     /// owns. Nothing else on the machine is `sh` carrying those two arguments,
     /// so the pid found is the one spawned here.
     ///
-    /// The script has to be a **compound** command. Given a single simple one,
-    /// every shell here execs it in place rather than forking — `sh -c 'sleep
-    /// 30'` becomes `sleep 30`, with `/proc/<pid>/exe` pointing at `sleep` and
-    /// both arguments gone from the command line. That leaves the process
-    /// matchable only in the moment between the two execs, which is a race this
-    /// test lost on CI. A loop is not exec-optimised, so the shell stays a
-    /// shell for as long as it is needed.
+    /// The script is a **compound** command on purpose. Given a single simple
+    /// one, a shell execs it in place rather than forking — `sh -c 'sleep 30'`
+    /// becomes `sleep 30`, taking `/proc/<pid>/exe` and both arguments with it.
+    /// Measured on the reference machine's dash; a loop is not exec-optimised,
+    /// so the shell stays a shell for as long as it is needed.
     #[test]
     fn finds_and_terminates_a_real_process() {
         let shell = fs::canonicalize("/bin/sh").expect("/bin/sh");
@@ -389,12 +387,16 @@ mod tests {
             .spawn()
             .expect("spawn");
         let pid = child.id() as i32;
+        settled(pid);
 
         let found = daemons(&shell);
-        let daemon = found
-            .iter()
-            .find(|daemon| daemon.pid() == pid)
-            .unwrap_or_else(|| panic!("the scan missed pid {pid}: {found:?}"));
+        let daemon = found.iter().find(|daemon| daemon.pid() == pid).unwrap_or_else(|| {
+            panic!(
+                "the scan missed pid {pid}: {found:?}\nexe {:?}\ncmdline {:?}",
+                fs::read_link(format!("/proc/{pid}/exe")),
+                fs::read(format!("/proc/{pid}/cmdline")).map(|c| String::from_utf8_lossy(&c).into_owned()),
+            )
+        });
         assert!(daemon.alive());
 
         assert!(daemon.terminate(), "SIGTERM did not end pid {pid}");
@@ -405,5 +407,41 @@ mod tests {
         assert!(!daemons(&shell).iter().any(|d| d.pid() == pid));
 
         child.wait().expect("reap");
+    }
+
+    /// How long a just-spawned child is given to finish becoming the program it
+    /// was asked to be. Measured in microseconds; this is the point past which
+    /// the machine has a different problem.
+    const EXEC_WITHIN: Duration = Duration::from_secs(5);
+
+    /// Wait for that.
+    ///
+    /// `spawn` does not promise it. It returns once `posix_spawn` releases the
+    /// parent, and the kernel does that from *inside* the child's `execve` —
+    /// early enough that `/proc/<pid>` can still describe the process being
+    /// replaced. Both intermediate shapes were measured on 2026-08-03:
+    ///
+    /// - exe and command line still this test binary's own, state `R`, on the
+    ///   CI runner — which is what made this test fail there;
+    /// - exe already the shell with the command line not yet filled in, on
+    ///   1935 of 2000 spawns on the reference machine.
+    ///
+    /// Neither shape carries the two arguments, so [`daemons`] is right to pass
+    /// over it and the scan comes back empty. There is nothing here for the
+    /// application to guard against: it reads that list at idle, or after a CLI
+    /// invocation it waited on, never in the microsecond after a fork. The
+    /// stopwatch that is too fast belongs to this test, so the wait does too.
+    fn settled(pid: i32) {
+        let mine = fs::read_link("/proc/self/exe").ok();
+        let deadline = Instant::now() + EXEC_WITHIN;
+        while Instant::now() < deadline {
+            let exe = fs::read_link(format!("/proc/{pid}/exe")).ok();
+            let cmdline = fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+            if exe != mine && cmdline.iter().any(|byte| *byte != 0) {
+                return;
+            }
+            std::thread::sleep(POLL);
+        }
+        panic!("pid {pid} never finished exec'ing");
     }
 }
