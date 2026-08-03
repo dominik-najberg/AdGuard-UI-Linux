@@ -11,7 +11,7 @@ This file is the one changelog.
 
 ---
 
-## Unreleased
+## 1.2.0 — 4 August 2026
 
 ### Start at login, as a switch
 

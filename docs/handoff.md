@@ -1,6 +1,6 @@
 # Handoff
 
-The entry point for a new session on this project. **§0 is what to run and read before touching anything**; §1 is what exists, §2 what was decided, §3 what is still open, §4 what will bite you. Everything here is current as of **2 August 2026**, against **`v1.1.0`**, and measured on the machine §0 describes.
+The entry point for a new session on this project. **§0 is what to run and read before touching anything**; §1 is what exists, §2 what was decided, §3 what is still open, §4 what will bite you. Everything here is current as of **4 August 2026**, against **`v1.2.0`**, and measured on the machine §0 describes.
 
 ---
 
@@ -19,10 +19,10 @@ The entry point for a new session on this project. **§0 is what to run and read
 ### Ground truth before writing a line
 
 ```bash
-git log --oneline -1        # the v1.1.0 tag or later
-git describe --tags         # v1.1.0 at the time of writing; the tags are v1.0.0 and v1.1.0
+git log --oneline -1        # the v1.2.0 tag or later
+git describe --tags         # v1.2.0 at the time of writing; the tags are v1.0.0, v1.1.0 and v1.2.0
 git status --porcelain      # must be empty
-cargo test --workspace      # 267 pass, 49 ignored
+cargo test --workspace      # 284 pass, 50 ignored
 sha256sum ~/.local/share/adguard-cli/proxy.yaml
 ```
 

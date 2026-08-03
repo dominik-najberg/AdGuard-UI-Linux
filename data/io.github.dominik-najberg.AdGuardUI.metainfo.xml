@@ -53,6 +53,17 @@
     application is its first release.
   -->
   <releases>
+    <release version="1.2.0" type="stable" date="2026-08-04">
+      <url type="details">https://github.com/dominik-najberg/AdGuard-UI-Linux/releases/tag/v1.2.0</url>
+      <description>
+        <p>Starting with your session, and a fix:</p>
+        <ul>
+          <li>Start at login, at the foot of the Advanced page: a switch that installs the desktop entry which brings the window and the tray icon back after you log in. It does not start or stop AdGuard's protection.</li>
+          <li>The Status page reports whether that is on, and leads to the switch.</li>
+          <li>Filters in the Annoyances group can be switched on from the application, which shows AdGuard's agreement and answers it. They previously could not be enabled at all.</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.1.0" type="stable" date="2026-08-02">
       <url type="details">https://github.com/dominik-najberg/AdGuard-UI-Linux/releases/tag/v1.1.0</url>
       <description>

@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "adguard-core"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "libc",
  "rusqlite",
@@ -15,7 +15,7 @@ dependencies = [
 
 [[package]]
 name = "adguard-gui"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "adguard-core",
  "adguard-tray",
@@ -26,7 +26,7 @@ dependencies = [
 
 [[package]]
 name = "adguard-tray"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
  "adguard-core",
  "async-channel",
