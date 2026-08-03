@@ -371,13 +371,21 @@ mod tests {
     /// --no-fork` supplies exactly that shape while touching nothing AdGuard
     /// owns. Nothing else on the machine is `sh` carrying those two arguments,
     /// so the pid found is the one spawned here.
+    ///
+    /// The script has to be a **compound** command. Given a single simple one,
+    /// every shell here execs it in place rather than forking — `sh -c 'sleep
+    /// 30'` becomes `sleep 30`, with `/proc/<pid>/exe` pointing at `sleep` and
+    /// both arguments gone from the command line. That leaves the process
+    /// matchable only in the moment between the two execs, which is a race this
+    /// test lost on CI. A loop is not exec-optimised, so the shell stays a
+    /// shell for as long as it is needed.
     #[test]
     fn finds_and_terminates_a_real_process() {
         let shell = fs::canonicalize("/bin/sh").expect("/bin/sh");
         // The arguments after the script become $0 and $1 — a command line of
         // our choosing, on a binary we did not have to write.
         let mut child = std::process::Command::new(&shell)
-            .args(["-c", "sleep 30", "start", "--no-fork"])
+            .args(["-c", "while :; do sleep 1; done", "start", "--no-fork"])
             .spawn()
             .expect("spawn");
         let pid = child.id() as i32;
