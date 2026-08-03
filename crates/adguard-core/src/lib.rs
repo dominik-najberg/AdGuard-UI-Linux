@@ -26,6 +26,7 @@ pub use trust::CaTrust;
 pub use filters::Catalogue;
 pub use locale::Locale;
 pub use model::{
-    Filter, FilterAction, FilterCatalogue, FilterGroup, FilterSet, FilterState, Kind, License,
-    ProxyStatus, Setting, SettingGroup, Toggle, ADVANCED, FILTER_SETTINGS, SETUP, STEALTH,
+    Consent, Filter, FilterAction, FilterCatalogue, FilterGroup, FilterSet, FilterState, Kind,
+    License, ProxyStatus, Setting, SettingGroup, Toggle, ADVANCED, ANNOYANCE_TERMS,
+    FILTER_SETTINGS, SETUP, STEALTH,
 };

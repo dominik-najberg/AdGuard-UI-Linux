@@ -984,7 +984,62 @@ impl FilterSet {
             Self::Dns => paths::dns_user_rules_file(),
         }
     }
+
+    /// The catalogue group this set will not switch on without an agreement
+    /// typed at a prompt — see [`ANNOYANCE_TERMS`].
+    ///
+    /// Per-set rather than a bare constant, because **the same number means
+    /// something else in the other database**. Measured on v1.4.13:
+    /// `agflm_standard.db` group 4 is *Annoyances*; `agflm_dns.db` group 4 is
+    /// *Security*. A plain `group_id == 4` test would put a dialog about
+    /// violating websites' terms in front of the DNS malware lists.
+    ///
+    /// `None` for DNS because the DNS catalogue has no Annoyances group at all
+    /// — its five groups are Custom filters, General, Other, Regional and
+    /// Security — so `dns filters` never raises the prompt.
+    pub fn annoyances_group(self) -> Option<i64> {
+        match self {
+            Self::Http => Some(FilterGroup::ANNOYANCES_ID),
+            Self::Dns => None,
+        }
+    }
 }
+
+/// Whether the user has already agreed to a prompt the CLI raises on stdin.
+///
+/// Every other command in this crate runs with stdin closed so that each prompt
+/// takes its default — the reasoning is on [`crate::Cli::run`], and it holds.
+/// One prompt has no usable default: the annoyance-filter agreement *refuses
+/// the work* rather than proceeding, so with stdin closed those lists can never
+/// be switched on at all. This is how an answer reaches it.
+///
+/// A type rather than a `bool` so that no call site can pass `true` meaning
+/// something else, and so that granting consent is a word that has to be
+/// written down at the place it is granted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Consent {
+    /// stdin stays closed. What everything else in this crate does.
+    Withheld,
+    /// The user was shown [`ANNOYANCE_TERMS`] and accepted them.
+    Granted,
+}
+
+/// AdGuard's own wording for the agreement it demands before enabling a list
+/// from the Annoyances group.
+///
+/// Copied verbatim from the v1.4.13 prompt, reflowed from its 80-column
+/// hard wrap into one paragraph. Verbatim on purpose: this is a statement about
+/// what the user is liable for, and a paraphrase would be us putting our own
+/// words into AdGuard's disclaimer. What is agreed to in the GUI has to be the
+/// same thing the CLI asked about.
+pub const ANNOYANCE_TERMS: &str = "You are about to enable one or more annoyance filters. \
+     They block elements that are either unrelated to website content or related but annoying \
+     to your user experience. Website owners may consider these elements mandatory: if you \
+     block them, you may be violating their terms; some functionality of websites may not be \
+     available or may not work properly. You understand and agree that you are solely \
+     responsible to comply with the terms of use of websites you visit and that AdGuard is not \
+     responsible for your compliance with the terms of use of websites you visit using our \
+     products.";
 
 /// What a switch flip has to ask the CLI to do.
 ///
@@ -1137,6 +1192,26 @@ impl Filter {
             (true, false) => FilterAction::Add,
         }
     }
+
+    /// Whether switching this filter on will raise the CLI's annoyance-filter
+    /// agreement (contract §7).
+    ///
+    /// **Decided by the group, not by the name or the id.** The report that
+    /// found this named the five `AdGuard …` lists — 18 to 22 — but measuring
+    /// the whole group turned up eleven: Fanboy's Annoyances, Web Annoyances
+    /// Ultralist, Adblock Warning Removal List, EasyList Cookie List and the
+    /// rest are gated identically. Meanwhile *CJX's Annoyances List* has the
+    /// word in its title, sits in "Language-specific", and is not gated at all.
+    /// So neither the name nor a range of ids describes the population; the
+    /// group does.
+    ///
+    /// Only for the actions that switch a list **on**. `disable` and `remove`
+    /// were measured ungated, and asking someone to accept liability for
+    /// turning something *off* would be nonsense in any case.
+    pub fn needs_annoyance_consent(&self, set: FilterSet, action: FilterAction) -> bool {
+        matches!(action, FilterAction::Add | FilterAction::Enable)
+            && set.annoyances_group() == Some(self.group_id)
+    }
 }
 
 /// The two flags a mutation is verified against, re-read on their own so
@@ -1161,6 +1236,14 @@ impl FilterGroup {
     /// Unlike the user-rules pseudo-filter, this group is real and present in
     /// `filter_group`.
     pub const CUSTOM_ID: i64 = i32::MIN as i64;
+
+    /// The "Annoyances" group of `agflm_standard.db`, whose eleven lists the
+    /// CLI will not enable without an agreement to [`ANNOYANCE_TERMS`].
+    ///
+    /// Reach it through [`FilterSet::annoyances_group`] and never directly:
+    /// group 4 of the DNS catalogue is *Security*, and this number on its own
+    /// does not say which database it belongs to.
+    pub const ANNOYANCES_ID: i64 = 4;
 
     pub fn is_custom(&self) -> bool {
         self.id == Self::CUSTOM_ID
@@ -1330,6 +1413,57 @@ mod tests {
     fn user_rules_are_never_added() {
         let user_rules = filter(Filter::USER_RULES_ID, true, false);
         assert_eq!(user_rules.action_for(true), FilterAction::Enable);
+    }
+
+    fn annoyance(installed: bool) -> Filter {
+        Filter { group_id: FilterGroup::ANNOYANCES_ID, ..filter(18, false, installed) }
+    }
+
+    /// Both ways of switching a list on raise the agreement — the report that
+    /// found this only ever saw `enable`, because by then the list had already
+    /// been added by the click before.
+    #[test]
+    fn both_ways_of_switching_an_annoyance_list_on_need_consent() {
+        for installed in [true, false] {
+            let f = annoyance(installed);
+            let action = f.action_for(true);
+            assert!(
+                f.needs_annoyance_consent(FilterSet::Http, action),
+                "{action:?} on an annoyance list should ask first"
+            );
+        }
+    }
+
+    /// Nothing is gated on the way off, and asking someone to accept liability
+    /// for *stopping* filtering would be nonsense.
+    #[test]
+    fn switching_an_annoyance_list_off_asks_nothing() {
+        let f = annoyance(true);
+        assert!(!f.needs_annoyance_consent(FilterSet::Http, FilterAction::Disable));
+        assert!(!f.needs_annoyance_consent(FilterSet::Http, FilterAction::Remove));
+    }
+
+    /// The sharp edge: group 4 of `agflm_dns.db` is **Security**, not
+    /// Annoyances. A bare `group_id == 4` test would put a dialog about
+    /// violating websites' terms in front of the DNS malware lists — and the
+    /// DNS catalogue has no annoyance gate to answer for in the first place.
+    #[test]
+    fn group_four_of_the_dns_catalogue_is_not_annoyances() {
+        let security = annoyance(false);
+        assert!(!security.needs_annoyance_consent(FilterSet::Dns, FilterAction::Add));
+        assert_eq!(FilterSet::Dns.annoyances_group(), None);
+    }
+
+    /// *CJX's Annoyances List* is in "Language-specific" and is measured
+    /// ungated, so the population cannot be described by the word in the title.
+    #[test]
+    fn a_list_named_annoyances_outside_the_group_is_not_gated() {
+        let cjx = Filter {
+            group_id: 7,
+            name: "CJX's Annoyances List".to_owned(),
+            ..filter(220, false, false)
+        };
+        assert!(!cjx.needs_annoyance_consent(FilterSet::Http, FilterAction::Add));
     }
 
     /// A custom list installed with no `! Title:` header has an empty title and

@@ -14,12 +14,12 @@
 //! 3. Consequently a caller must never infer success from exit status. State
 //!    changes follow act -> re-read -> reconcile.
 
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use crate::model::{FilterAction, FilterSet, License, ProxyStatus};
+use crate::model::{Consent, FilterAction, FilterSet, License, ProxyStatus};
 use crate::paths;
 
 /// Deadline for the local commands — `status`, `config get/set`.
@@ -245,6 +245,14 @@ impl Cli {
     /// the way the contract doc records however the app was launched. Nothing
     /// here ever has anything to say on stdin.
     ///
+    /// **One prompt is the exception**, and it is why [`Self::run_answering`]
+    /// exists: the annoyance-filter agreement (contract §7) does not take a
+    /// default and carry on — it refuses the work. Closed stdin there means the
+    /// Annoyances group cannot be switched on from this application at all.
+    /// That one answer is written and the pipe is closed immediately behind it,
+    /// so a *second* prompt in the same command still meets EOF and the
+    /// no-hang guarantee above is unchanged.
+    ///
     /// # It is also bounded in time
     ///
     /// Closing stdin removes the one *known* way to hang, but not the general
@@ -273,10 +281,37 @@ impl Cli {
     /// [`Error::TimedOut`] is a distinct variant rather than folded into
     /// [`Error::BadInvocation`]: the caller still owes itself a re-read.
     pub fn run_within(&self, args: &[&str], timeout: Duration) -> Result<Output, Error> {
+        self.run_answering(args, timeout, None)
+    }
+
+    /// [`Self::run_within`], with one line typed at whatever asks first.
+    ///
+    /// `answer` is written to the child's stdin and the pipe is **closed behind
+    /// it**, which is the whole safety story: the first prompt gets the line,
+    /// every later one gets EOF and takes its default exactly as it does under
+    /// [`Self::run`]. Nothing waits for a second answer that is not coming.
+    ///
+    /// The write is not on a thread of its own and does not need to be — a pipe
+    /// buffers ~64 KB before it blocks a writer, and the only caller sends four
+    /// bytes. A failed write is deliberately ignored: a child that has already
+    /// exited is a closed pipe, and what happened is decided by reading its
+    /// output, never by whether we managed to talk to it.
+    ///
+    /// The one caller is [`Self::filter_action`]; see contract §7 for the
+    /// prompt it answers.
+    pub fn run_answering(
+        &self,
+        args: &[&str],
+        timeout: Duration,
+        answer: Option<&str>,
+    ) -> Result<Output, Error> {
         let mut command = Command::new(&self.binary);
         command
             .args(args)
-            .stdin(std::process::Stdio::null())
+            .stdin(match answer {
+                Some(_) => std::process::Stdio::piped(),
+                None => std::process::Stdio::null(),
+            })
             // Piped rather than `output()`, which offers no way back in once it
             // has started waiting. Owning the pipes means owning the deadline.
             .stdout(std::process::Stdio::piped())
@@ -289,6 +324,12 @@ impl Cli {
             binary: self.binary.display().to_string(),
             source,
         })?;
+
+        // Answer, then EOF: the handle is dropped at the end of this block and
+        // the pipe closes with it.
+        if let (Some(answer), Some(mut pipe)) = (answer, child.stdin.take()) {
+            let _ = pipe.write_all(answer.as_bytes());
+        }
 
         // Both pipes are drained on threads of their own for the whole life of
         // the child. A pipe holds ~64 KB before it blocks the writer, and
@@ -658,18 +699,57 @@ impl Cli {
     ///
     /// Negative IDs need no `--` guard: the user-rules sentinel
     /// (`-2147483648`) is measured to parse as a positional, not a flag.
+    ///
+    /// # The Annoyances group needs an answer, not just a command
+    ///
+    /// A list in that group (contract §7) raises an agreement on stdin before
+    /// it will switch on. `consent` decides whether one is given, and the
+    /// caller owes the user a sight of [`crate::model::ANNOYANCE_TERMS`] before
+    /// passing [`Consent::Granted`] — this cannot check that and does not try.
+    ///
+    /// # `add` prints its confirmation *before* it refuses
+    ///
+    /// The refusal has to be looked for first, because the obvious success
+    /// check passes right over it. Measured, at exit 0, stdin closed:
+    ///
+    /// ```text
+    /// $ adguard-cli filters add 18
+    /// Filter [Title: AdGuard Cookie Notices filter] added
+    /// Please read carefully before enabling Annoyance filters
+    /// …
+    /// Enable these filters? (yes/no):
+    /// Annoyance filters won't be enabled due to user's choice
+    /// ```
+    ///
+    /// `confirms(…, "added")` is satisfied by line one, so reading in the
+    /// obvious order reports success for a command that subscribed to the list
+    /// and left it switched off — which is exactly what the user did not ask
+    /// for, reported as though it were.
     pub fn filter_action(
         &self,
         set: FilterSet,
         action: FilterAction,
         filter_id: i64,
+        consent: Consent,
     ) -> Result<(), Error> {
         let filter_id = filter_id.to_string();
         let mut args = set.cli_prefix().to_vec();
         args.push(action.subcommand());
         args.push(&filter_id);
 
-        let out = self.run(&args)?;
+        let answer = match consent {
+            Consent::Granted => Some(ANNOYANCE_ACCEPT),
+            Consent::Withheld => None,
+        };
+        let out = self.run_answering(&args, LOCAL_TIMEOUT, answer)?;
+
+        if declined_annoyances(&out.stdout) {
+            return Err(Error::Refused {
+                message: "AdGuard did not get agreement to its annoyance-filter terms, so \
+                          the list was not switched on"
+                    .to_owned(),
+            });
+        }
         if confirms(&out.stdout, action.confirmation()) {
             Ok(())
         } else {
@@ -1174,6 +1254,25 @@ fn confirms(stdout: &str, verb: &str) -> bool {
         .lines()
         .map(str::trim)
         .any(|line| line.starts_with("Filter [") && line.contains(']') && line.ends_with(verb))
+}
+
+/// What the CLI's `Enable these filters? (yes/no):` prompt accepts.
+///
+/// The newline is the answer — without it the CLI is still waiting when the
+/// pipe closes, and an unterminated line reads as no answer at all. `y` was not
+/// measured and is not guessed at: this is the word the prompt names.
+const ANNOYANCE_ACCEPT: &str = "yes\n";
+
+/// The line `filters add` / `filters enable` prints when the annoyance-filter
+/// agreement went unanswered or was refused.
+///
+/// Measured on v1.4.13, on **stdout**, at exit **0** — the ordinary semantic
+/// refusal of contract §3, and the only trace in the output that the enable
+/// half did not happen.
+const ANNOYANCE_DECLINED: &str = "Annoyance filters won't be enabled due to user's choice";
+
+fn declined_annoyances(stdout: &str) -> bool {
+    stdout.lines().any(|line| line.trim() == ANNOYANCE_DECLINED)
 }
 
 /// The one line that means a `start` or `restart` did not take.
@@ -1914,6 +2013,81 @@ mod tests {
         // What the user reads is the CLI's line, not a claim about our
         // arguments.
         assert_eq!(err.to_string(), "Filter manager initialization failed");
+    }
+
+    /// The whole point of the annoyance path: the answer has to arrive on the
+    /// child's stdin, and the pipe has to close behind it so a second read
+    /// meets EOF instead of waiting.
+    #[test]
+    fn an_answer_reaches_the_child_and_the_pipe_closes_behind_it() {
+        let out = cli_for("/bin/sh")
+            .run_answering(
+                &["-c", "read first; echo \"got [$first]\"; read second || echo 'then EOF'"],
+                Duration::from_secs(10),
+                Some(ANNOYANCE_ACCEPT),
+            )
+            .expect("the shell should exit 0");
+
+        assert_eq!(out.stdout.trim(), "got [yes]\nthen EOF");
+    }
+
+    /// With no answer offered, stdin is closed exactly as it always was. The
+    /// guarantee on [`Cli::run`] is not weakened by the parameter existing.
+    #[test]
+    fn no_answer_still_means_closed_stdin() {
+        let out = cli_for("/bin/sh")
+            .run_answering(
+                &["-c", "read line || echo 'EOF immediately'"],
+                Duration::from_secs(10),
+                None,
+            )
+            .expect("the shell should exit 0");
+
+        assert_eq!(out.stdout.trim(), "EOF immediately");
+    }
+
+    /// `filters add` on an annoyance list prints its own success line **first**
+    /// and refuses four lines later, so reading in the obvious order reports a
+    /// subscription the user did not ask for as though the switch had worked.
+    ///
+    /// The transcript is the measured one, v1.4.13, exit 0, all on stdout.
+    #[test]
+    fn an_added_annoyance_list_that_was_not_enabled_is_a_refusal() {
+        let err = cli_for("/bin/sh")
+            .run_within(
+                &[
+                    "-c",
+                    "echo 'Filter [Title: AdGuard Cookie Notices filter] added'; \
+                     echo 'Please read carefully before enabling Annoyance filters'; \
+                     echo \"Annoyance filters won't be enabled due to user's choice\"",
+                ],
+                Duration::from_secs(10),
+            )
+            .map_err(|err| err.to_string())
+            .and_then(|out| {
+                // `filter_action`'s own order of checks, against output a real
+                // `add` produced.
+                assert!(confirms(&out.stdout, FilterAction::Add.confirmation()));
+                if declined_annoyances(&out.stdout) {
+                    Err("declined".to_owned())
+                } else {
+                    Ok(())
+                }
+            });
+
+        assert_eq!(err, Err("declined".to_owned()), "the refusal must outrank the confirmation");
+    }
+
+    /// And the refusal line must not be matched loosely: an ordinary filter
+    /// command that happens to mention annoyances is still a success.
+    #[test]
+    fn only_the_measured_refusal_line_counts() {
+        assert!(declined_annoyances(
+            "Filter [Title: X] added\nAnnoyance filters won't be enabled due to user's choice\n"
+        ));
+        assert!(!declined_annoyances(
+            "Filter [Title: AdGuard Other Annoyances filter] enabled\n"
+        ));
     }
 
     /// `activate` opens with a menu prompt nobody answered, so a failure of

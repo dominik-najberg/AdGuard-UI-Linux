@@ -832,12 +832,45 @@ Two consequences for the UI, and the first is not about this row:
 
   What `activate` does against an **already licensed** install is deliberately **not measured**: the only install available to try it on is the author's own, and pointing an activation command at a working licence to see what happens is not a measurement worth its risk. The UI therefore offers activation only while `license` says the licence is not active, and never from a reading that failed for some other reason.
 - **`config set listen_address <non-loopback>`**, but only while `listen_auth` is not fully configured — it prompts for a username. This one is the nastiest of the three because it does not *look* interactive and it reports success anyway; see [§5](#listen_address-needs-authentication-fully-configured-first). Configure `listen_auth` completely and it needs no TTY at all.
+- **`filters add` / `filters enable`, for the Annoyances group only** — an agreement that will not take a default. This is the one prompt on the list that a closed stdin does not merely no-op past: it refuses the work outright, so the whole group is unreachable until something answers it. It has a subsection of its own below.
 
 ### The wrapper closes stdin, so "no TTY" is the only path
 
 Everything measured about that prompt was measured without a TTY, where the CLI gives up immediately and warns. But a child process inherits its parent's stdin, and **a GUI started from a terminal has a real one** — so the same call that no-ops in every test would sit there indefinitely waiting for a username to be typed into a terminal the user has stopped looking at, holding a worker thread and leaving the control that triggered it spinning.
 
 `Cli::run` therefore spawns with `Stdio::null()`. It makes the no-TTY behaviour deterministic however the app was launched, and nothing here has anything to say on stdin anyway. It is not a substitute for the precondition check — a silent no-op is still a silent no-op — but it removes the hang.
+
+### The annoyance-filter agreement, the one prompt with no usable default
+
+Every other prompt in this section takes a default and carries on. This one refuses. Measured on v1.4.13 with stdin closed, at exit **0**, all on **stdout**:
+
+```text
+$ adguard-cli filters add 18
+Filter [Title: AdGuard Cookie Notices filter] added
+
+Please read carefully before enabling Annoyance filters
+
+You are about to enable one or more annoyance filters. […]
+
+Enable these filters? (yes/no):
+Annoyance filters won't be enabled due to user's choice
+```
+
+Three separate traps, in the order they bite:
+
+1. **A closed stdin is a "no", and "no" means the work does not happen.** So `Stdio::null()` — correct everywhere else — makes the entire Annoyances group permanently unswitchable from this application. It was: the defect this section was written for is a user reporting that the five `AdGuard …` annoyance lists could not be enabled from the GUI at all, with the terminal as the only workaround.
+
+2. **`add` prints its success line *before* it refuses.** `Filter [Title: …] added` is line one; the refusal is line six. `confirms(…, "added")` is satisfied by line one, so the obvious reading reports success for a command that subscribed to the list and left it **switched off** — a state change the user did not ask for, reported as the one they did. `Cli::filter_action` therefore looks for `Annoyance filters won't be enabled due to user's choice` *first*, and only then for the confirmation.
+
+   A `filters enable` on an already-added list has no such decoy: it prints the agreement and nothing else, so `first_line` served the user *"Please read carefully before enabling Annoyance filters"* — one line off a twelve-line block, an instruction to read something that was never shown. That was the reported symptom.
+
+3. **The gate is the group, not the name and not a range of ids.** Measured across the whole HTTP catalogue: all **eleven** members of group 4 are gated — 18–22 (`AdGuard Cookie Notices`, `Popups`, `Mobile App Banners`, `Other Annoyances`, `Widgets`), plus `Fanboy's Annoyances` (122), `Web Annoyances Ultralist` (201), `Adblock Warning Removal List` (207), `EasyList Cookie List` (241), `Dandelion Sprout's Annoyances List` (250) and `Stevo's AI Blocklist` (260). Meanwhile `CJX's Annoyances List` (220) has the word in its title, sits in *Language-specific*, and is **not** gated. A control from another group — `Phishing URL Blocklist` (255), Security — adds and enables in one step with no prompt at all.
+
+**Group 4 of `agflm_dns.db` is `Security`, not `Annoyances`.** The DNS catalogue's five groups are Custom filters, General, Other, Regional and Security; it has no Annoyances group and never raises the prompt. So the id must never be tested bare — `FilterSet::annoyances_group` returns it for HTTP and `None` for DNS, because a bare `group_id == 4` would put a dialog about violating websites' terms of use in front of the DNS malware lists.
+
+**What answers it.** `yes` followed by a newline, written to stdin, which `Cli::run_answering` does before closing the pipe behind it. The newline is the answer — an unterminated line leaves the CLI still waiting when the pipe closes. Closing immediately preserves the guarantee above: the first prompt gets the line, every later one meets EOF and takes its default, so nothing can wait for a second answer that is not coming. `y` was not measured and is not guessed at.
+
+**Who is allowed to say yes.** Not the wrapper. `Consent::Granted` is a value the caller passes, and §8's rule against answering for the user applies with particular force to a prompt whose whole content is a disclaimer about who is liable. The GUI shows AdGuard's text verbatim in an `AdwAlertDialog` — verbatim because a paraphrase would be this application deciding how much of someone else's disclaimer a user needs to see — and asks *before* running anything, since asking afterwards would mean a declined dialog leaving behind the subscription `add` had already made.
 
 ---
 

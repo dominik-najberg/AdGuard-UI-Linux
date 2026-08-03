@@ -19,7 +19,7 @@
 use std::path::{Path, PathBuf};
 
 use adguard_core::filters::Catalogue;
-use adguard_core::{Cli, Filter, FilterAction, FilterSet, Locale};
+use adguard_core::{Cli, Consent, Filter, FilterAction, FilterSet, Locale};
 
 /// A scratch `$XDG_DATA_HOME` with the machine's licence lent to it.
 ///
@@ -306,13 +306,13 @@ fn a_custom_filter_can_be_switched_off_and_back_on() {
 
     sandbox
         .cli
-        .filter_action(FilterSet::Http, FilterAction::Disable, id)
+        .filter_action(FilterSet::Http, FilterAction::Disable, id, Consent::Withheld)
         .unwrap_or_else(|err| panic!("disabling {id} refused: {err}"));
     assert!(!sandbox.customs()[0].enabled, "the database should show it off");
 
     sandbox
         .cli
-        .filter_action(FilterSet::Http, FilterAction::Enable, id)
+        .filter_action(FilterSet::Http, FilterAction::Enable, id, Consent::Withheld)
         .unwrap_or_else(|err| panic!("enabling {id} refused: {err}"));
     assert!(sandbox.customs()[0].enabled, "and on again");
 }
@@ -364,7 +364,7 @@ fn removing_a_custom_filter_deletes_the_row() {
 
     sandbox
         .cli
-        .filter_action(FilterSet::Http, FilterAction::Remove, drop)
+        .filter_action(FilterSet::Http, FilterAction::Remove, drop, Consent::Withheld)
         .unwrap_or_else(|err| panic!("removing {drop} refused: {err}"));
 
     let after = sandbox.customs();
@@ -382,12 +382,12 @@ fn removing_a_custom_filter_deletes_the_row() {
     // whole design turns on, and "off" must not quietly mean "already gone".
     sandbox
         .cli
-        .filter_action(FilterSet::Http, FilterAction::Disable, keep)
+        .filter_action(FilterSet::Http, FilterAction::Disable, keep, Consent::Withheld)
         .unwrap_or_else(|err| panic!("disabling {keep} refused: {err}"));
     assert!(!sandbox.customs()[0].enabled, "the row should be off first");
     sandbox
         .cli
-        .filter_action(FilterSet::Http, FilterAction::Remove, keep)
+        .filter_action(FilterSet::Http, FilterAction::Remove, keep, Consent::Withheld)
         .unwrap_or_else(|err| panic!("removing the disabled {keep} refused: {err}"));
     assert!(
         sandbox.customs().is_empty(),
@@ -418,7 +418,7 @@ fn removing_a_custom_filter_deletes_the_row() {
     let absent = -99_999;
     let refusal = sandbox
         .cli
-        .filter_action(FilterSet::Http, FilterAction::Remove, absent);
+        .filter_action(FilterSet::Http, FilterAction::Remove, absent, Consent::Withheld);
     eprintln!("removing the absent {absent} -> {refusal:?}");
     assert!(
         refusal.is_err(),
@@ -451,7 +451,7 @@ fn removing_a_catalogue_filter_only_uninstalls_it() {
     let id = 2;
     sandbox
         .cli
-        .filter_action(FilterSet::Http, FilterAction::Add, id)
+        .filter_action(FilterSet::Http, FilterAction::Add, id, Consent::Withheld)
         .unwrap_or_else(|err| panic!("adding {id} refused: {err}"));
 
     let catalogue = Catalogue::open(&sandbox.db()).expect("open the sandbox catalogue");
@@ -466,7 +466,7 @@ fn removing_a_catalogue_filter_only_uninstalls_it() {
 
     sandbox
         .cli
-        .filter_action(FilterSet::Http, FilterAction::Remove, id)
+        .filter_action(FilterSet::Http, FilterAction::Remove, id, Consent::Withheld)
         .unwrap_or_else(|err| panic!("removing {id} refused: {err}"));
 
     let after = Catalogue::open(&sandbox.db())

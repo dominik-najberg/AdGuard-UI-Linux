@@ -11,6 +11,42 @@ This file is the one changelog.
 
 ---
 
+## Unreleased
+
+### The Annoyances group could not be switched on at all
+
+Reported from the outside: the five `AdGuard …` annoyance filters could not be
+enabled from the application, which showed *"Please read carefully before
+enabling Annoyance filters"* and then never showed anything to read. The
+workaround was to enable them in a terminal and accept there.
+
+AdGuard's CLI gates that group behind an agreement typed at a prompt, and this
+application runs it with stdin closed so that every prompt takes its default
+([`docs/cli-contract.md`](docs/cli-contract.md) §7). That is right for every
+other prompt the CLI has and wrong for this one, which does not take a default —
+it refuses the work. Three things were wrong and all three are fixed:
+
+- **The agreement is now shown and answered.** Switching on a list from the
+  Annoyances group opens a dialog carrying AdGuard's own wording verbatim, and
+  agreeing sends the answer through to the CLI. Declining leaves the switch off
+  and nothing is run — the question comes *before* the command, because
+  `filters add` subscribes to a list before refusing to enable it, so asking
+  afterwards would have left the subscription behind.
+- **A silent half-success is now reported.** `filters add` prints
+  `Filter […] added` before it refuses, which the wrapper's success check
+  accepted — so the first click on one of these lists really did subscribe to
+  it, left it switched off, and said only *"Could not enable …"*.
+- **The gate is eleven lists, not five.** Measuring the whole catalogue found
+  `Fanboy's Annoyances`, `Web Annoyances Ultralist`, `Adblock Warning Removal
+  List`, `EasyList Cookie List` and two more gated identically — while
+  `CJX's Annoyances List`, which has the word in its title but sits in
+  Language-specific, is not gated at all. The check is by catalogue group, and
+  it is per-set: group 4 of the DNS catalogue is *Security*, and testing the
+  number bare would have put a dialog about violating websites' terms of use in
+  front of the DNS malware lists.
+
+---
+
 ## 1.1.0 — 2 August 2026
 
 Settings that existed in `proxy.yaml` and on no page, traffic capture, and

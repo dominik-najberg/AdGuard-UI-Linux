@@ -13,7 +13,8 @@ use std::rc::Rc;
 
 use adguard_core::filters::{self, Catalogue};
 use adguard_core::{
-    Cli, Filter, FilterAction, FilterCatalogue, FilterSet, FilterState, Locale,
+    Cli, Consent, Filter, FilterAction, FilterCatalogue, FilterSet, FilterState, Locale,
+    ANNOYANCE_TERMS,
 };
 use adw::prelude::*;
 use gtk::glib;
@@ -559,7 +560,9 @@ impl FiltersPage {
         worker::run(
             move || {
                 let refused = cli
-                    .filter_action(set, FilterAction::Remove, id)
+                    // Removal is never gated: the agreement is about switching
+                    // a list *on*.
+                    .filter_action(set, FilterAction::Remove, id, Consent::Withheld)
                     .err()
                     .map(|err| err.to_string());
                 // `None` when the catalogue could not be read at all, which is
@@ -760,8 +763,15 @@ impl FiltersPage {
     }
 
     /// Send one switch flip to the CLI, then confirm it against the database.
+    ///
+    /// A list from the Annoyances group takes the long way round: AdGuard will
+    /// not switch one on without an agreement, so the agreement is asked for
+    /// here, before anything is run. Asking *afterwards* was the tempting
+    /// shape and is wrong — `filters add` subscribes to the list and only then
+    /// refuses to enable it, so a declined dialog would leave behind a
+    /// subscription the user never got.
     fn toggle(self: &Rc<Self>, filter_id: i64, on: bool) {
-        let (action, name) = {
+        let (action, name, needs_consent) = {
             let rows = self.rows.borrow();
             let Some(row) = rows.get(&filter_id) else {
                 return;
@@ -770,16 +780,85 @@ impl FiltersPage {
             // cannot race the first one's verification.
             row.switch.set_sensitive(false);
             let filter = row.filter.borrow();
-            (filter.action_for(on), filter.display_name().to_owned())
+            let action = filter.action_for(on);
+            (
+                action,
+                filter.display_name().to_owned(),
+                filter.needs_annoyance_consent(self.set, action),
+            )
         };
 
+        if needs_consent {
+            let this = self.clone();
+            glib::spawn_future_local(async move {
+                if this.confirm_annoyances().await {
+                    this.apply(filter_id, on, action, name, Consent::Granted);
+                } else {
+                    this.abandon(filter_id);
+                }
+            });
+            return;
+        }
+
+        self.apply(filter_id, on, action, name, Consent::Withheld);
+    }
+
+    /// Show AdGuard's annoyance-filter agreement and answer it for the CLI.
+    ///
+    /// The body is [`ANNOYANCE_TERMS`] verbatim, because the point of the
+    /// dialog is that the user agrees to the same thing the CLI is about to ask
+    /// about — and what it says they are agreeing to is that they, not AdGuard,
+    /// answer for breaking a website's terms of use. Summarising that would be
+    /// this application deciding how much of a disclaimer someone needs to see.
+    ///
+    /// Cancel is the default and the escape route: closing the dialog with
+    /// Escape must not read as consent.
+    async fn confirm_annoyances(&self) -> bool {
+        let dialog =
+            adw::AlertDialog::new(Some("Enable annoyance filters?"), Some(ANNOYANCE_TERMS));
+        // Not markup: AdGuard's text is prose, and prose carries `&`. The same
+        // rule every row, toast and dialog on this page follows.
+        dialog.set_body_use_markup(false);
+        dialog.add_response("cancel", "Cancel");
+        dialog.add_response("enable", "I Agree");
+        dialog.set_response_appearance("enable", adw::ResponseAppearance::Suggested);
+        dialog.set_default_response(Some("cancel"));
+        dialog.set_close_response("cancel");
+
+        dialog.choose_future(Some(&self.bin)).await == "enable"
+    }
+
+    /// Put a switch back where it was, for a flip that was never sent.
+    ///
+    /// The row's recorded `filter` is the last state the *database* confirmed,
+    /// so this reverts to observed reality rather than to the negation of what
+    /// was clicked.
+    fn abandon(&self, filter_id: i64) {
+        let rows = self.rows.borrow();
+        let Some(row) = rows.get(&filter_id) else {
+            return;
+        };
+        row.switch.set_sensitive(true);
+        let enabled = row.filter.borrow().enabled;
+        self.set_active(&row.switch, enabled);
+    }
+
+    /// act -> re-read -> reconcile, once the decision to act has been made.
+    fn apply(
+        self: &Rc<Self>,
+        filter_id: i64,
+        on: bool,
+        action: FilterAction,
+        name: String,
+        consent: Consent,
+    ) {
         let cli = self.cli.clone();
         let set = self.set;
         let this = self.clone();
         worker::run(
             move || {
                 let refused = cli
-                    .filter_action(set, action, filter_id)
+                    .filter_action(set, action, filter_id, consent)
                     .err()
                     .map(|err| err.to_string());
                 // Verify from the database. A CLI that printed a confirmation
