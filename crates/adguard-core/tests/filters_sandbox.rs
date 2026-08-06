@@ -317,6 +317,133 @@ fn a_custom_filter_can_be_switched_off_and_back_on() {
     assert!(sandbox.customs()[0].enabled, "and on again");
 }
 
+/// Trust, both ways, and everything that had to be true before a control for it
+/// could exist.
+///
+/// The single fact the whole design rests on is that **trust and the switch are
+/// independent**: a list can be trusted while switched off, and a switch flip
+/// must not disturb the flag. Asserted here rather than assumed, because the
+/// page reconciles both from one `Catalogue::state` read and a wrong answer
+/// either way would show up as a control that silently resets itself.
+///
+/// The confirmation is checked at the same time and for the usual reason —
+/// `set-trusted` answers in a shape of its own that `cli::confirms` cannot see
+/// (contract §6), so a wrapper matching the house form would report every one
+/// of these successes as a refusal.
+#[test]
+#[ignore = "invokes the real adguard-cli"]
+fn trusting_a_custom_filter_round_trips_independently_of_its_switch() {
+    let Some(sandbox) = Sandbox::new("trust") else {
+        return;
+    };
+
+    let list = sandbox.list("titled.txt", TITLED);
+    sandbox.install(&list).expect("install");
+    let id = sandbox.customs()[0].id;
+    assert!(!sandbox.customs()[0].trusted, "an install without --trusted lands untrusted");
+
+    let trusted = || sandbox.customs()[0].trusted;
+
+    sandbox
+        .cli
+        .filters_set_trusted(id, true)
+        .unwrap_or_else(|err| panic!("trusting {id} refused: {err}"));
+    assert!(trusted(), "the database should show it trusted");
+
+    // Independent of the switch, in the direction that matters: a list nobody
+    // has switched on can still be trusted, and the trust survives being
+    // switched back on afterwards.
+    sandbox
+        .cli
+        .filter_action(FilterSet::Http, FilterAction::Disable, id, Consent::Withheld)
+        .expect("disable");
+    assert!(trusted(), "switching a list off must not untrust it");
+
+    sandbox
+        .cli
+        .filters_set_trusted(id, false)
+        .unwrap_or_else(|err| panic!("untrusting {id} refused: {err}"));
+    assert!(!trusted(), "and back");
+    assert!(!sandbox.customs()[0].enabled, "untrusting must not switch it on");
+
+    sandbox
+        .cli
+        .filters_set_trusted(id, true)
+        .expect("trust it again, while it is still switched off");
+    assert!(trusted() && !sandbox.customs()[0].enabled, "trusted and off is a reachable state");
+
+    sandbox
+        .cli
+        .filter_action(FilterSet::Http, FilterAction::Enable, id, Consent::Withheld)
+        .expect("enable");
+    assert!(trusted(), "switching a list on must not disturb its trust either");
+
+    // Setting it to what it already is reports success and changes nothing,
+    // which is why the page verifies from the database and never from this.
+    sandbox.cli.filters_set_trusted(id, true).expect("a no-op still reports success");
+    assert!(trusted());
+}
+
+/// The two refusals, and the one the CLI does **not** make.
+///
+/// `set-trusted` guards two of the three cases `Filter::supports_trust` covers,
+/// and the third is the dangerous one:
+///
+/// * a catalogue filter is refused — `Filter not custom`;
+/// * an id no row has is refused — `Filter not found`, the shape a stale page
+///   sends when another window has already removed the list;
+/// * **the user-rules sentinel is accepted, and writes.** That row ships
+///   `is_trusted = 1`, and clearing it stops the scriptlet and HTML rules in
+///   the user's own `user.txt` from being applied — reported as a success, with
+///   nothing downstream able to tell the difference. So the wrapper refuses it
+///   before spawning, and this asserts that it never reaches the CLI: the
+///   sentinel's flag is read either side and must not have moved.
+#[test]
+#[ignore = "invokes the real adguard-cli"]
+fn trust_is_refused_for_everything_that_is_not_a_custom_list() {
+    let Some(sandbox) = Sandbox::new("trust-refusals") else {
+        return;
+    };
+
+    // A catalogue filter, added first so "not installed" cannot be the reason.
+    sandbox
+        .cli
+        .filter_action(FilterSet::Http, FilterAction::Add, 2, Consent::Withheld)
+        .expect("adding filter 2");
+    let refusal = sandbox.cli.filters_set_trusted(2, true);
+    eprintln!("catalogue filter -> {refusal:?}");
+    assert!(refusal.is_err(), "a catalogue filter must be refused, got {refusal:?}");
+
+    let absent = sandbox.cli.filters_set_trusted(-99_999, true);
+    eprintln!("absent id -> {absent:?}");
+    assert!(absent.is_err(), "an id that never existed must be refused, got {absent:?}");
+
+    // The sentinel. Read the flag first, so "unchanged" is a measurement and
+    // not a guess about what it ships as.
+    let user_rules = || {
+        Catalogue::open(&sandbox.db())
+            .expect("open")
+            .state(Filter::USER_RULES_ID)
+            .expect("state query")
+            .expect("the user-rules row exists")
+            .trusted
+    };
+    let before = user_rules();
+    eprintln!("user rules ship trusted = {before}");
+
+    let sentinel = sandbox.cli.filters_set_trusted(Filter::USER_RULES_ID, !before);
+    eprintln!("user-rules sentinel -> {sentinel:?}");
+    assert!(
+        matches!(sentinel, Err(adguard_core::Error::UserRulesNotTrustable)),
+        "the sentinel must be refused by us, before the CLI sees it, got {sentinel:?}"
+    );
+    assert_eq!(
+        user_rules(),
+        before,
+        "the guard leaked — the CLI accepts this id and really writes to it"
+    );
+}
+
 /// **The destructive one.** `remove` on a custom filter deletes the row.
 ///
 /// Varied deliberately rather than asserted from one fixture, because this is

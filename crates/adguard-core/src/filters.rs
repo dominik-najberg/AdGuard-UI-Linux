@@ -208,15 +208,25 @@ impl Catalogue {
     /// mutation reports success at exit 0 even when it changed nothing, so the
     /// UI confirms against the database instead — without paying for a full
     /// catalogue read per toggle.
+    ///
+    /// All three flags every time, whichever control asked. `is_enabled` and
+    /// `is_installed` already move together — `add` sets both — but **trust is
+    /// on an axis of its own**: `set-trusted` leaves the other two alone, and a
+    /// switch flip leaves `is_trusted` alone, measured both ways (contract §6).
+    /// So a reconcile that read back only the flag it had just written would be
+    /// *assuming* the rest had not moved, and they can: the daemon updates
+    /// these filters on its own schedule, and a second window is one `filters`
+    /// invocation away.
     pub fn state(&self, filter_id: i64) -> Result<Option<FilterState>, Error> {
         let mut stmt = self
             .conn
-            .prepare("SELECT is_enabled, is_installed FROM filter WHERE filter_id = ?1")?;
+            .prepare("SELECT is_enabled, is_installed, is_trusted FROM filter WHERE filter_id = ?1")?;
         let mut rows = stmt.query([filter_id])?;
         match rows.next()? {
             Some(row) => Ok(Some(FilterState {
                 enabled: row.get::<_, i64>(0)? != 0,
                 installed: row.get::<_, i64>(1)? != 0,
+                trusted: row.get::<_, i64>(2)? != 0,
             })),
             None => Ok(None),
         }

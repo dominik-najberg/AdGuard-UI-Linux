@@ -1212,14 +1212,52 @@ impl Filter {
         matches!(action, FilterAction::Add | FilterAction::Enable)
             && set.annoyances_group() == Some(self.group_id)
     }
+
+    /// Whether this filter's trust can be changed, and therefore whether its
+    /// row gets the control that changes it.
+    ///
+    /// **Three separate reasons to say no, and the CLI only enforces two of
+    /// them.** All measured on v1.4.13; contract §6, *Marking a custom filter
+    /// trusted*.
+    ///
+    /// - **A DNS list cannot.** `adguard-cli dns filters` carries no
+    ///   `set-trusted` at all — it is absent from that subcommand's help, and
+    ///   asking for it answers `A subcommand is required` at exit 1. The
+    ///   operation is *unrepresentable* for that set rather than merely
+    ///   inadvisable, which is why [`crate::Cli::filters_set_trusted`] takes no
+    ///   [`FilterSet`] to be wrong about.
+    /// - **A catalogue filter cannot**, and AdGuard says so itself:
+    ///   `set-trusted 2 true` answers `Failed to update trust filter with ID:
+    ///   2: Filter not custom` at exit 0 and writes nothing. Trust is a
+    ///   property of a list the user chose to fetch.
+    /// - **The user-rules pseudo-filter must not — and this is the one the CLI
+    ///   lets straight through.** It ships `is_trusted = 1`, and
+    ///   `set-trusted -2147483648 false` was measured to *really write*, which
+    ///   would quietly stop the scriptlet and HTML rules in the user's own
+    ///   `user.txt` from being applied. Nothing in the output distinguishes
+    ///   that from any other success. [`Self::is_custom`] already excludes it,
+    ///   by the group rather than by the id — but that exclusion is load-bearing
+    ///   here in a way it is nowhere else, which is why this is a predicate with
+    ///   a name rather than an `is_custom()` at the call site.
+    pub fn supports_trust(&self, set: FilterSet) -> bool {
+        matches!(set, FilterSet::Http) && self.is_custom()
+    }
 }
 
-/// The two flags a mutation is verified against, re-read on their own so
+/// The flags a mutation is verified against, re-read on their own so
 /// confirming one toggle does not cost a whole catalogue read.
+///
+/// `trusted` joined the other two when the trust control landed, and it is the
+/// one that moves *independently* of them: measured, `filters set-trusted`
+/// works on a switched-off row and the flag survives a `disable`/`enable`
+/// round trip (contract §6). So a re-read that patched only `enabled` and
+/// `installed` would leave the row's record of its own trust behind after
+/// every switch flip.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FilterState {
     pub enabled: bool,
     pub installed: bool,
+    pub trusted: bool,
 }
 
 /// A category of filters (`filter_group`).
@@ -1464,6 +1502,42 @@ mod tests {
             ..filter(220, false, false)
         };
         assert!(!cjx.needs_annoyance_consent(FilterSet::Http, FilterAction::Add));
+    }
+
+    fn custom(id: i64) -> Filter {
+        Filter { group_id: FilterGroup::CUSTOM_ID, ..filter(id, true, true) }
+    }
+
+    #[test]
+    fn a_custom_http_list_is_the_one_thing_that_can_be_trusted() {
+        assert!(custom(-10001).supports_trust(FilterSet::Http));
+    }
+
+    /// `dns filters` has no `set-trusted` subcommand at all, so a control on a
+    /// DNS row would have nothing to call.
+    #[test]
+    fn a_custom_dns_list_cannot_be_trusted() {
+        assert!(!custom(-10001).supports_trust(FilterSet::Dns));
+    }
+
+    /// AdGuard refuses this one itself — `Filter not custom` — so the predicate
+    /// is agreeing with the CLI rather than inventing a rule.
+    #[test]
+    fn a_catalogue_filter_cannot_be_trusted() {
+        assert!(!filter(2, true, true).supports_trust(FilterSet::Http));
+    }
+
+    /// The trap. The CLI accepts the sentinel and **writes**: the row ships
+    /// `is_trusted = 1`, and untrusting it silently stops the user's own
+    /// scriptlet and HTML rules from being applied. Nothing downstream would
+    /// catch it, so nothing may offer it.
+    #[test]
+    fn the_user_rules_pseudo_filter_is_never_offered_a_trust_control() {
+        // Group 0, as both databases really carry it — not a group that exists
+        // in `filter_group`, and emphatically not the custom one.
+        let user_rules = Filter { group_id: 0, ..filter(Filter::USER_RULES_ID, true, true) };
+        assert!(!user_rules.supports_trust(FilterSet::Http));
+        assert!(!user_rules.supports_trust(FilterSet::Dns));
     }
 
     /// A custom list installed with no `! Title:` header has an empty title and

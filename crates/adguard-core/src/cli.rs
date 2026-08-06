@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use crate::model::{Consent, FilterAction, FilterSet, License, ProxyStatus};
+use crate::model::{Consent, Filter, FilterAction, FilterSet, License, ProxyStatus};
 use crate::paths;
 
 /// Deadline for the local commands — `status`, `config get/set`.
@@ -169,6 +169,20 @@ pub enum Error {
     /// caller must handle is harder to ignore than a documented precondition.
     #[error("{} already exists — `configure` would reset it", path.display())]
     AlreadyConfigured { path: PathBuf },
+
+    /// [`Cli::filters_set_trusted`] was handed the user-rules sentinel. **We**
+    /// refused, before spawning anything.
+    ///
+    /// The second error here that describes a bug rather than a condition, and
+    /// it is [`Self::AlreadyConfigured`]'s reasoning exactly. `filters
+    /// set-trusted` refuses a catalogue filter on its own — `Filter not
+    /// custom` — but it accepts `-2147483648` and **writes**, and what that
+    /// write turns off is the scriptlet and HTML rules in the user's own
+    /// `user.txt`. It reports success while doing it, so nothing downstream
+    /// would catch it: not the confirmation, not the re-read, which would
+    /// faithfully report the flag we had just cleared.
+    #[error("the user's own rules are not a subscribable list — their trust is not this application's to set")]
+    UserRulesNotTrustable,
 }
 
 /// Captured, ANSI-stripped result of one invocation.
@@ -846,6 +860,100 @@ impl Cli {
         }
     }
 
+    /// Let one custom list use privileged rules, or take that back.
+    ///
+    /// A trusted list may carry scriptlet and `$$`/HTML-filtering rules, which
+    /// is to say it may run script in the pages the user visits. Untrusted is
+    /// the default an install lands on, and the only reason to leave it is that
+    /// the user vouches for the source.
+    ///
+    /// # No [`FilterSet`], because the DNS set has no such command
+    ///
+    /// Every other function here takes one. This cannot: measured on v1.4.13,
+    /// `adguard-cli dns filters` has no `set-trusted` in its help and asking
+    /// for it exits **1** with `A subcommand is required` on stderr. Taking a
+    /// set and refusing one of its two values at run time would put a failure
+    /// in the caller's hands that the type system can hold instead — DNS lists
+    /// are hostname-only and the concept does not reach them.
+    ///
+    /// # The confirmation is a shape of its own
+    ///
+    /// Measured, at exit 0, on stdout, as the command's only line:
+    ///
+    /// ```text
+    /// $ adguard-cli filters set-trusted -10001 true
+    /// Filter with ID: -10001 successfully updated trust
+    /// ```
+    ///
+    /// That is **not** the `Filter [<something>] <verb>` form every other
+    /// filter command answers in, so [`confirms`] cannot see it and
+    /// [`confirms_trust`] exists for this one command. The refusals are two,
+    /// both at exit 0 on stdout, and neither shares an anchor with it:
+    ///
+    /// ```text
+    /// Failed to update trust filter with ID: -99999: Filter not found
+    /// Failed to update trust filter with ID: 2: Filter not custom
+    /// ```
+    ///
+    /// The second is AdGuard enforcing what [`Filter::supports_trust`] also
+    /// says: trust belongs to a list the user fetched, not to the catalogue.
+    ///
+    /// # This is not proof the flag moved
+    ///
+    /// As everywhere in this module. The same success line is printed for a
+    /// no-op — setting a list trusted twice reports success twice — so the
+    /// caller re-reads `is_trusted` from the catalogue and renders from that.
+    ///
+    /// # Licence-gated, like every other filter command
+    ///
+    /// Unlicensed it exits **1** with `You need to activate an AdGuard license
+    /// to use this command` on stderr, which [`run_within`] already maps to
+    /// [`Error::Unlicensed`]. Nothing here needs to know that, and it is
+    /// recorded only because the first draft of this comment guessed at the
+    /// **opposite** — that `add`, `enable` and `disable` kept working, which
+    /// would have meant a page where a list could be switched but not trusted.
+    /// Measured 6 August 2026 against a sandbox whose licence was taken away:
+    /// `add`, `enable`, `disable`, `remove`, `set-title` and `set-trusted` all
+    /// refuse identically and write nothing. There is no asymmetry to handle.
+    ///
+    /// [`run_within`]: Self::run_within
+    /// [`Filter::supports_trust`]: crate::Filter::supports_trust
+    pub fn filters_set_trusted(&self, filter_id: i64, trusted: bool) -> Result<(), Error> {
+        // Refused here rather than at the call site, on the same grounds as
+        // `configure`: this is the one id the CLI will accept and act on when
+        // it must not, and a guard beside a call site is one somebody can add
+        // a second call site around. Measured — `set-trusted -2147483648 false`
+        // really writes, and what it turns off is the scriptlet and HTML rules
+        // in the user's own `user.txt`, silently and with a success line.
+        if filter_id == Filter::USER_RULES_ID {
+            return Err(Error::UserRulesNotTrustable);
+        }
+
+        let filter_id = filter_id.to_string();
+        // A negative id needs no `--` guard here either — `set-trusted -10001
+        // true` parses as two positionals, exactly as `disable -10001` does
+        // (contract §6). The value is ours and is always one of these two
+        // words; a spelling the parser does not accept exits 1 on stderr,
+        // which is `BadInvocation` and would be our bug.
+        let args = [
+            "filters",
+            "set-trusted",
+            &filter_id,
+            if trusted { "true" } else { "false" },
+        ];
+
+        let out = self.run_within(&args, LOCAL_TIMEOUT)?;
+        if confirms_trust(&out.stdout) {
+            Ok(())
+        } else {
+            Err(Error::Refused {
+                message: first_line(&out.stdout).unwrap_or_else(|| {
+                    format!("`adguard-cli {}` said nothing at all", args.join(" "))
+                }),
+            })
+        }
+    }
+
     /// Write one setting into `proxy.yaml`.
     ///
     /// The only sanctioned way to change the file: `config set` was measured to
@@ -1195,10 +1303,12 @@ fn redact_error(err: Error, secret: &str) -> Error {
             message: redact(&message, secret),
         },
         // Carry no echo of the value. `AlreadyConfigured` holds only a path we
-        // derived ourselves, and it is raised before any argument is passed.
-        other @ (Error::BinaryNotFound | Error::Spawn { .. } | Error::AlreadyConfigured { .. }) => {
-            other
-        }
+        // derived ourselves, and it — like `UserRulesNotTrustable`, which holds
+        // nothing at all — is raised before any argument is passed.
+        other @ (Error::BinaryNotFound
+        | Error::Spawn { .. }
+        | Error::AlreadyConfigured { .. }
+        | Error::UserRulesNotTrustable) => other,
     }
 }
 
@@ -1254,6 +1364,40 @@ fn confirms(stdout: &str, verb: &str) -> bool {
         .lines()
         .map(str::trim)
         .any(|line| line.starts_with("Filter [") && line.contains(']') && line.ends_with(verb))
+}
+
+/// Recognise `filters set-trusted`'s confirmation, which is not [`confirms`]'s
+/// shape.
+///
+/// The one filter command that answers in a form of its own. Measured on
+/// v1.4.13, at exit 0, on stdout:
+///
+/// ```text
+/// Filter with ID: -10001 successfully updated trust
+/// ```
+///
+/// `Filter with ID:` is not `Filter [`, so the house matcher returns false for
+/// a command that worked — a caller reusing it would report every successful
+/// change as a refusal, which is the failure this function exists to prevent.
+///
+/// **Anchored at both ends**, because only the tail carries the verdict. Both
+/// refusals name the same id in the same place and differ from success only in
+/// how the line opens and closes:
+///
+/// ```text
+/// Failed to update trust filter with ID: -99999: Filter not found
+/// Failed to update trust filter with ID: 2: Filter not custom
+/// ```
+///
+/// What sits between the anchors is the id echoed back from the argument, so
+/// checking it would only re-assert what we passed. It is left alone.
+fn confirms_trust(stdout: &str) -> bool {
+    stdout
+        .lines()
+        .map(str::trim)
+        .any(|line| {
+            line.starts_with("Filter with ID:") && line.ends_with("successfully updated trust")
+        })
 }
 
 /// What the CLI's `Enable these filters? (yes/no):` prompt accepts.
@@ -1772,6 +1916,73 @@ mod tests {
         assert_eq!(
             first_line(INSTALL_FAILED).as_deref(),
             Some("Failed to install the filter from URL: https://no-such-host-probe.invalid/list.txt")
+        );
+    }
+
+    // ---- `filters set-trusted`, all captured from v1.4.13 ----
+
+    /// The whole of a successful invocation's output. One line, and the only
+    /// filter confirmation in the CLI that is not `Filter [<something>] <verb>`.
+    const TRUST_OK: &str = "Filter with ID: -10001 successfully updated trust\n";
+
+    /// An id no row has. The shape a stale page sends: the user presses the
+    /// control on a list another window already removed.
+    const TRUST_NOT_FOUND: &str =
+        "Failed to update trust filter with ID: -99999: Filter not found\n";
+
+    /// AdGuard refusing what `Filter::supports_trust` also refuses. Reachable
+    /// only through a bug on our side, and pinned so that bug is a toast rather
+    /// than a silent success.
+    const TRUST_NOT_CUSTOM: &str =
+        "Failed to update trust filter with ID: 2: Filter not custom\n";
+
+    #[test]
+    fn recognises_the_trust_confirmation() {
+        assert!(confirms_trust(TRUST_OK));
+    }
+
+    /// Both refusals exit 0, exactly like the successes they sit beside.
+    #[test]
+    fn trust_refusals_are_not_confirmations() {
+        for output in [TRUST_NOT_FOUND, TRUST_NOT_CUSTOM, "", "\n \n"] {
+            assert!(!confirms_trust(output), "{output:?} read as a trust change");
+        }
+    }
+
+    /// The house matcher cannot see this command's success, which is the whole
+    /// reason `confirms_trust` exists. If AdGuard ever moves `set-trusted` onto
+    /// the `Filter [` shape this test fails, and that is the point — the change
+    /// would be an opportunity to delete a function, not a silent equivalence.
+    #[test]
+    fn the_house_matcher_does_not_recognise_a_trust_confirmation() {
+        for verb in ["trust", "updated trust", "installed", "enabled"] {
+            assert!(!confirms(TRUST_OK, verb), "confirms(.., {verb:?}) matched");
+        }
+    }
+
+    /// A custom list is titled by its author, or by the URL when it has no
+    /// `! Title:` header, and neither is checked by anything. A title that is
+    /// itself a copy of the success line must not make a refusal read as one —
+    /// which is why the match is anchored at both ends of a single line rather
+    /// than being a `contains`.
+    #[test]
+    fn a_title_quoting_the_success_line_does_not_fake_a_confirmation() {
+        let hostile =
+            "Failed to update trust filter with ID: -10001 successfully updated trust: Filter not found\n";
+        assert!(!confirms_trust(hostile));
+    }
+
+    /// The trust refusals are one-liners with no table behind them, so what the
+    /// user is shown is the CLI's own sentence entire.
+    #[test]
+    fn trust_refusal_messages_are_shown_whole() {
+        assert_eq!(
+            first_line(TRUST_NOT_FOUND).as_deref(),
+            Some("Failed to update trust filter with ID: -99999: Filter not found")
+        );
+        assert_eq!(
+            first_line(TRUST_NOT_CUSTOM).as_deref(),
+            Some("Failed to update trust filter with ID: 2: Filter not custom")
         );
     }
 
