@@ -586,6 +586,12 @@ One measured detail no plan carried: **the stock `location` is `'.'`** — measu
 
 **The activation success leg is not v2's** (`handoff.md` §3 item 6). It needs a real account and completing an activation spends a device slot, and the owner left it open on 2 August 2026, in the same decision that set this scope. Opening v2 did not open it.
 
+### Added after v2's scope closed
+
+**The trusted-custom-filter control** (§5), built 6 August 2026 for [issue #2](https://github.com/dominik-najberg/AdGuard-UI-Linux/issues/2). It is recorded here for the same reason the certificate and browser-integration checks are recorded above v1's list: it is not a scope change so much as the missing half of something already in. Custom filter install by URL was v1 *In*, removal followed it, and a list's trusted state is the third thing that can be true of a row this application was already rendering — reachable only from a terminal until someone outside said so.
+
+**What is worth carrying forward is where it came from.** Every other feature in both milestones was chosen from the inside, and this one was not; nothing in either list had proposed it, and taking it turned up CLI behaviour four measurements deep that no amount of re-reading the contract would have produced (contract §6, `handoff.md` §0). This section stays the scope authority, and an item arriving from outside is a legitimate way for something to enter it — it does not get to skip the measure-first rule, and this one did not.
+
 ---
 
 ## 8. Risks

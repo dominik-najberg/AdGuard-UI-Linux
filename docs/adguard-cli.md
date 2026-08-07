@@ -213,7 +213,12 @@ adguard-cli filters update
 - `list` shows only added filters; `list --all` shows the full catalog grouped by category (Ad blocking, Privacy, Social widgets, Annoyances, Security, Other, Language-specific). `[x]` marks an enabled filter.
 - `add` takes built-in filters by numeric ID or by name, and accepts several at once. IDs come from `list --all` — e.g. `2` = AdGuard Base filter, `3` = AdGuard Tracking Protection, `4` = AdGuard Social Media.
 - `install` adds a **custom** filter from a URL or a local file path.
-- `--trusted` / `set-trusted` allows the list to use privileged rule types (such as scriptlet and `$$`/HTML-filtering rules). Only mark lists you actually trust — a trusted list can inject script into pages.
+- `--trusted` / `set-trusted` allows the list to use privileged rule types (such as scriptlet and `$$`/HTML-filtering rules). Only mark lists you actually trust — a trusted list can inject script into pages. Five things about it were measured for this project rather than read out of the help, and all five are in [`cli-contract.md`](cli-contract.md) §6:
+  - **The proxy reads the flag when it starts and not again, in both directions.** `set-trusted` on a running proxy writes the database and changes nothing that is filtering; *withdrawing* trust is inert too, so a list you have just distrusted goes on running its scriptlets until `adguard-cli restart`. Nothing in the command's output says so.
+  - **Its success line is a shape no other `filters` subcommand uses** — `Filter with ID: <id> successfully updated trust`, not the `Filter [<id>] <verb>` form the rest answer in. Anything matching the house shape reads every success here as a failure.
+  - **Catalogue filters are refused** (`Filter not custom`, at exit 0), but the **user-rules pseudo-filter `-2147483648` is accepted and really written**. That row ships trusted, and clearing it silently stops the scriptlet and HTML rules in your own `user.txt` from being applied, reporting success while it does.
+  - **The flag does not gate everything the documentation implies it gates.** On 1.4.13 a `$$` HTML-filtering rule fired from an **untrusted** list, in 16 fetches across two measurement rounds; the scriptlet half behaved as documented. Treat the trusted/untrusted line as measured per rule type, not as the docs draw it.
+  - **It is licence-gated, like every other `filters` subcommand** — measured with the licence moved aside, `add`, `enable`, `disable`, `remove` and `set-title` all refuse identically at exit 1 and write nothing.
 - `filters update` refreshes filters, DNS filters, userscripts, Safe Browsing, CRLite, **and** checks for app updates. It is the same operation as [`check-update`](#updates).
 
 ```bash
@@ -237,7 +242,7 @@ adguard-cli dns filters disable <filter-id>...
 
 Differences from HTTP `filters`:
 
-- No `--trusted` / `set-trusted` — DNS lists are hostname-only, so the trusted-rule concept does not apply.
+- No `--trusted` / `set-trusted` — the subcommand is absent from `dns filters` and asking for it exits **1 at the argument parser**, which is measured; that DNS lists are hostname-only and so have no privileged rule types to gate is the reason, and it is inference.
 - `dns filters update` is deprecated; its help redirects you to `adguard-cli check-update`.
 
 The DNS catalog is grouped into General, Other, and Regional — e.g. `1` = AdGuard DNS filter, `5` = OISD Blocklist Small, `33` = Steven Black's List, `48` = HaGeZi's Pro Blocklist.
