@@ -39,7 +39,40 @@ struct Row {
     /// this, so a switch flip is always decided against observed reality
     /// rather than against what the UI happens to be showing.
     filter: RefCell<Filter>,
+    /// The trust control, on the rows that have one. `None` everywhere else —
+    /// which is every row but a custom list on the HTTP page, since a DNS list
+    /// has no command to call and AdGuard refuses a catalogue filter itself.
+    /// See `Filter::supports_trust`.
+    trust: Option<Trust>,
 }
+
+/// The two widgets that report whether a list is trusted.
+///
+/// Painted together by [`FiltersPage::paint_trust`], from the row's own record
+/// and never from what was asked for, so the icon, the tooltip, the label a
+/// screen reader reads and the sentence under the name cannot disagree with
+/// each other or with the database.
+struct Trust {
+    button: gtk::Button,
+    /// The prefix warning image, hidden while the list is untrusted — the same
+    /// widget and glyph the Protection and DNS pages use to mark a switch whose
+    /// consequence the row would not otherwise disclose. Undecorated for
+    /// accessibility, as those are: the subtitle says it in words, and labelling
+    /// the image would announce it twice.
+    caveat: gtk::Image,
+}
+
+/// What a trusted list's row says under its name.
+///
+/// It **displaces** the list's own `! Description:` header rather than joining
+/// it. The Protection page settles the same competition the same way — while
+/// the DNS row is inert its subtitle becomes the caveat and goes back to the
+/// description afterwards — and two sentences sharing a two-line ellipsised
+/// subtitle would leave whichever came second truncated. A custom list's
+/// description is also text written by the list the user has just decided to
+/// trust, which makes it the least authoritative string on the row.
+const TRUSTED_SUBTITLE: &str =
+    "Trusted — may run scriptlets and HTML-filtering rules in the pages you visit";
 
 /// One group as the search field sees it.
 struct Section {
@@ -735,6 +768,14 @@ impl FiltersPage {
             switch.set_subtitle_lines(2);
         }
 
+        // A row that can be trusted has a subtitle in at least one of its two
+        // states, so the line count is set whether or not there is a
+        // description for it to displace.
+        let trust = filter.supports_trust(self.set).then(|| {
+            switch.set_subtitle_lines(2);
+            self.trust_control(filter, &switch)
+        });
+
         // Before the handler is connected, so the initial state is not read as
         // a click.
         switch.set_active(filter.enabled);
@@ -756,10 +797,125 @@ impl FiltersPage {
             Row {
                 switch: switch.clone(),
                 filter: RefCell::new(filter.clone()),
+                trust,
             },
         );
 
+        // The control is built blank and painted from the record, so there is
+        // one function deciding what a trusted row looks like and the first
+        // paint cannot drift from every later one.
+        self.paint_trust(id);
+
         switch
+    }
+
+    /// Build the control that grants and withdraws trust, blank.
+    ///
+    /// **A plain `GtkButton`, not a `GtkToggleButton`**, and that is a property
+    /// of the design rather than a preference. A toggle's `active` moves under
+    /// the user's finger, so the row would read *trusted* for the length of a
+    /// dialog they may then cancel — a state the database has never confirmed,
+    /// which is the one thing this page does not do. It would also emit
+    /// `toggled` on our own writes and so need its own copy of the
+    /// [`reconciling`] guard, where a button has no state property to write:
+    /// `set_icon_name`, `set_tooltip_text`, `update_property` and the CSS
+    /// classes all emit nothing.
+    ///
+    /// A suffix button rather than a gesture, for the reason the removal button
+    /// is one: the row's activatable widget is the switch, so a swipe, a long
+    /// press or a row click is reached by the same motion that toggles the
+    /// list. That argument had two outcomes to keep apart and now has three —
+    /// off, gone, and trusted — so they get three shapes at three positions.
+    ///
+    /// It never borrows `.destructive-action`. Red on this page means the one
+    /// control that destroys something, and making a grant look like a deletion
+    /// is exactly the confusion being designed against.
+    ///
+    /// [`reconciling`]: Self::reconciling
+    fn trust_control(self: &Rc<Self>, filter: &Filter, switch: &adw::SwitchRow) -> Trust {
+        let caveat = gtk::Image::from_icon_name("dialog-warning-symbolic");
+        caveat.set_visible(false);
+        switch.add_prefix(&caveat);
+
+        let button = gtk::Button::new();
+        button.set_valign(gtk::Align::Center);
+        button.add_css_class("flat");
+        // Added before the removal button by construction — `row` runs before
+        // `custom_group` adds that one — so the row reads switch, trust, trash,
+        // with the destructive control last.
+        switch.add_suffix(&button);
+
+        let id = filter.id;
+        let this = Rc::downgrade(self);
+        button.connect_clicked(move |_| {
+            let Some(this) = this.upgrade() else {
+                return;
+            };
+            this.toggle_trust(id);
+        });
+
+        Trust { button, caveat }
+    }
+
+    /// Show one row's trust, in all five places it is said at once — the glyph,
+    /// its colour, the tooltip, the accessible label and the subtitle.
+    ///
+    /// Read from the row's recorded filter — the last state the *database*
+    /// confirmed — never from what a click asked for.
+    ///
+    /// **It renders a known state and has no way to render an unknown one**,
+    /// which is why [`settle_trust`] does not call it when the verifying read
+    /// failed: the record would then be a pre-click value, and painting it
+    /// would be this page asserting the safe-looking answer about the one
+    /// setting where that is the dangerous direction to be wrong in.
+    ///
+    /// [`settle_trust`]: Self::settle_trust
+    ///
+    /// The accessible label is repainted with the icon deliberately: a stale
+    /// *"Trust X"* on a list that is already trusted is a lie told to precisely
+    /// the users who cannot see the glyph that would have corrected it.
+    fn paint_trust(&self, filter_id: i64) {
+        let rows = self.rows.borrow();
+        let Some(row) = rows.get(&filter_id) else {
+            return;
+        };
+        let Some(trust) = &row.trust else {
+            return;
+        };
+
+        let filter = row.filter.borrow();
+        let trusted = filter.trusted;
+
+        trust.button.set_icon_name(if trusted {
+            "changes-allow-symbolic"
+        } else {
+            "changes-prevent-symbolic"
+        });
+        // `.warning` is a plain colour class — measured against the installed
+        // stylesheet, it sets `color` and neither `button` nor `button.flat`
+        // sets one, so the symbolic follows it. Amber rather than red, which
+        // belongs to the removal button.
+        if trusted {
+            trust.button.add_css_class("warning");
+        } else {
+            trust.button.remove_css_class("warning");
+        }
+        trust.button.set_tooltip_text(Some(if trusted {
+            "Withdraw trust from this list"
+        } else {
+            "Trust this list"
+        }));
+        trust.button.update_property(&[gtk::accessible::Property::Label(&if trusted {
+            format!("Withdraw trust from {}", filter.display_name())
+        } else {
+            format!("Trust {}", filter.display_name())
+        })]);
+        trust.caveat.set_visible(trusted);
+        row.switch.set_subtitle(if trusted {
+            TRUSTED_SUBTITLE
+        } else {
+            &filter.description
+        });
     }
 
     /// Send one switch flip to the CLI, then confirm it against the database.
@@ -892,8 +1048,16 @@ impl FiltersPage {
                 let mut filter = row.filter.borrow_mut();
                 filter.enabled = state.enabled;
                 filter.installed = state.installed;
+                // Not written by anything a switch flip does — but the read
+                // that verifies the flip carries it, and dropping it here would
+                // let the row's record of its own trust go stale every time the
+                // list was switched. A second window is one invocation away.
+                filter.trusted = state.trusted;
             }
             self.set_active(&row.switch, state.enabled);
+            // Cheap, and it is what keeps a trust changed elsewhere from
+            // surviving on screen until the page is rebuilt.
+            self.paint_trust(filter_id);
 
             // The switch is where the user asked it to be; whether the CLI was
             // chatty about it is not interesting.
@@ -905,6 +1069,243 @@ impl FiltersPage {
         let message = refused.unwrap_or_else(|| {
             let verb = if requested { "enable" } else { "disable" };
             format!("Could not {verb} {name}")
+        });
+        self.toasts.add_toast(toast(&message));
+    }
+
+    /// Turn one list's trust the other way, asking first if that way is *on*.
+    ///
+    /// The two directions are not symmetrical and the control does not pretend
+    /// they are. Granting trust lets a third party run script in the user's
+    /// pages and is confirmed; withdrawing it takes that away and is issued
+    /// straight away, because a dialog in front of the safe direction is a
+    /// dialog the user learns to click through before reaching the one that
+    /// matters.
+    ///
+    /// The target is `!trusted` read from the row's record — the database's
+    /// last word — rather than from anything the widget shows, for the same
+    /// reason `toggle` reads `action_for` from there.
+    fn toggle_trust(self: &Rc<Self>, filter_id: i64) {
+        let filter = {
+            let rows = self.rows.borrow();
+            let Some(row) = rows.get(&filter_id) else {
+                return;
+            };
+            // Insensitive from the click rather than from the answer, and the
+            // whole row rather than the button: it greys the switch and the
+            // removal button with it, so nothing else can be started against a
+            // filter whose trust is already in flight, and a second click
+            // cannot open a second dialog.
+            row.switch.set_sensitive(false);
+            // Bound rather than returned directly, so the `Ref` is dropped
+            // inside the block and not after `rows` at the end of it.
+            let filter = row.filter.borrow().clone();
+            filter
+        };
+
+        let name = filter.display_name().to_owned();
+        if filter.trusted {
+            self.apply_trust(filter_id, false, name);
+            return;
+        }
+
+        let this = self.clone();
+        glib::spawn_future_local(async move {
+            if this.confirm_trust(&filter).await {
+                this.apply_trust(filter_id, true, name);
+            } else if let Some(row) = this.rows.borrow().get(&filter_id) {
+                // Nothing was sent and nothing was painted, so the row is the
+                // only thing there is to put back.
+                row.switch.set_sensitive(true);
+            }
+        });
+    }
+
+    /// Ask before letting a list run script in the pages the user visits.
+    ///
+    /// Shaped like [`confirm_removal`], and it names the URL for the same
+    /// reason: a list installed without a `! Title:` header has no name of its
+    /// own, and the URL is what the grant actually attaches to.
+    ///
+    /// Three sentences, one fact each — what the list may do, that the grant
+    /// outlives whatever rules were inspected before giving it, and **when it
+    /// takes effect**. It claims nothing beyond what those rule types are: this
+    /// application's warnings are measurements, and speculating about what a
+    /// hostile list would *do* with the privilege would be the one dialog here
+    /// that argues rather than reports.
+    ///
+    /// The third sentence used to read *"can be withdrawn at any time"*, which
+    /// was written before anyone had measured it and is **false in the
+    /// direction that matters**. Measured 6 August 2026 (contract §6): the
+    /// proxy reads the flag when it starts and not again, so a withdrawal
+    /// leaves the list's scriptlets running until the next restart. A dialog
+    /// that reassures the user about taking a privilege back must not describe
+    /// a control that does not act when they use it.
+    ///
+    /// `Destructive` rather than `Suggested`, though nothing is destroyed.
+    /// `Suggested` is Adwaita's *recommended answer*, and this application does
+    /// not recommend granting a third party script execution; the plain default
+    /// would make the dangerous answer look exactly like Cancel. That trust can
+    /// be withdrawn later does not make it harmless — withdrawing it does not
+    /// unrun the scriptlets that ran meanwhile.
+    ///
+    /// [`confirm_removal`]: Self::confirm_removal
+    async fn confirm_trust(&self, filter: &Filter) -> bool {
+        let dialog = adw::AlertDialog::new(
+            Some("Trust this filter list?"),
+            Some(&format!(
+                "{} will be allowed to run scriptlets in the pages you visit — script \
+                 chosen by whoever writes the list, executing alongside the page's \
+                 own.\n\nTrust attaches to the subscription, not to the rules it holds \
+                 today: {} is re-fetched as it updates, and what arrives next is \
+                 trusted too.\n\nAdGuard reads this when the proxy starts. Granting it \
+                 takes effect at the next restart — and so does taking it back, which \
+                 means trust cannot be withdrawn from a list while the proxy is \
+                 running.",
+                filter.display_name(),
+                filter.download_url,
+            )),
+        );
+        // Not markup: a list's title is AdGuard's text or the user's and both
+        // can carry `&`, a URL carries one in any query string, and the body
+        // itself carries `$$`. The same rule every row, toast and dialog on
+        // this page follows.
+        dialog.set_body_use_markup(false);
+        dialog.add_response("cancel", "Cancel");
+        dialog.add_response("trust", "Trust");
+        dialog.set_response_appearance("trust", adw::ResponseAppearance::Destructive);
+        // Cancel is the default and the escape route: dismissing a dialog must
+        // never be capable of granting a privilege.
+        dialog.set_default_response(Some("cancel"));
+        dialog.set_close_response("cancel");
+
+        dialog.choose_future(Some(&self.bin)).await == "trust"
+    }
+
+    /// act -> re-read -> reconcile, for trust.
+    ///
+    /// The re-read is issued whatever the CLI returned, including after a
+    /// timeout — that error means only that we stopped waiting, not that
+    /// nothing happened — and including after a refusal, since a refusal is not
+    /// disproof any more than a confirmation is proof. `set-trusted` prints the
+    /// same success line for a no-op (contract §6), so the database is the
+    /// whole of the verification.
+    fn apply_trust(self: &Rc<Self>, filter_id: i64, trusted: bool, name: String) {
+        let cli = self.cli.clone();
+        let set = self.set;
+        let this = self.clone();
+        worker::run(
+            move || {
+                let refused = cli
+                    .filters_set_trusted(filter_id, trusted)
+                    .err()
+                    .map(|err| err.to_string());
+                let state = Catalogue::open_set(set)
+                    .ok()
+                    .and_then(|catalogue| catalogue.state(filter_id).ok().flatten());
+                // Whether the change has actually reached anything. The proxy
+                // reads this flag at start and not again (contract §6), so a
+                // change made while it is up is written and not yet in force —
+                // and nothing else in the app would ever say so, because unlike
+                // `config set` the CLI does not report it. Asked here rather
+                // than on the main thread, and only after the write, so it
+                // cannot contend with it (contract §3).
+                let running = cli.status().map(|status| status.running).unwrap_or(false);
+                (refused, state, running)
+            },
+            move |(refused, state, running)| {
+                this.settle_trust(filter_id, trusted, &name, refused, state, running)
+            },
+        );
+    }
+
+    /// Reconcile one row's trust against what the database now says.
+    fn settle_trust(
+        self: &Rc<Self>,
+        filter_id: i64,
+        requested: bool,
+        name: &str,
+        refused: Option<String>,
+        state: Option<FilterState>,
+        running: bool,
+    ) {
+        {
+            let rows = self.rows.borrow();
+            let Some(row) = rows.get(&filter_id) else {
+                return;
+            };
+            row.switch.set_sensitive(true);
+
+            if let Some(state) = state {
+                {
+                    let mut filter = row.filter.borrow_mut();
+                    filter.enabled = state.enabled;
+                    filter.installed = state.installed;
+                    filter.trusted = state.trusted;
+                }
+                // The re-read carries all three flags, so it can have caught a
+                // switch that moved for a reason of its own — this page is not
+                // the only writer, and `auto_enable_language_filters` does
+                // exactly that. Through `set_active`, or the reconcile would be
+                // replayed to the CLI as if the user had clicked it.
+                self.set_active(&row.switch, state.enabled);
+            }
+        }
+
+        // The catalogue could not be read, so nothing here knows whether the
+        // change took — and **this is the one control whose two answers are not
+        // equally safe to guess at**. Repainting from the row's record would put
+        // the safe-looking one on screen: in the granting direction that record
+        // still reads untrusted, and an untrusted row is deliberately unmarked,
+        // so a list AdGuard may now be treating as trusted would render exactly
+        // like one that never was — the "off is not unknown" rule
+        // (`architecture.md` §5) failing in its dangerous direction.
+        //
+        // There is no per-row way to say *unknown* here, so the page says it
+        // instead, exactly as `settle_removal` does for the same unreadable
+        // catalogue: reload, which re-reads — and if the read fails again the
+        // page shows *Filters unavailable*, which is the honest answer and the
+        // one no single row can render.
+        let Some(state) = state else {
+            self.toasts.add_toast(toast(&refused.unwrap_or_else(|| {
+                format!("Could not re-read the catalogue to confirm whether {name} is trusted")
+            })));
+            self.reload();
+            return;
+        };
+
+        self.paint_trust(filter_id);
+
+        if state.trusted == requested {
+            // The control is where the user asked it to be, and the row already
+            // says so wherever it says anything — so the only thing left worth
+            // saying is the thing the row *cannot* show: that the flag is
+            // written and not yet in force. The proxy reads it at start and not
+            // again (contract §6, measured both ways), so while it is up this
+            // is the same class of fact `config set` reports for itself on the
+            // Protection and Advanced pages, and it gets their sentence.
+            //
+            // The withdrawing direction is why this is not optional. A user who
+            // takes trust back from a list is doing the one thing here that is
+            // urgent, and until the proxy restarts that list's scriptlets are
+            // still running in their pages.
+            if running {
+                self.toasts
+                    .add_toast(toast("Restart the proxy to apply this change"));
+            }
+            return;
+        }
+
+        // The CLI's own wording first, wherever there is one: `Filter not
+        // found`, from a list another window has already removed, says more
+        // than we would, and a lapsed licence explains itself better than a
+        // sentence of ours could.
+        let message = refused.unwrap_or_else(|| {
+            if requested {
+                format!("Could not trust {name}")
+            } else {
+                format!("{name} is still trusted — AdGuard did not clear it")
+            }
         });
         self.toasts.add_toast(toast(&message));
     }

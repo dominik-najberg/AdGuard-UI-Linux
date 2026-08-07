@@ -741,6 +741,90 @@ The absent-id refusal is the one a UI will actually hit: two windows open, or a 
 
 **`proxy.yaml` is not touched.** Its `filters` list still reads `['flm://', 'user.txt']` after four installs; custom lists live only in the database, behind that `flm://` entry. So no `config list-add` is involved and nothing here needs the write path of [§5](#5-configuration-writes).
 
+### Marking a custom filter trusted
+
+`filters set-trusted` is the after-the-fact half of `install --trusted`: it lets a list already subscribed to use privileged rule types — scriptlets and `$$`/HTML filtering — which is to say it lets that list run script in the pages the user visits. Measured on v1.4.13, 6 August 2026, in a sandbox with a lent licence, for the UI control in [issue #2](https://github.com/dominik-najberg/AdGuard-UI-Linux/issues/2).
+
+```
+Usage: adguard-cli filters set-trusted [OPTIONS] <filter-id> <filter-trusted>
+  <filter-id>      TEXT REQUIRED
+  <filter-trusted> BOOLEAN REQUIRED
+```
+
+| Invocation | Exit | Stream | Output | Effect |
+| --- | --- | --- | --- | --- |
+| `set-trusted -10001 true` on a custom row | 0 | stdout | `Filter with ID: -10001 successfully updated trust` | `is_trusted = 1` |
+| the same again | 0 | stdout | the same line | nothing — the message is not evidence |
+| `set-trusted -10001 false` | 0 | stdout | the same line | `is_trusted = 0` |
+| `1` / `0` in place of `true` / `false` | 0 | stdout | the same line | the same |
+| on a custom row that is switched **off** | 0 | stdout | the same line | `is_trusted` moves, `is_enabled` stays 0 |
+| `set-trusted 2 true` — a **catalogue** filter | 0 | stdout | `Failed to update trust filter with ID: 2: Filter not custom` | nothing |
+| `set-trusted -99999 true` — never existed | 0 | stdout | `Failed to update trust filter with ID: -99999: Filter not found` | nothing |
+| **`set-trusted -2147483648 false` — the user-rules sentinel** | 0 | stdout | the **success** line | **`is_trusted` really moves** |
+| a value that is not a boolean | **1** | **stderr** | `Could not convert: <filter-trusted> = bogus` | nothing |
+| the value omitted | **1** | **stderr** | `<filter-trusted> is required` | nothing |
+| unlicensed | **1** | **stderr** | the usual complaint and usage dump | nothing |
+| `dns filters set-trusted …` | **1** | **stderr** | `A subcommand is required` | **the subcommand does not exist** |
+
+Six things follow, and the fourth is the trap.
+
+**The confirmation is a shape of its own, and the house matcher is blind to it.** Every other filter command answers `Filter [<something>] <verb>` — the form [*Writing filter state*](#writing-filter-state) defines and `cli::confirms` matches. This one answers `Filter with ID: <id> successfully updated trust`. `Filter with ID:` is not `Filter [`, so `confirms` returns **false for a command that worked**, and a wrapper reusing it would report every successful change as a refusal. `cli::confirms_trust` exists for this one command and is anchored at both ends, since the refusals carry the same id in the same place and differ only in how the line opens and closes.
+
+**Trust is orthogonal to the switch, in both directions.** A switched-off list can be trusted; trusting one does not switch it on; and `disable` then `enable` leaves the flag where it was. So a row's `is_trusted` cannot be inferred from anything the switch did, and `Catalogue::state` re-reads all three flags on every reconcile rather than patching the one that was written.
+
+**AdGuard enforces "custom only" itself, for the case it can see.** `Filter not custom` is the CLI refusing a catalogue filter, which is the same rule `Filter::supports_trust` applies before offering a control. That is a rare piece of luck in this contract — two of the three cases need no guard of ours.
+
+**The third case has no guard at all, and it writes.** `filter_id = -2147483648` is the user-rules pseudo-filter, and `set-trusted` treats it as custom: it ships `is_trusted = 1`, and setting it to `false` **moved the flag**, reporting the ordinary success line while doing it. What that turns off is the scriptlet and HTML rules in the user's own `user.txt`. Nothing downstream can catch it — not the confirmation, and not the re-read, which would faithfully report the flag that had just been cleared. So `Cli::filters_set_trusted` refuses this id **before spawning**, as `Cli::configure` refuses an existing `proxy.yaml`, and for the same stated reason: a guard beside a call site is one somebody can add a second call site around. `filters_sandbox::trust_is_refused_for_everything_that_is_not_a_custom_list` asserts the sentinel's flag is unmoved either side, so the guard leaking is a failing test rather than a silent one.
+
+**The DNS set cannot do this at all.** Not "should not" — `adguard-cli dns filters` has no `set-trusted` in its help and asking for it exits 1 at the argument parser. DNS lists are hostname-only and the privileged rule types do not reach them, which is why `Cli::filters_set_trusted` takes no `FilterSet` argument to be wrong about.
+
+**And it is licence-gated — like every other filter command, which is not what this section first said.** The claim here was originally *"licence-gated, where the switch commands are not"*, reasoned from the fact that `install` is gated and never measured. It is wrong. Measured 6 August 2026 in a sandbox whose `adguard.conf` was moved aside: `add`, `enable`, `disable`, `remove`, `set-title` and `set-trusted` **all** exit **1** with `You need to activate an AdGuard license to use this command` on stderr, and none of them writes. So there is no state where a list can be switched but not trusted, and no asymmetry for the UI to handle — it arrives as `Error::Unlicensed`, which the wrapper maps generically, and the page shows the CLI's own sentence.
+
+That correction is [§3](#exit-codes-are-only-half-trustworthy)'s lesson landing in a new place, and it is worth naming because of *where* the wrong version was: not in a table of measurements, but in a sentence of prose next to one. The table beside it was right. **A measured document grows unmeasured claims at its edges**, in the connective sentences that explain what the measurements mean, and those are exactly the sentences nobody re-measures.
+
+### What the trust flag actually gates, and when it takes effect
+
+Measured 6 August 2026, authorised, in a scratch `$XDG_DATA_HOME` in **manual** proxy mode on port 3199, against `http://example.com/` over plain HTTP so no certificate is involved. Four rounds; the first two were wrong and are the reason the rest exist.
+
+**Two questions, and the answers are not the ones the section above assumed.**
+
+The probe is the difference between rule classes. A list carrying an element-hiding rule (`##`, not privileged) and a privileged rule is installed, and the page is fetched through the proxy in each trust state, live and after a restart. `##` is the control: it must fire in every state, or the probe is broken rather than the flag.
+
+| round | probe rule | list source | result |
+| --- | --- | --- | --- |
+| 2 | `example.com$$h1` | `file://` | fired in **all four** states |
+| 3 | `example.com$$h1` | `http://` | fired in **all four** states |
+| 4 | `example.com#%#//scriptlet(…)` | `http://` | gated — see below |
+
+**1. `$$` HTML-filtering rules are not gated by `is_trusted` at all.** Sixteen fetches across two rounds: the `<h1>` was stripped from the response with `is_trusted = 0`, including from a proxy started fresh with the flag at 0, and from a list fetched over `http://` as well as one installed from a local file. The origin was re-fetched every round, so this is against what `example.com` was serving at the time and not a remembered copy. This contradicts what AdGuard's own documentation implies, and it is what the measurement says on v1.4.13.
+
+**2. Scriptlets *are* gated, and the flag is read only at start.** With the `##` control present in every row — so the probe is known good — the scriptlet appears in the injected content-script payload only in the states reached by a restart:
+
+| trust state | proxy | scriptlet in payload | payload |
+| --- | --- | --- | --- |
+| untrusted | started with the flag at 0 | absent | 384 518 B |
+| **trusted** | **left running** | **absent** | 384 518 B |
+| trusted | restarted | **present** | 386 915 B |
+| **untrusted** | **left running** | **present** | 386 915 B |
+| untrusted | restarted | absent | 384 518 B |
+
+The payload is byte-identical within each state, which is the shape of a filter set compiled once at start. Waiting did not help: 5 s, 15 s and 30 s after the change all read the same.
+
+**So the flag is read when the proxy starts and not again, in both directions — and the withdrawing direction is the one that matters.** Granting trust to a running proxy is inert until it restarts, which is merely surprising. **Taking trust back from a running proxy is also inert**, which means a user who has just decided a list should no longer run script in their pages still has that list's scriptlets running in them. Nothing in the CLI's output says so: unlike `config set`, which reports `restart_required` for itself, `set-trusted` prints its ordinary success line and nothing else.
+
+That is why the Filters page raises *"Restart the proxy to apply this change"* — the same sentence the Protection and Advanced pages use for the same class of fact — and why the confirmation dialog says when the grant takes effect instead of promising it can be withdrawn at any time, which is what it said before this was measured.
+
+**A trap that cost two rounds, and it is not about AdGuard.** A sandbox `$XDG_DATA_HOME` more than about 70 characters deep **cannot start a proxy at all**: `agcli.socket` lands past `sockaddr_un`'s 107-byte `sun_path` limit and the daemon fails with
+
+```text
+CONTROL_SOCKET create_sockaddr_un: Socket name length 144 exceeds maximum allowed length 107. The name will be truncated
+SERVICE_FACADE start_internal: Failed to init control socket: Create listener error
+```
+
+surfacing as the generic `Failed to start proxy server: An unknown error has occurred`, which is the same sentence [§11](#11-a-proxy-the-cli-has-lost-track-of) documents for a wedged process and has nothing to do with one. `filters_sandbox.rs` is unaffected — it builds its root under `std::env::temp_dir()` — but any harness that puts a sandbox under a long path will meet this, and the error names neither the path nor the length as the cause.
+
+**And a probe needs its control checked first.** Round four's initial run reported the scriptlet absent in every state, which reads exactly like a flag that gates nothing — but the `##` control was absent too, and that is what gave it away: a stray `python3 -m http.server` from the previous round still held the port, so the list under test was the *previous* round's. The finding would have been the opposite of the truth. The control is what caught it, and it caught it in the first row.
+
 ### `auto_enable_language_filters` keys on *installation*, so a `disable` survives it and a `remove` does not
 
 The question `handoff.md` §3 item 12 opened and could not answer from the database: **does the automatic add respect a filter the user turned off?** It cannot be read off the schema, because there is no column in which *"off because I chose off"* could be written — `filter` has `is_user_title` and `is_user_description` and nothing equivalent for `is_enabled` or `is_installed` (confirmed against the schema, 19 columns).

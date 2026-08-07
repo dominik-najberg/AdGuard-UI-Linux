@@ -75,6 +75,10 @@ While the tray is present, closing the window only hides it and *Quit* in the tr
 
 ![The Filters page](docs/screenshots/filters.png)
 
+A custom list can also be marked **trusted**, which is a padlock between its switch and its trash — on custom HTTP rows and nowhere else. Trusting a list lets it use privileged rule types, which is to say it lets whoever writes that list run script in the pages you visit, so the grant is confirmed by a dialog naming the list and withdrawing it is not: a dialog in front of the safe direction is one you learn to click through before reaching the one that matters. A trusted row says so without hovering, in a warning icon and a sentence under the name. **The change is written at once and in force at the next restart** — measured for this feature, AdGuard reads the flag when the proxy starts and not again, in both directions, so a list you have just distrusted goes on running its scriptlets until you restart. The row says that too.
+
+> The frame above has no padlock in it, and that is the frame being accurate rather than out of date: its *Custom filters* group holds only the URL entry row, because the machine these screenshots came from subscribes to no custom lists. The control appears on custom rows and there are none to appear on. Installing one to photograph it would put a third party's list on that machine, so the frame is left as it is until a release is cut from a machine that has one.
+
 **DNS** — the DNS filter catalogue, your own DNS rules, the three server settings, the local DNS proxy's listen port as disabled / automatic / fixed, and Encrypted Client Hello blocking, which is last because AdGuard's own comment says the common case is to leave it alone.
 
 ![The DNS page](docs/screenshots/dns.png)

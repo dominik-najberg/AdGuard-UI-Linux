@@ -11,6 +11,50 @@ This file is the one changelog.
 
 ---
 
+## Unreleased
+
+### Trusted custom filters, as a control on the row
+
+Asked for from the outside ([#2](https://github.com/dominik-najberg/AdGuard-UI-Linux/issues/2)): a
+custom filter list's *trusted* state was visible in the catalogue and changeable
+from a terminal, and nowhere in this application. Trusting a list lets it run
+scriptlets in the pages you visit — script chosen by whoever writes the list —
+so it is the one setting here that hands a third party something.
+
+- **A padlock between the switch and the trash**, on custom HTTP rows and
+  nowhere else. The row already had to keep *off* and *gone* apart, which is why
+  removal is a suffix button rather than a gesture; trusted is a third outcome
+  and gets a third shape. It is a plain button, not a toggle: a toggle's state
+  moves under your finger, so the row would read *trusted* for the length of a
+  dialog you might then cancel.
+- **The trusted state is legible without hovering** — a warning icon in the
+  margin and a sentence under the name saying what the list may do. That
+  sentence displaces the list's own description for as long as trust is granted,
+  which is how the Protection page already resolves the same competition.
+  Untrusted rows are unchanged and say nothing: that is the default, and forty
+  rows announcing it would bury the one row that is not.
+- **Granting trust is confirmed and withdrawing it is not.** A dialog in front
+  of the safe direction is one you learn to click through before reaching the
+  one that matters. Cancel is the default and the escape route.
+- **DNS lists and catalogue filters do not get the control**, for three
+  different measured reasons — `adguard-cli dns filters` has no `set-trusted`
+  subcommand at all, AdGuard refuses a catalogue filter itself, and the
+  user-rules row is a trap: the CLI *accepts* it and really writes, which would
+  silently stop the scriptlet and HTML rules in your own `user.txt` from being
+  applied. That last one is refused before the command is ever run.
+
+**A change takes effect at the next restart, and the dialog says so.** Measured
+for this release: AdGuard reads the flag when the proxy starts and not again —
+in both directions. Granting trust to a running proxy is inert until it
+restarts, and **so is taking it back**, which means a list you have just
+distrusted keeps running its scriptlets until then. The CLI reports none of
+this, so a successful change raises *"Restart the proxy to apply this change"* —
+the sentence the Protection and Advanced pages already use — while the proxy is
+up. An earlier draft of the dialog promised trust "can be withdrawn at any
+time"; it was written before anyone measured it, and it was wrong.
+
+---
+
 ## 1.2.0 — 4 August 2026
 
 ### Start at login, as a switch
