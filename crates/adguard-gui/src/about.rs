@@ -50,7 +50,7 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use adguard_core::{Cli, UpdateReport, Verdict};
+use adguard_core::{Catalogue, Cli, FilterSet, UpdateReport, Verdict};
 use adw::prelude::*;
 use gtk::glib;
 use gtk4 as gtk;
@@ -80,6 +80,14 @@ const WHY_NO_BUTTON: &str =
     "Updating AdGuard replaces its privileged helper, and this application never performs \
      privileged operations — so this one is yours to run.";
 
+/// Beside the "last changed" figure, and load-bearing rather than decorative:
+/// the column behind that figure moves only when data arrives, so a long gap is
+/// the *absence of upstream revisions* and not the absence of checking.
+const WHAT_A_GAP_MEANS: &str =
+    "AdGuard refreshes on its own every few hours. This is when something last \
+     changed, so a long gap means the lists have not been revised — not that \
+     nothing has looked.";
+
 /// The command that does it. Named, never invoked (contract §14).
 const UPDATE_COMMAND: &str = "adguard-cli update";
 
@@ -94,6 +102,16 @@ pub struct AboutPage {
     /// The CLI's own version banner, read off the main thread like everything
     /// else it says.
     cli_version: adw::ActionRow,
+
+    /// When new filter data last arrived, from the catalogues themselves.
+    ///
+    /// The answer to the question a check-on-launch would have been built to
+    /// answer, at the cost of two SQLite reads instead of a network fetch — and
+    /// a better answer, because a silent launch check tells the user nothing by
+    /// construction. See [`freshness`] for why it says *changed*.
+    ///
+    /// [`freshness`]: Self::read_freshness
+    freshness: gtk::Label,
 
     check: gtk::Button,
     /// A check is in flight. The button is insensitive for the same span, and
@@ -141,6 +159,25 @@ impl AboutPage {
             .title("Updates")
             .description(WHAT_IT_DOES)
             .build();
+
+        // Above the button, because it is the fact you read in order to decide
+        // whether to press it.
+        //
+        // The subtitle is not filler. This column moves only when data actually
+        // arrives (contract §14), so a gap of days means *nothing has changed
+        // upstream* — and without the sentence saying so, "8 days ago" reads as
+        // an install that has stopped working and sends the user to press a
+        // button that will report `Up to date`.
+        let freshness_row = row("Filter data last changed", WHAT_A_GAP_MEANS);
+        freshness_row.set_subtitle_lines(3);
+        let freshness = gtk::Label::builder()
+            .label(PLACEHOLDER)
+            .valign(gtk::Align::Center)
+            .build();
+        freshness.add_css_class("dim-label");
+        freshness_row.add_suffix(&freshness);
+        updates.add(&freshness_row);
+
         let action = adw::ActionRow::builder()
             .title("Filters and protection data")
             .subtitle("Filters, DNS filters, userscripts, Safe Browsing, certificate revocation")
@@ -207,6 +244,7 @@ impl AboutPage {
             cli,
             toasts,
             cli_version,
+            freshness,
             check: check.clone(),
             busy: Cell::new(false),
             results,
@@ -222,6 +260,7 @@ impl AboutPage {
         });
 
         this.read_version();
+        this.read_freshness();
         this
     }
 
@@ -240,6 +279,7 @@ impl AboutPage {
     /// that is a no-op everywhere else.
     pub fn reload(self: &Rc<Self>) {
         self.read_version();
+        self.read_freshness();
     }
 
     /// Called after a run, with what AdGuard said.
@@ -257,6 +297,42 @@ impl AboutPage {
                 // The row says what it could not do rather than sitting on a
                 // placeholder that reads as "not installed".
                 Err(err) => this.cli_version.set_subtitle(&err.to_string()),
+            },
+        );
+    }
+
+    /// Read when new filter data last arrived, from the two catalogues.
+    ///
+    /// Two SQLite reads and no network — which is the whole argument for this
+    /// row existing instead of a check on launch. A launch check would spend a
+    /// download to learn something AdGuard's own daemon learned within the last
+    /// few hours, and, being silent, would tell the user none of it.
+    ///
+    /// The newer of the two sets. They are separate catalogues on separate
+    /// schedules, but the question this answers — *is AdGuard still getting
+    /// data?* — is about the install rather than about either database, and two
+    /// rows would ask the user to do the comparison themselves.
+    fn read_freshness(self: &Rc<Self>) {
+        let this = self.clone();
+        worker::run(
+            || {
+                [FilterSet::Http, FilterSet::Dns]
+                    .into_iter()
+                    // A catalogue that will not open is not an error here: this
+                    // row is a nicety beside a button that works without it, and
+                    // the Filters page already reports an unreadable database.
+                    .filter_map(|set| Catalogue::open_set(set).ok())
+                    .filter_map(|catalogue| catalogue.last_downloaded().ok().flatten())
+                    .max()
+            },
+            move |newest: Option<i64>| {
+                let now = glib::DateTime::now_utc().map(|now| now.to_unix()).unwrap_or(0);
+                this.freshness.set_label(&match newest {
+                    Some(when) => ago(now - when),
+                    // No installed list carries one. Not "never" — an empty or
+                    // unreadable catalogue looks the same from here.
+                    None => PLACEHOLDER.to_owned(),
+                });
             },
         );
     }
@@ -363,6 +439,12 @@ impl AboutPage {
             "Update finished — some parts did not update"
         }));
 
+        // The run may have brought data down, so the figure above the button is
+        // now stale — and it is read from the catalogues rather than from the
+        // report, because `1 filter(s) updated` says something happened and the
+        // database says when.
+        self.read_freshness();
+
         if let Some(checked) = self.checked.borrow().as_ref() {
             checked(report);
         }
@@ -416,6 +498,37 @@ fn short_version(banner: &str) -> &str {
         .map_or(banner, |rest| rest.strip_prefix('v').unwrap_or(rest))
 }
 
+/// A gap in seconds, as a phrase a person would use.
+///
+/// Coarse on purpose. The figure answers "is AdGuard still getting data", and
+/// that question is settled by *minutes / hours / days* — a precise
+/// "3 hours 14 minutes" would imply the number matters, and it does not.
+///
+/// A negative gap is a clock that has moved backwards, or a timestamp written
+/// by a machine whose clock disagrees with this one. It reads as `just now`
+/// rather than as a time in the future, which is the harmless direction: the
+/// alternative is a row announcing that filters will be updated tomorrow.
+fn ago(seconds: i64) -> String {
+    const MINUTE: i64 = 60;
+    const HOUR: i64 = 60 * MINUTE;
+    const DAY: i64 = 24 * HOUR;
+
+    fn plural(count: i64, unit: &str) -> String {
+        if count == 1 {
+            format!("1 {unit} ago")
+        } else {
+            format!("{count} {unit}s ago")
+        }
+    }
+
+    match seconds {
+        s if s < MINUTE => "just now".to_owned(),
+        s if s < HOUR => plural(s / MINUTE, "minute"),
+        s if s < DAY => plural(s / HOUR, "hour"),
+        s => plural(s / DAY, "day"),
+    }
+}
+
 /// The local time, for "last updated". Falls back to nothing readable rather
 /// than to a wrong time.
 fn now() -> String {
@@ -457,6 +570,38 @@ fn link_row(title: &str, uri: &'static str) -> adw::ActionRow {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_gap_reads_as_a_phrase() {
+        assert_eq!(ago(0), "just now");
+        assert_eq!(ago(59), "just now");
+        assert_eq!(ago(60), "1 minute ago");
+        assert_eq!(ago(3_599), "59 minutes ago");
+        assert_eq!(ago(3_600), "1 hour ago");
+        assert_eq!(ago(86_399), "23 hours ago");
+        assert_eq!(ago(86_400), "1 day ago");
+        assert_eq!(ago(8 * 86_400), "8 days ago");
+    }
+
+    /// A clock that moved backwards, or a timestamp from a machine that
+    /// disagrees with this one. The row must not announce a future update.
+    #[test]
+    fn a_negative_gap_is_not_a_time_in_the_future() {
+        assert_eq!(ago(-1), "just now");
+        assert_eq!(ago(-86_400), "just now");
+    }
+
+    /// The figure says when data last *changed*, and the column behind it does
+    /// not move on an up-to-date run (contract §14) — so the sentence beside it
+    /// has to stop "8 days ago" from reading as an install that has stopped
+    /// checking. Without this the row would send users to a button that will
+    /// answer `Up to date`.
+    #[test]
+    fn the_freshness_row_says_a_gap_is_not_a_failure_to_check() {
+        let said = WHAT_A_GAP_MEANS.to_lowercase();
+        assert!(said.contains("on its own"), "it has to say something else is checking");
+        assert!(said.contains("not that nothing has looked"), "and deny the wrong reading");
+    }
 
     #[test]
     fn the_cli_banner_is_trimmed_to_a_version() {

@@ -101,6 +101,8 @@ Three groups at the foot of that page do more than set a key:
 
 ![The About page](docs/screenshots/about.png)
 
+Above the button, a row says when new filter data last arrived. That is deliberately *changed* and not *checked*: AdGuard's daemon refreshes on its own every few hours — measured, on days when nothing here ran a command — and the timestamp behind the row only moves when something actually came down. So a long gap means the lists have not been revised, not that nothing has looked, and the row says as much rather than leaving it to be misread as staleness. It costs two local database reads and no network, which is why there is no check-on-launch option: a silent check at startup would spend a download to learn what the daemon already knew, and by being silent would tell you none of it.
+
 It reports each component in AdGuard's own words rather than summarising them. That is a measurement rather than a preference: Safe Browsing and certificate revocation answer *Updated* on every single run of a working install, so a line reading "2 of 6 updated" would say the same thing forever while appearing to describe your machine. A component that fails says so and invites another go — failures here are common and have cleared on the next attempt every time they were measured.
 
 **An available application update is reported and never installed.** Updating AdGuard replaces its privileged helper, and this application performs no privileged operation of its own — so it names `adguard-cli update` and leaves running it to you, exactly as it does for AdGuard's root helper and its certificate.

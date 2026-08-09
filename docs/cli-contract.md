@@ -714,7 +714,7 @@ An earlier revision of this section said content was *never* validated, generali
 
 **Deduplication is by URL string, not by content.** The same list installed once as `file://…` and once as `http://…` yields two enabled rows. Conversely the *second* install of one URL is **refused**, which is the opposite of `config list-add`'s silent duplicate ([§5](#list-writes-list-add-and-list-remove)) — so this one command may be issued speculatively.
 
-**The echo says a title the database does not have.** A list with no `! Title:` header is confirmed as `Filter [Title: file:///…/untitled.txt]` while the `title` column is set to the empty string. The localised name in [§6](#do-not-parse-filters-list) then falls back through `COALESCE` to that same empty string — custom filters have no `filter_localisation` rows at all — so the row renders with **no name whatsoever** unless the UI supplies its own fallback. This is the section's own rule landing in a new place: the confirmation is not the effect, even when the confirmation is the friendlier of the two.
+**The echo says a title the database does not have.** A list with no `! Title:` header is confirmed as `Filter [Title: file:///…/untitled.txt]` while the `title` column is set to the empty string. The localised name in [§6](#6-do-not-parse-filters-list) then falls back through `COALESCE` to that same empty string — custom filters have no `filter_localisation` rows at all — so the row renders with **no name whatsoever** unless the UI supplies its own fallback. This is the section's own rule landing in a new place: the confirmation is not the effect, even when the confirmation is the friendlier of the two.
 
 **Custom filters get negative IDs from `-10001` downwards, and they are never reused.** Distinct from the user-rules sentinel `i32::MIN`, and negative here needs no `--` guard either — `filters disable -10001` parses as a positional, exactly as `-2147483648` does. Every custom row has `display_number = 0`, so their order within the group is whatever SQLite returns; a stable list needs a secondary sort of the UI's own. The group itself (`group_id = i32::MIN`, *"Custom filters"*) is real, present in `filter_group` in both databases, and carries `display_number = 0` — so it sorts **above** *Ad blocking*, and an installed custom list appears at the top of the page.
 
@@ -784,7 +784,7 @@ Six things follow, and the fourth is the trap.
 
 **And it is licence-gated — like every other filter command, which is not what this section first said.** The claim here was originally *"licence-gated, where the switch commands are not"*, reasoned from the fact that `install` is gated and never measured. It is wrong. Measured 6 August 2026 in a sandbox whose `adguard.conf` was moved aside: `add`, `enable`, `disable`, `remove`, `set-title` and `set-trusted` **all** exit **1** with `You need to activate an AdGuard license to use this command` on stderr, and none of them writes. So there is no state where a list can be switched but not trusted, and no asymmetry for the UI to handle — it arrives as `Error::Unlicensed`, which the wrapper maps generically, and the page shows the CLI's own sentence.
 
-That correction is [§3](#exit-codes-are-only-half-trustworthy)'s lesson landing in a new place, and it is worth naming because of *where* the wrong version was: not in a table of measurements, but in a sentence of prose next to one. The table beside it was right. **A measured document grows unmeasured claims at its edges**, in the connective sentences that explain what the measurements mean, and those are exactly the sentences nobody re-measures.
+That correction is [§3](#3-exit-codes-are-only-half-trustworthy)'s lesson landing in a new place, and it is worth naming because of *where* the wrong version was: not in a table of measurements, but in a sentence of prose next to one. The table beside it was right. **A measured document grows unmeasured claims at its edges**, in the connective sentences that explain what the measurements mean, and those are exactly the sentences nobody re-measures.
 
 ### What the trust flag actually gates, and when it takes effect
 
@@ -1699,6 +1699,52 @@ Eight timed runs: **1.8 s to 7.3 s**, no outliers beyond that and no run anywher
 The first is process start, not contention; the rest are the ordinary 0.03 s from [§2](#2-invocation-cost-measured). **So the 2 s poll does not need to pause for a content update** — which is the opposite of what the activation path does, and correctly so: `Cli::activate` stands down the poll because it runs for up to 120 s *and* changes licensing state under a page whose buttons the poll re-renders. Neither is true here. This is the second half of [§3](#once-the-directory-is-initialised-a-second-invocation-blocks)'s consequence — the poll is safe, the *affordance* is not — so the button desensitises itself and nothing else is held.
 
 **It does not close §3's open limit, and the first draft of this section claimed it did.** That limit asks whether `status` avoids the config and filter-manager *lock* when a daemon is live. This run cannot answer it: it carried no positive control, so it cannot tell "`status` avoids the lock" from "`check-update` never took one" — and nothing here establishes that `check-update` takes it. The claim was struck within the hour, and it is worth leaving the correction visible, because it is [§6](#marking-a-custom-filter-trusted)'s lesson arriving in the newest section in the file: **the measurement was right and the sentence next to it was not.** What the About page needed was the narrow fact, and the narrow fact is what was measured.
+
+### The daemon updates on its own, and the database records when
+
+Measured 9 August 2026, after the About page was built and before a *check on launch* was considered for it. The question was whether such a check would be buying anything, and it is not: **AdGuard refreshes filters by itself, on a several-hour cadence, with no `adguard-cli` invocation involved.**
+
+`FilterManagerImpl` update activity in `proxy.log`, on days when nothing here was running commands:
+
+```text
+07.08.2026 22:07:16   08.08.2026 01:07:15   08.08.2026 08:07:16
+08.08.2026 14:18:31   08.08.2026 20:18:30   08.08.2026 22:18:31
+09.08.2026 00:18:30   09.08.2026 05:18:31   09.08.2026 08:18:31   09.08.2026 12:18:31
+```
+
+Gaps of two to seven hours, every entry landing on the same second-offset within its run (`:07:15`, then `:18:30` after a daemon restart) — the shape of a timer started with the daemon. `adguard-cli`'s own outbound connections on 7 and 8 August were **10 and 2** in total, so none of this was provoked from here.
+
+**So a check on launch was not built.** It would re-do, at every launch, work done at most a few hours earlier — and under `--background` it would fire at login with no window to report into. What the About page shows instead is the record the daemon leaves behind.
+
+**`filter.last_download_time` moves only when data actually arrives.** Measured across three consecutive runs:
+
+| run | filters verdict | `MAX(last_download_time)` |
+| --- | --- | --- |
+| 1 | `1 filter(s) updated` | 1786287992 — **moved** |
+| 2 | `Up to date` | 1786287992 — unchanged |
+| 3 | `Up to date` | 1786287992 — unchanged |
+
+**This is the trap in the column, and it is the opposite of what its use invites.** A UI reaching for "when was this last updated" wants *checked*, and what the database offers is *changed*. A list nobody has revised in a week reads as a week old while AdGuard has been checking it hourly, so a row presenting it as staleness would send the user to press a button that answers `Up to date`. `Catalogue::last_downloaded` is named for what it measures and the row beside it says so in words.
+
+**The newest, not the oldest, and they are far apart.** On this install the freshest enabled list was minutes old and the stalest eight days, because lists are revised on their own schedules. The oldest would report the least active list's author rather than anything about this machine.
+
+**`last_update_time` is always the earlier of the two**, on every row inspected here — consistent with it being the list's own publication time rather than anything local. That is an inference from five rows and is written here as one; nothing renders it.
+
+### Every invocation logs an app-update check, and it is not one
+
+A trap for anyone reading `app.log` to find out how often this application touches the network. `check_app_update` appears **24,616 times** in the logs on this machine, which reads like a process checking constantly.
+
+It is one line per invocation, whatever the invocation:
+
+| command | new `check_app_update` lines |
+| --- | --- |
+| `--version` | 1 |
+| `status` | 1 |
+| `config get log_level` | 1 |
+
+So the 2 s `status` poll produces one every two seconds while the window is open. **It does not mean a network check happened**: 301 lines were logged on 9 August against 128 outbound connections from `adguard-cli` in the whole day, and those connections cluster around the `check-update` runs. The message itself is empty — the log line ends `check_app_update: ...`, with the ellipsis being AdGuard's, not a truncation here.
+
+Nothing in this project reads these logs. It is recorded because the count is alarming and wrong, and because the next person to go looking for evidence of network activity will find it first.
 
 ### The application half is deliberately half-measured
 

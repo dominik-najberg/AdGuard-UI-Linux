@@ -153,6 +153,48 @@ impl Catalogue {
         }
     }
 
+    /// When new filter data last actually arrived, as a Unix timestamp.
+    ///
+    /// The newest `last_download_time` across the lists that are switched on and
+    /// installed — the moment AdGuard last brought something down, not the
+    /// moment it last looked.
+    ///
+    /// # It is "changed", not "checked", and the difference is the whole point
+    ///
+    /// Measured (contract §14): the column **does not move on an up-to-date
+    /// run**. Two consecutive `check-update`s that both answered `Up to date`
+    /// left it identical to the second; the run before them, which answered
+    /// `1 filter(s) updated`, moved it. So a long gap here means *nothing has
+    /// changed upstream*, and emphatically not *nothing has checked* — AdGuard's
+    /// daemon refreshes on its own every few hours, measured across days when
+    /// nothing invoked the CLI at all.
+    ///
+    /// Anything rendering this has to say "changed" and not "checked", or it
+    /// invites a user to press a button because a list nobody has revised in a
+    /// week has not been revised in a week.
+    ///
+    /// **The newest and not the oldest.** They differ by a lot — on this machine
+    /// the freshest enabled list was minutes old while the stalest was eight
+    /// days — because lists are revised on their own schedules. The oldest would
+    /// therefore report the least active list rather than the state of the
+    /// catalogue, which is a fact about that list's author.
+    ///
+    /// `None` when no installed list carries one, which includes an empty
+    /// catalogue. `last_update_time` is deliberately not offered beside it: it is
+    /// always the earlier of the two on every row measured here, which is
+    /// consistent with it being the list's own publication time rather than
+    /// anything about this machine — an inference, and not one anything renders.
+    pub fn last_downloaded(&self) -> Result<Option<i64>, Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT MAX(last_download_time) FROM filter
+             WHERE is_enabled = 1 AND is_installed = 1 AND last_download_time > 0",
+        )?;
+        // `MAX` over no rows is one row holding NULL, so the outer Option is the
+        // query's and the inner one is the value's.
+        let newest: Option<i64> = stmt.query_row([], |row| row.get(0))?;
+        Ok(newest)
+    }
+
     /// The lists the user installed by URL.
     ///
     /// A subset of [`filters`], read on its own because it is how an install is

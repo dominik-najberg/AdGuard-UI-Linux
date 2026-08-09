@@ -33,6 +33,15 @@ measurements support — failures were common and cleared on the next run every
 time. The Filters and DNS pages are re-read when their catalogues actually
 moved.
 
+A row above the button says when new filter data last arrived, read from the
+filter databases rather than fetched. It says *changed* rather than *checked* on
+purpose: AdGuard's daemon refreshes on its own every few hours, and the
+timestamp behind the row moves only when something actually came down — so a
+long gap means the lists have not been revised, not that nothing has looked.
+This is why there is no check-on-launch setting: it would re-do at every launch
+what the daemon did a few hours earlier, and under `--background` it would fire
+at login with no window to report into.
+
 **An available application update is reported, never installed.** Updating
 AdGuard replaces its privileged helper, and this application performs no
 privileged operation of its own, so it names `adguard-cli update` and leaves
