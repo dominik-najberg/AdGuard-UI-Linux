@@ -100,6 +100,226 @@ impl std::fmt::Debug for License {
     }
 }
 
+/// What `adguard-cli check-update` said about one component.
+///
+/// Measured on v1.4.13 over fourteen runs (contract §14): the command answers in
+/// pairs, a `Checking <name> updates...` line and a verdict on the next.
+///
+/// **`said` is not decoration.** `Failed to update filters` is the sentence for
+/// a failure of the HTTP filters *and* for a failure of the DNS filters — the
+/// same string, naming neither — so the verdict line alone cannot say which
+/// component it belongs to. Only the header can, which is why the two are
+/// carried together in one value and never separately.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComponentUpdate {
+    /// Which component, read from the header.
+    pub part: UpdatePart,
+    /// What the verdict amounts to, for the two decisions that turn on it: what
+    /// to re-read, and what to draw attention to.
+    pub verdict: Verdict,
+    /// AdGuard's own sentence, verbatim. What the UI shows — better wording than
+    /// ours, and it stays right when the CLI is reworded.
+    pub said: String,
+}
+
+/// One of the six things `check-update` covers.
+///
+/// [`Self::Other`] is not defensive clutter: the six are a fixed list on 1.4.13
+/// and a seventh would otherwise be silently dropped from a report the user is
+/// reading as complete.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpdatePart {
+    /// HTTP/HTTPS filter lists — the Filters page's catalogue.
+    Filters,
+    /// DNS filter lists — the DNS page's catalogue.
+    DnsFilters,
+    Userscripts,
+    SafeBrowsing,
+    CrLite,
+    /// The application itself. The only one `check-update` checks rather than
+    /// updates.
+    App,
+    /// A component this build does not know, carrying the header's own name.
+    Other(String),
+}
+
+impl UpdatePart {
+    /// The name as the CLI prints it between `Checking ` and ` updates...`.
+    ///
+    /// Matched case-insensitively for the reason [`License::is_active`] is: the
+    /// spelling belongs to AdGuard, and a cosmetic change upstream should not
+    /// turn a component into an unknown one.
+    pub fn from_header(name: &str) -> Self {
+        let name = name.trim();
+        for known in [
+            Self::Filters,
+            Self::DnsFilters,
+            Self::Userscripts,
+            Self::SafeBrowsing,
+            Self::CrLite,
+            Self::App,
+        ] {
+            if name.eq_ignore_ascii_case(known.header()) {
+                return known;
+            }
+        }
+        Self::Other(name.to_owned())
+    }
+
+    /// The header spelling, exactly as measured.
+    pub fn header(&self) -> &str {
+        match self {
+            Self::Filters => "filters",
+            Self::DnsFilters => "DNS filters",
+            Self::Userscripts => "userscripts",
+            Self::SafeBrowsing => "SafebrowsingV2",
+            Self::CrLite => "CRLite",
+            Self::App => "app",
+            Self::Other(name) => name,
+        }
+    }
+
+    /// What to call it on screen.
+    ///
+    /// Not the header: `SafebrowsingV2` is an internal spelling and `app` is
+    /// ambiguous in an application that has a version of its own to show beside
+    /// it. An unknown component is shown under the CLI's own name, because
+    /// inventing one would be worse than repeating theirs.
+    pub fn title(&self) -> &str {
+        match self {
+            Self::Filters => "Filter lists",
+            Self::DnsFilters => "DNS filter lists",
+            Self::Userscripts => "Userscripts",
+            Self::SafeBrowsing => "Safe Browsing",
+            Self::CrLite => "Certificate revocation (CRLite)",
+            Self::App => "AdGuard CLI",
+            Self::Other(name) => name,
+        }
+    }
+}
+
+/// What one verdict line amounts to.
+///
+/// Deliberately coarse. The sentence itself is kept in
+/// [`ComponentUpdate::said`] and is what the user reads; this exists only for
+/// the two decisions code has to make — whether to re-read a catalogue, and
+/// whether to draw attention to a line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    /// `Up to date`.
+    UpToDate,
+    /// `Updated`, or `N filter(s) updated`.
+    Changed,
+    /// `Failed to update filters`, whichever component it was about.
+    Failed,
+    /// A shape nobody has measured, including a header the CLI never answered.
+    ///
+    /// Not an error and not silently discarded: shown as itself. **The
+    /// application line reaches the user through here by design** — what
+    /// `check-update` says when a newer AdGuard CLI exists has never been
+    /// observed (contract §14), so anything that is not `Up to date` is
+    /// repeated verbatim rather than interpreted.
+    Unrecognised,
+}
+
+impl Verdict {
+    /// `Up to date`, the one verdict that means nothing happened.
+    const UP_TO_DATE: &'static str = "Up to date";
+    /// Every failure seen opens with this.
+    const FAILED: &'static str = "Failed";
+    /// `Updated` and `N filter(s) updated` both end here.
+    const UPDATED: &'static str = "updated";
+
+    /// Read one verdict line.
+    ///
+    /// **Failure is tested first, and the order is load-bearing.** Both
+    /// remaining rules are suffix and equality matches over sentences AdGuard
+    /// may reword, and of the two ways to be wrong about a reworded one, only
+    /// reading a failure as a success loses information the user needed. A
+    /// success read as a failure is a visible, checkable complaint.
+    ///
+    /// Nothing here consults the exit status, which is 0 for a failed component
+    /// as reliably as for a successful one (contract §14).
+    pub fn classify(said: &str) -> Self {
+        let said = said.trim();
+        if said.starts_with(Self::FAILED) {
+            Self::Failed
+        } else if said.eq_ignore_ascii_case(Self::UP_TO_DATE) {
+            Self::UpToDate
+        } else if said.to_ascii_lowercase().ends_with(Self::UPDATED) {
+            // Covers the bare `Updated` and both counted forms. A count of zero
+            // has never been seen — the CLI says `Up to date` instead — so it is
+            // not special-cased here; it would report a change and cost one
+            // redundant catalogue re-read, which is the harmless direction.
+            Self::Changed
+        } else {
+            Self::Unrecognised
+        }
+    }
+}
+
+/// A whole reading of `adguard-cli check-update`.
+///
+/// Holds the components in the order the CLI listed them, which is the order
+/// they are shown in: it is AdGuard's account of its own run, and reordering it
+/// would be this application editing a report it did not write.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UpdateReport {
+    pub components: Vec<ComponentUpdate>,
+}
+
+impl UpdateReport {
+    /// What the CLI said about one component, if it mentioned it.
+    pub fn part(&self, part: &UpdatePart) -> Option<&ComponentUpdate> {
+        self.components.iter().find(|component| &component.part == part)
+    }
+
+    /// Did this component actually change? Drives the catalogue re-reads.
+    ///
+    /// A component the CLI did not mention answers `false`: a page is re-read
+    /// because something was said to have moved, never because nothing was said.
+    pub fn changed(&self, part: &UpdatePart) -> bool {
+        self.part(part).is_some_and(|component| component.verdict == Verdict::Changed)
+    }
+
+    /// Every component that failed, in report order.
+    ///
+    /// Failures are an ordinary outcome here rather than an exception — five of
+    /// the fourteen measured runs carried one, and in every case the next run of
+    /// that component succeeded (contract §14). So they are listed, not raised.
+    pub fn failures(&self) -> impl Iterator<Item = &ComponentUpdate> {
+        self.components.iter().filter(|component| component.verdict == Verdict::Failed)
+    }
+
+    /// AdGuard's sentence about the application, when it amounts to news.
+    ///
+    /// `None` is the ordinary case and means there is nothing to say. `Some` is
+    /// the case this project has never seen and will not fabricate: the sentence
+    /// is shown as it arrived, with the `adguard-cli update` command named
+    /// beside it, and nothing here runs that command — see contract §14 and
+    /// `architecture.md` §6.
+    ///
+    /// **Two shapes are held back, and neither is the unmeasured one.**
+    ///
+    /// A [`Verdict::Failed`] app line is a failed *check*, not a release: it is
+    /// already reported by [`Self::failures`], and passing it through here as
+    /// well would show one event twice — the second time as an update notice
+    /// recommending a command, which is advice derived from a check that did
+    /// not finish.
+    ///
+    /// An empty sentence is a header the CLI announced and never answered. That
+    /// arrives as [`Verdict::Unrecognised`] with nothing in it, and a notice
+    /// carrying no words is a row that says only that something is wrong.
+    /// [`Self::failures`] does not catch this one either, so without the guard
+    /// it would reach the page as `Some("")`.
+    pub fn app_notice(&self) -> Option<&str> {
+        self.part(&UpdatePart::App)
+            .filter(|component| !matches!(component.verdict, Verdict::UpToDate | Verdict::Failed))
+            .map(|component| component.said.trim())
+            .filter(|said| !said.is_empty())
+    }
+}
+
 /// A switch on the Protection page.
 ///
 /// Each variant names one boolean in `proxy.yaml`. [`Self::key`] is both the

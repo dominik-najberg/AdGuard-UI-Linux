@@ -104,6 +104,10 @@ Two consequences. The 2 s `status` poll is safe to leave running across a long c
 
 One limit of the measurement: the sandbox proxy was **stopped**, so this says nothing about whether `status` still avoids the lock when it has a live daemon to talk to.
 
+**That limit is still open, and a measurement taken on 9 August 2026 did not close it — though it was first written up here as though it had.** Eight `status` calls issued alongside an in-flight `check-update`, on the real install with the proxy up, came back in 0.03 s each ([§14](#cost-and-what-it-does-not-block)). What that establishes is exactly itself: **`status` does not contend with an in-flight `check-update` on a live daemon**, which is all the About page needed to know. It is not evidence about the lock, because **nothing shows `check-update` takes the lock at all** — and this run, unlike the table above, had no positive control. The table's `config get` at 58 s is what proves a lock was being held; with only `status` in flight, eight fast replies look identical whether `status` avoids the lock or the command never took one. `check-update` running happily unlicensed ([§14](#it-runs-unlicensed-and-it-creates-the-data-directory)), where every lock-holding command measured above is licence-gated, is weak evidence for the second reading.
+
+Closing it properly needs a **known** lock-holder — a `filters install` — in flight against a live daemon, with `config get log_level` alongside `status` as the control, exactly as the stopped-proxy table was taken. That is a minute-long write against the owner's own install, so it is theirs to authorise rather than an agent's to run.
+
 **The complaint is not the whole of stderr.** Measured after the mapping was first written against only the opening line: the CLI follows that sentence with its entire usage dump — every subcommand, one per line — and then the one line worth acting on.
 
 ```text
@@ -1608,3 +1612,100 @@ With the write thereby demonstrated rather than assumed:
 Worth knowing before anyone builds a change-detector on it, in the way `proxy.yaml`'s hash is used throughout this project. **The real install's `adguard.conf` moved on its own during this session** — `a8678688…` when copied at 05:02, `fc8b693b…` when read again at 05:05 — across nothing but ordinary invocations and a running proxy. Its *size* stayed 3,116 B throughout.
 
 **What causes it was not isolated, and is not guessed at here.** `config get`, `config set`, `license` and `import-settings` were each checked against a settled sandbox copy and none of them moved it; something else does. The usable conclusion is the negative one: **do not hash `adguard.conf` to detect anything**, and do not treat a moved hash there as evidence of a licence change. §4's rule about `proxy.yaml` — a moved hash means nothing until it has been diffed — applies here with no way to take the diff, since the file must not be read at all (`handoff.md` §4).
+
+---
+
+## 14. Checking for updates
+
+`check-update` is the command behind [issue #4](https://github.com/dominik-najberg/AdGuard-UI-Linux/issues/4), and until this section existed the only thing recorded about it anywhere was that it touches the network and can hang. Measured 9 August 2026 on v1.4.13: **fourteen runs**, all inside half an hour — seven against this licensed install and seven against throwaway `$XDG_DATA_HOME` sandboxes, five of those the first run in a directory that did not exist yet.
+
+The last three of the fourteen are `update_sandbox.rs` itself, on its first run once it existed. That is worth stating rather than folding in: this section was written after eleven, and the suite it specifies immediately produced three more — one of them a failure under the *filters* header, where the first eleven had only ever seen one there once. The section had already been written as though the split were settled.
+
+**Fourteen is a count of runs somebody read**, not of times the command has been invoked in this tree. Every later `cargo test -- --ignored` runs it three more times and none of those are measurements: nobody reads the output, so nothing is learned and nothing here changes. A number that had to be incremented by a test suite would be wrong within a day of anyone using it.
+
+**The name is wrong, and the wording of every string built on it has to survive that.** `check-update` does not check: it *performs* the content updates — filters, DNS filters, userscripts, Safe Browsing and CRLite are all refreshed — and only the application is checked rather than changed. `filters update` is documented upstream as the same operation.
+
+### The output is header/verdict pairs, and the verdict does not name its component
+
+```
+Checking filters updates...
+Up to date
+Checking DNS filters updates...
+Failed to update filters
+Checking userscripts updates...
+Up to date
+Checking SafebrowsingV2 updates...
+Updated
+Checking CRLite updates...
+Updated
+Checking app updates...
+Up to date
+```
+
+Six components, in that fixed order, each announced by a `Checking <name> updates...` line and answered on the next. Every one of the fourteen runs exited **0** with **empty stderr**, including the five that carried a failure.
+
+| Verdict seen | After which header | Meaning |
+| --- | --- | --- |
+| `Up to date` | all six | nothing to do |
+| `Updated` | SafebrowsingV2, CRLite | — but see below, it says this every time |
+| `1 filter(s) updated` | filters | a count, and the noun is the component's |
+| `1 DNS filter(s) updated` | DNS filters | as above |
+| `Failed to update filters` | **filters *and* DNS filters** | the trap in this section |
+
+**The failure sentence is the same for two different components, and it names neither.** Across the five failures `Failed to update filters` was printed under `Checking DNS filters updates...` three times and under `Checking filters updates...` twice — the identical string either way. So the *header* is the only thing that says which component failed, and a parser or a UI that keeps the verdict lines alone will report a DNS failure as an HTTP-filter failure, or vice versa. Pair each verdict with the header above it and never let the two travel separately. `UpdateReport` does that pairing, and `check_update_pairs_each_verdict_with_its_header` pins it against the two real captures that differ in nothing else.
+
+**A failed component exits 0.** [§3](#3-exit-codes-are-only-half-trustworthy) again, in a new place: five of fourteen runs failed a component and all five reported success to the shell, with nothing on stderr. The exit status carries no information about the outcome here at all — it only says the command ran. `Cli::check_update` therefore derives every verdict from the text and lets the exit status decide nothing.
+
+**And a failure is ordinary, not exceptional.** Five of fourteen, spread across the real install and three separate sandboxes, and in every case the *next* run of the same component succeeded — the run that reported `Failed to update filters` for DNS filters was followed by one reporting `1 DNS filter(s) updated`. So the UI treats a failed component as a normal outcome inviting a retry, not as an error state, and `update_sandbox.rs` deliberately does not assert their absence. **One caveat on the rate**: all fourteen runs fell inside half an hour, which is nothing like ordinary use, so 5/14 may say more about repeated requests to `filters.adtidy.org` than about what a user will see.
+
+### `Updated` from Safe Browsing and CRLite is not news
+
+Tallied over the eleven runs whose full output was captured — the other three printed only the lines their assertions named:
+
+| install | SafebrowsingV2 | CRLite |
+| --- | --- | --- |
+| this licensed install, 7 runs | `Updated` — **7 of 7** | `Updated` — **7 of 7** |
+| sandboxes, 4 runs | `Up to date` — 4 of 4 | `Up to date` — 4 of 4 |
+
+Whatever the mechanism, on a working install those two answer `Updated` every single time, minutes apart, while a virgin one answers `Up to date`. **This forbids a summary line that counts components.** "2 of 6 updated" would render identically forever and would be measuring the CLI's habits rather than the user's install. The About page reports the six verdicts and does not add them up.
+
+**File mtimes do not settle it either, in either direction.** Taken across one run: `agflm_standard.db`'s mtime moved while its component reported `Up to date` and its size was unchanged; `crlitedb`'s did **not** move while its component reported `Updated`; `agflm_dns.db` stayed put for a DNS failure; and `proxy.yaml` moved, as it does for every invocation including `--version` ([§5](#every-invocation-rewrites-proxyyaml)). The text is the only signal. Nothing downstream may infer a change from a timestamp.
+
+### It runs unlicensed, and it creates the data directory
+
+Two things that separate it from most of this CLI:
+
+- **No licence needed.** `status`, `license` and `filters list` all exit 1 on an unlicensed install ([§3](#exit-1-is-usually-our-bug-but-not-always)), and every `filters` write subcommand does too ([§6](#marking-a-custom-filter-trusted)). `check-update` ran to completion in a virgin sandbox and updated filters there. So the control needs no licence caveat and works on an install the first-run assistant has never touched.
+- **A first run prints a line that is not part of a pair**, before them all:
+
+  ```
+  Created data directory <dir>/adguard-cli
+  Checking filters updates...
+  ```
+
+  It creates the directory as a side effect, exactly as `import-settings` does ([§13](#13-import-and-export)). A parser that assumes line 1 is a header reads the whole first run as unparseable, so everything before the first `Checking` is skipped. `check_update_skips_the_created_directory_line` covers it — and it is the run *every new install performs*, so getting it wrong would be wrong exactly where it is least recoverable.
+
+### Cost, and what it does not block
+
+Eight timed runs: **1.8 s to 7.3 s**, no outliers beyond that and no run anywhere near a hang. `NETWORK_TIMEOUT`'s 120 s stays the right ceiling — a hang is what it is there for, and `filters.adtidy.org` failing slowly is already in this machine's logs — but the ordinary case is a couple of seconds, so the UI needs a busy state rather than a progress bar.
+
+**`status` is unaffected by an in-flight `check-update`, measured against a live daemon.** Eight `status` calls issued back-to-back while a `check-update` ran, on the real install with the proxy up:
+
+| `status` during `check-update` | Wall time |
+| --- | --- |
+| first call | 0.396 s |
+| calls 2–8 | 0.029 – 0.033 s |
+
+The first is process start, not contention; the rest are the ordinary 0.03 s from [§2](#2-invocation-cost-measured). **So the 2 s poll does not need to pause for a content update** — which is the opposite of what the activation path does, and correctly so: `Cli::activate` stands down the poll because it runs for up to 120 s *and* changes licensing state under a page whose buttons the poll re-renders. Neither is true here. This is the second half of [§3](#once-the-directory-is-initialised-a-second-invocation-blocks)'s consequence — the poll is safe, the *affordance* is not — so the button desensitises itself and nothing else is held.
+
+**It does not close §3's open limit, and the first draft of this section claimed it did.** That limit asks whether `status` avoids the config and filter-manager *lock* when a daemon is live. This run cannot answer it: it carried no positive control, so it cannot tell "`status` avoids the lock" from "`check-update` never took one" — and nothing here establishes that `check-update` takes it. The claim was struck within the hour, and it is worth leaving the correction visible, because it is [§6](#marking-a-custom-filter-trusted)'s lesson arriving in the newest section in the file: **the measurement was right and the sentence next to it was not.** What the About page needed was the narrow fact, and the narrow fact is what was measured.
+
+### The application half is deliberately half-measured
+
+The app line has printed `Up to date` in all fourteen runs, because 1.4.13 is current. **What it says when an update exists has never been seen, and this project will not manufacture the condition to find out.** So nothing parses that line beyond asking whether it is exactly `Up to date`; anything else is shown to the user verbatim, as AdGuard's own sentence, alongside the `adguard-cli update` command to run.
+
+**One shape is excluded from that pass-through, and it is not the unmeasured one.** A `Failed …` verdict on the app line is a failed *check*, not news of a release, so `UpdateReport::app_notice` returns `None` for it and the line is reported among the failures where it belongs. Without that the same event would be shown twice, once as a failure and once as an update notice offering a command to run — and the second of those would be advice derived from a check that did not complete. It costs nothing to be right about a shape nobody has seen: a failure of the app check has never been observed either, since all five measured failures were filter components.
+
+**`adguard-cli update` is not measured and is never invoked**, which are the same decision. It re-runs an installer over a suid `adguard_root_helper`, and this application performs no privileged operation of its own ([§8](#8-privileged-operations), `architecture.md` §1) — it detects and instructs, as it already does for the root helper and the certificate. Not calling it is what makes not measuring it free, and it joins the list in `handoff.md` §3 item 7 for that reason. `update_channel` stays unclassified on the same grounds.
+
+**No ANSI escapes appear in any of the fourteen runs.** Not a counter-example to [§4](#4-ansi-escapes-are-unconditional), which is about the CLI ignoring every opt-out rather than about every command colouring its output — but it does mean the stripper is a no-op on this command, and that the test fixtures are plain text rather than escape-laden captures.
