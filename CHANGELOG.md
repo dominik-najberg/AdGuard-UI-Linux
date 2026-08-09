@@ -13,6 +13,32 @@ This file is the one changelog.
 
 ## Unreleased
 
+### An About page, with a manual update
+
+Asked for from the outside ([#4](https://github.com/dominik-najberg/AdGuard-UI-Linux/issues/4)): a
+way to update AdGuard's filters and check for a new version without opening a
+terminal. It arrives as a new **About** page, last in the sidebar, which also
+gives the application somewhere to show two things it had never shown at all —
+its own version and the AdGuard CLI's, with the path the CLI was found at.
+
+One button updates the filter lists, DNS filter lists, userscripts, Safe
+Browsing data and certificate revocation data, and asks whether a newer AdGuard
+CLI has been released. Each component is reported in AdGuard's own words. There
+is deliberately no summary count: Safe Browsing and certificate revocation
+answer *Updated* on every run of a working install, so a count would read the
+same forever while appearing to describe your machine.
+
+A component that fails says so and invites another attempt, which is what the
+measurements support — failures were common and cleared on the next run every
+time. The Filters and DNS pages are re-read when their catalogues actually
+moved.
+
+**An available application update is reported, never installed.** Updating
+AdGuard replaces its privileged helper, and this application performs no
+privileged operation of its own, so it names `adguard-cli update` and leaves
+running it to you. Automatic checks and a tray entry are both deliberately out
+of scope; the issue records why.
+
 ### Trusted custom filters, as a control on the row
 
 Asked for from the outside ([#2](https://github.com/dominik-najberg/AdGuard-UI-Linux/issues/2)): a
