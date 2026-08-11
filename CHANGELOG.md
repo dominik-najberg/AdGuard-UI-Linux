@@ -42,6 +42,21 @@ This is why there is no check-on-launch setting: it would re-do at every launch
 what the daemon did a few hours earlier, and under `--background` it would fire
 at login with no window to report into.
 
+A second button checks whether a newer **AdGuard UI** has been released, which
+nothing in the application could tell you before — the version row was a string
+with nothing behind it. It is the only request this application makes of its
+own, so the group discloses that above the button: it asks github.com, it names
+the application and its version, and it carries nothing about you or the
+machine. It happens only when pressed — never at launch and never on a timer —
+and it reports rather than installs, because releases are a `.deb` and a tarball
+with no apt repository behind them.
+
+The client uses the platform certificate verifier rather than bundled roots, and
+that is measured rather than idiomatic: on a machine filtering system-wide,
+AdGuard intercepts this very connection and re-signs it with its own CA, which
+lives in the system trust store. Bundled roots would fail on exactly the
+machines this application is for.
+
 **An available application update is reported, never installed.** Updating
 AdGuard replaces its privileged helper, and this application performs no
 privileged operation of its own, so it names `adguard-cli update` and leaves

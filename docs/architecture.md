@@ -174,7 +174,7 @@ An `AdwApplicationWindow` with `AdwNavigationSplitView`, plus `AdwToastOverlay` 
 | **DNS** | DNS filter list, user rules, upstream/fallback/bootstrap servers, listen port, ECH blocking | `agflm_dns.db`, `dns_filtering.*` |
 | **Advanced** | Proxy mode, HTTPS filtering, secure DNS filtering, ports, listen address, auth, outbound proxy, worker threads, log level | `proxy.yaml` → `config set` |
 | **Stealth** | The 26 settings behind the one `stealthmode.enabled` switch Protection shows: cookies, tracking, identity, browser APIs, anti-DPI | `proxy.yaml` → `config set` |
-| **About** | The two version numbers — this application's and the CLI's — the binary's path, the one control that updates filters and asks after a newer AdGuard CLI, a result row per component in AdGuard's own words, and the project links. Last in the sidebar: the only page about the installation rather than about what it is doing | `--version`, `check-update` (contract §14) |
+| **About** | The two version numbers — this application's and the CLI's — the binary's path, when filter data last changed, the one control that updates filters and asks after a newer AdGuard CLI, a result row per component in AdGuard's own words, a *Check* for a newer AdGuard UI, and the project links. Last in the sidebar: the only page about the installation rather than about what it is doing | `--version`, `check-update` (contract §14), `agflm_*.db`, and **one HTTPS request to github.com** — §6 |
 
 Notes that shape the widgets:
 
@@ -484,6 +484,44 @@ It also means the unmet state has to be **rendered**, not merely prevented. A te
 The corollary is worth stating for anyone tempted to add one later: a root-invoked helper of ours would have to be explicit about which user's config it edits — `adguard-cli` and its data live under `~/.local`, so it would need the target `$HOME`/UID passed explicitly and would have to refuse any path outside that user's data dir. Getting that wrong is a local privilege-escalation bug. Not writing the helper is how this project avoids owning that problem.
 
 `data/io.github.dominik-najberg.AdGuardUI.policy` was deleted with the auto-mode work. It declared three polkit actions against `/usr/libexec/adguard-ui-helper`, a binary that was never written and now never will be, and its own header still asserted that AdGuard "ships no polkit policy … so there is nothing to reuse" — the conclusion contract §8 retracted. Nothing installed it; `building.md` §4 says so and now says how to remove it if an older checkout did.
+
+### The one request this application makes of its own
+
+Everything else in this document is about not doing things: no daemon, no
+privileged operation, no writes outside the CLI. This is the exception, and it is
+worth stating plainly because it changes a property the project had until 1.2.0
+— **the application never spoke to anything but `adguard-cli`.**
+
+The About page's *Check* asks `api.github.com` whether a newer AdGuard UI has
+been released. Four constraints make that acceptable rather than a slippery
+slope:
+
+- **It happens only when a button is pressed.** Never at launch, never on a
+  timer, never as a side effect of anything else. A check on launch was proposed
+  and refused for its own reasons (contract §14); this one is refused for this
+  one as well.
+- **It is disclosed where it is made**, in the group's description, before the
+  button rather than in a changelog. A user running an ad blocker meets the fact
+  that this application can talk to a third party at the moment it matters.
+- **It carries nothing about the user.** The request is a `GET` with a
+  `User-Agent` naming the application and its version. No identifier, no
+  configuration, no machine detail.
+- **It reports and never acts.** Releases are a `.deb` and a tarball with no apt
+  repository behind them, so there is nothing to install even if this were
+  willing to. It names the release and offers the notes.
+
+**The certificate path is a measured requirement, not a default.** On a machine
+filtering system-wide — which is what this application exists to configure —
+AdGuard intercepts *this very connection* and re-signs it with its own CA. That
+CA is in the **system** trust store. So the client must use the platform
+verifier: a bundled Mozilla root set would fail on precisely the machines this
+application is for, and it would fail in a way that looks like GitHub being
+down. Measured 11 August 2026 — the live suite's request appears in AdGuard's own
+`access.log`, named after the test binary, and validates. The feature selection
+in the workspace manifest carries that reasoning where a reader will meet it.
+
+`adguard-core/src/release.rs` holds it, and it is the one module in that crate
+that is not about `adguard-cli` at all.
 
 ### Clearing a wedged proxy process is not one of these
 

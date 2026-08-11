@@ -88,6 +88,26 @@ const WHAT_A_GAP_MEANS: &str =
      changed, so a long gap means the lists have not been revised — not that \
      nothing has looked.";
 
+/// The one disclosure this page owes before a button is pressed.
+///
+/// This application has never spoken to anything but `adguard-cli`. The release
+/// check is the exception, and a user running an ad blocker should meet that
+/// fact before the request rather than in a changelog.
+const WHAT_THE_CHECK_SENDS: &str =
+    "Checking for a newer AdGuard UI asks github.com, and is the only thing this \
+     application sends anywhere by itself. The request names the application and \
+     its version, and nothing about you or this machine.";
+
+/// The button that asks, in its two states.
+const CHECK_RELEASES: &str = "Check";
+const CHECKING: &str = "Checking…";
+
+/// Why finding a release is the end of what this can do for you.
+const HOW_TO_UPDATE_THE_APP: &str =
+    "Releases are a .deb and a tarball on GitHub — there is no apt repository behind \
+     them, so nothing updates this application on its own and nothing here can \
+     install it for you.";
+
 /// The command that does it. Named, never invoked (contract §14).
 const UPDATE_COMMAND: &str = "adguard-cli update";
 
@@ -112,6 +132,21 @@ pub struct AboutPage {
     ///
     /// [`freshness`]: Self::read_freshness
     freshness: gtk::Label,
+
+    /// The verdict beside this application's own version — `Latest`, or the tag
+    /// of a release that is newer. Blank until asked, because nothing has been.
+    ui_standing: gtk::Label,
+    ui_check: gtk::Button,
+    /// Shown only when a check found something newer.
+    ui_notice: adw::PreferencesGroup,
+    ui_release: adw::ActionRow,
+    /// Where *Release notes* goes, set by the check that found it.
+    ///
+    /// Held rather than baked into the handler because the release is not known
+    /// until someone asks — and it is built from a constant and a tag rather
+    /// than taken from GitHub's answer, so a compromised endpoint cannot choose
+    /// what this application opens in a browser.
+    ui_release_url: RefCell<Option<String>>,
 
     check: gtk::Button,
     /// A check is in flight. The button is insensitive for the same span, and
@@ -143,8 +178,25 @@ impl AboutPage {
 
         // ---- versions ----
 
-        let versions = adw::PreferencesGroup::builder().title("Versions").build();
+        // The description is a disclosure, not a caption. Everything else this
+        // application causes goes through `adguard-cli`; the button in this
+        // group is the one place it speaks to a third party itself, and a user
+        // running an ad blocker is entitled to be told that before they press
+        // it rather than after.
+        let versions = adw::PreferencesGroup::builder()
+            .title("Versions")
+            .description(WHAT_THE_CHECK_SENDS)
+            .build();
         let app_version = row("AdGuard UI", env!("CARGO_PKG_VERSION"));
+        let ui_standing = gtk::Label::builder().valign(gtk::Align::Center).build();
+        ui_standing.add_css_class("dim-label");
+        let ui_check = gtk::Button::builder()
+            .label(CHECK_RELEASES)
+            .valign(gtk::Align::Center)
+            .build();
+        app_version.add_suffix(&ui_standing);
+        app_version.add_suffix(&ui_check);
+
         let cli_version = row("AdGuard CLI", PLACEHOLDER);
         let binary = row("AdGuard CLI binary", &abbreviate(cli.binary()));
         binary.set_subtitle_lines(2);
@@ -152,6 +204,27 @@ impl AboutPage {
             versions.add(r);
         }
         page.add(&versions);
+
+        // Revealed only when a check found something newer. The mirror of the
+        // AdGuard CLI notice below, and for a different reason that lands in the
+        // same place: releases here are a `.deb` and a tarball on GitHub with no
+        // apt repository behind them, so there is nothing this application could
+        // install even if it were willing to.
+        let ui_notice = adw::PreferencesGroup::builder()
+            .title("A newer AdGuard UI is available")
+            .description(HOW_TO_UPDATE_THE_APP)
+            .build();
+        ui_notice.set_visible(false);
+        let ui_release = row("Latest release", PLACEHOLDER);
+        let open = gtk::Button::builder()
+            .label("Release notes")
+            .valign(gtk::Align::Center)
+            .build();
+        open.add_css_class("suggested-action");
+        ui_release.add_suffix(&open);
+        ui_release.set_activatable_widget(Some(&open));
+        ui_notice.add(&ui_release);
+        page.add(&ui_notice);
 
         // ---- the update control ----
 
@@ -244,6 +317,11 @@ impl AboutPage {
             cli,
             toasts,
             cli_version,
+            ui_standing: ui_standing.clone(),
+            ui_check: ui_check.clone(),
+            ui_notice,
+            ui_release,
+            ui_release_url: RefCell::new(None),
             freshness,
             check: check.clone(),
             busy: Cell::new(false),
@@ -257,6 +335,27 @@ impl AboutPage {
         check.connect_clicked({
             let this = this.clone();
             move |_| this.check_now()
+        });
+
+        ui_check.connect_clicked({
+            let this = this.clone();
+            move |_| this.check_releases()
+        });
+
+        open.connect_clicked({
+            let this = this.clone();
+            move |button| {
+                let Some(url) = this.ui_release_url.borrow().clone() else {
+                    return;
+                };
+                let launcher = gtk::UriLauncher::new(&url);
+                let window = button.root().and_downcast::<gtk::Window>();
+                glib::spawn_future_local(async move {
+                    // The address is also on the row, selectable, so a browser
+                    // that will not open is not a dead end.
+                    let _ = launcher.launch_future(window.as_ref()).await;
+                });
+            }
         });
 
         this.read_version();
@@ -299,6 +398,84 @@ impl AboutPage {
                 Err(err) => this.cli_version.set_subtitle(&err.to_string()),
             },
         );
+    }
+
+    /// Ask github.com whether a newer AdGuard UI has been released.
+    ///
+    /// The only request this application makes of its own, and it is made only
+    /// here — from a button, never on a timer and never at launch. The group's
+    /// description says so before the button is pressed, which is the point at
+    /// which a user of an ad blocker is owed it.
+    ///
+    /// The outcome is reported and never acted on. Releases are a `.deb` and a
+    /// tarball with no apt repository behind them, so there is nothing to
+    /// install even if this were willing to — it names the release and offers
+    /// the notes.
+    fn check_releases(self: &Rc<Self>) {
+        self.ui_check.set_sensitive(false);
+        self.ui_check.set_label(CHECKING);
+        self.ui_standing.set_label("");
+
+        let this = self.clone();
+        worker::run(adguard_core::release::latest, move |found| {
+            this.ui_check.set_sensitive(true);
+            this.ui_check.set_label(CHECK_RELEASES);
+
+            let release = match found {
+                Ok(release) => release,
+                Err(err) => {
+                    // Not on the row: a failed check leaves the version exactly
+                    // as unknown as it was, and a red word beside it would read
+                    // as a verdict about the build rather than about the
+                    // network.
+                    this.toasts.add_toast(toast(&err.to_string()));
+                    return;
+                }
+            };
+
+            use adguard_core::Standing;
+            match adguard_core::release::standing(env!("CARGO_PKG_VERSION"), release) {
+                Standing::Current => {
+                    this.ui_standing.set_label("Latest");
+                    this.ui_notice.set_visible(false);
+                    this.toasts.add_toast(toast("You have the latest AdGuard UI release"));
+                }
+                Standing::Behind(release) => {
+                    this.ui_standing.set_label(&release.tag);
+                    this.show_release(&release, &format!("{} is available", release.tag));
+                }
+                // A local build between releases. Saying "up to date" here would
+                // claim this binary matches a release it does not.
+                Standing::Ahead(release) => {
+                    this.ui_standing.set_label("Unreleased build");
+                    this.ui_notice.set_visible(false);
+                    this.toasts.add_toast(toast(&format!(
+                        "This build is newer than the latest release ({})",
+                        release.tag
+                    )));
+                }
+                // A tag this cannot place — a pre-release, most likely. Named
+                // rather than judged, and shown so the user can judge.
+                Standing::Unknown(release) => {
+                    this.ui_standing.set_label(&release.tag);
+                    this.show_release(
+                        &release,
+                        &format!("The latest release is {}", release.tag),
+                    );
+                }
+            }
+        });
+    }
+
+    /// Reveal the release group, pointing at a page built from a constant and a
+    /// tag rather than at anything GitHub sent.
+    fn show_release(&self, release: &adguard_core::Release, message: &str) {
+        let url = release.url();
+        self.ui_release.set_subtitle(&url);
+        self.ui_release.set_subtitle_selectable(true);
+        self.ui_release_url.replace(Some(url));
+        self.ui_notice.set_visible(true);
+        self.toasts.add_toast(toast(message));
     }
 
     /// Read when new filter data last arrived, from the two catalogues.
@@ -638,6 +815,28 @@ mod tests {
         let described = WHAT_IT_DOES.to_lowercase();
         assert!(described.starts_with("downloads"), "the download half comes first");
         assert!(described.contains("asks whether"), "and the check half is still named");
+    }
+
+    /// The one request this application makes of its own has to be disclosed
+    /// where it is made, not in a changelog — a user running an ad blocker is
+    /// entitled to know before pressing, and to know it carries nothing about
+    /// them.
+    #[test]
+    fn the_release_check_discloses_what_it_sends() {
+        let said = WHAT_THE_CHECK_SENDS.to_lowercase();
+        assert!(said.contains("github.com"), "it has to name who is asked");
+        assert!(said.contains("only thing this application sends"), "and that it is the only one");
+        assert!(said.contains("nothing about you"), "and what it does not carry");
+    }
+
+    /// Finding a release is the end of what this can do, and the reason is not
+    /// the privileged-helper one that applies to the CLI half — there is simply
+    /// no update channel to act through.
+    #[test]
+    fn the_release_notice_says_nothing_will_update_it_for_you() {
+        let said = HOW_TO_UPDATE_THE_APP.to_lowercase();
+        assert!(said.contains("no apt repository"));
+        assert!(said.contains("nothing updates this application on its own"));
     }
 
     /// This application installs nothing privileged, and the group that mentions

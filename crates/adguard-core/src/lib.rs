@@ -15,6 +15,7 @@ pub mod locale;
 pub mod model;
 pub mod orphan;
 pub mod paths;
+pub mod release;
 pub mod trust;
 pub mod zip;
 
@@ -24,6 +25,7 @@ pub use cli::{Activation, Applied, Cli, Error};
 pub use config::{AddressPlan, AuthState, Config, DnsListenPort, Watch};
 pub use helper::RootHelper;
 pub use orphan::Daemon;
+pub use release::{Release, Standing};
 pub use trust::CaTrust;
 pub use filters::Catalogue;
 pub use locale::Locale;
