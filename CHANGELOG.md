@@ -11,7 +11,7 @@ This file is the one changelog.
 
 ---
 
-## Unreleased
+## 1.3.0 — 13 August 2026
 
 ### An About page, with a manual update
 

@@ -53,6 +53,17 @@
     application is its first release.
   -->
   <releases>
+    <release version="1.3.0" type="stable" date="2026-08-13">
+      <url type="details">https://github.com/dominik-najberg/AdGuard-UI-Linux/releases/tag/v1.3.0</url>
+      <description>
+        <p>An About page, and a control this application had no way to offer before:</p>
+        <ul>
+          <li>About, last in the sidebar: this application's own version and the AdGuard CLI's, with the path the CLI was found at. One button updates the filter lists, DNS filter lists, userscripts, Safe Browsing data and certificate revocation data, and reports whether a newer AdGuard CLI has been released.</li>
+          <li>A second button checks whether a newer AdGuard UI has been released. It happens only when pressed, names the application and its version, and carries nothing about you or your machine.</li>
+          <li>A custom filter list can be marked trusted, with a padlock between its switch and its trash. Trusting a list lets it use privileged rule types, so granting it is confirmed by a dialog and withdrawing it is not.</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.2.0" type="stable" date="2026-08-04">
       <url type="details">https://github.com/dominik-najberg/AdGuard-UI-Linux/releases/tag/v1.2.0</url>
       <description>
