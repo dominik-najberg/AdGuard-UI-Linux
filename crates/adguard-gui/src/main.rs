@@ -14,6 +14,7 @@ mod certificate;
 mod dns;
 mod filter_settings;
 mod filters;
+mod geometry;
 mod protection;
 mod root_helper;
 mod setup;
@@ -94,6 +95,27 @@ fn main() -> glib::ExitCode {
         }
     });
 
+    // The tray's *Quit* calls `app.quit()`, which emits none of the signals a
+    // window would: measured 14 August 2026 with all three connected, quitting
+    // a mapped window raises `shutdown` and neither `close-request` nor
+    // `unmap`. So this is the last moment there is, and the size is written
+    // here rather than left to settle into a main loop that has stopped.
+    //
+    // Through `ui` rather than the window, and that is not incidental: two
+    // paths in `start` destroy the window and give up before any `Instance`
+    // exists, and a destroyed window still answers with the size it was built
+    // at — so a closure holding the window would write the default over good
+    // state every time a `--background` launch failed. There is no instance in
+    // those cases, and this finds nothing to do.
+    app.connect_shutdown({
+        let ui = ui.clone();
+        move |_| {
+            if let Some(instance) = ui.borrow().as_ref() {
+                instance.geometry.flush();
+            }
+        }
+    });
+
     app.connect_command_line(move |app, cmdline| {
         let background = cmdline.options_dict().contains(BACKGROUND);
         match start(app, &ui, background) {
@@ -127,6 +149,15 @@ struct Instance {
     /// freed the moment [`start`] returned and every button in it would be
     /// inert. Dropped by [`install_main_view`], which is what replaces it.
     setup: Option<Rc<setup::SetupAssistant>>,
+    /// The window's remembered size.
+    ///
+    /// Held here for two reasons. It is what keeps the saver alive — every
+    /// handler that feeds it holds a *weak* reference, because the saver holds
+    /// the window and the window owns the handlers (see [`geometry`]). And the
+    /// one moment that has to write the size out immediately rather than when
+    /// it settles, the application being told to quit, is reached from
+    /// [`main`], which has no window in hand and finds it through here.
+    geometry: Rc<geometry::Saver>,
 }
 
 impl Instance {
@@ -166,12 +197,32 @@ fn start(
     // restyled a frame later.
     style::install();
 
+    // What the window was left at last time, cut to a display that can show it
+    // — a size saved on a wide desk outlives the desk. Read before the window
+    // is built rather than applied to it afterwards: setting a size on a window
+    // that is already up is a resize the user watches happen, where a window
+    // constructed at its size is simply that size from its first frame.
+    //
+    // A first launch, an unreadable file and a session with nowhere to save all
+    // arrive here as the same 880×720 the window opened at before it remembered
+    // anything (`adguard_core::window_state`).
+    let restored = adguard_core::WindowState::locate()
+        .map(|state| state.load())
+        .unwrap_or_default()
+        .fitted(&geometry::monitors());
+
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .title("AdGuard UI")
-        .default_width(880)
-        .default_height(720)
+        .default_width(restored.width)
+        .default_height(restored.height)
+        .maximized(restored.maximized)
         .build();
+
+    // Before the window is presented and before the tray is registered, so
+    // every path out of here — including the two below that destroy the window
+    // and give up — has the saver already in place or already dropped.
+    let saver = geometry::connect_saving(&window, restored);
 
     let cli = Cli::discover();
 
@@ -215,6 +266,7 @@ fn start(
             window: window.clone(),
             view: None,
             setup: Some(assistant.clone()),
+            geometry: saver,
         }));
 
         assistant.connect_finished({
@@ -287,6 +339,7 @@ fn start(
         window,
         view: view.ok(),
         setup: None,
+        geometry: saver,
     }));
     Ok(())
 }

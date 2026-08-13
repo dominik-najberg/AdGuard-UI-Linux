@@ -11,6 +11,53 @@ This file is the one changelog.
 
 ---
 
+## Unreleased
+
+### The window remembers how big it was
+
+Asked for from the outside ([#3](https://github.com/dominik-najberg/AdGuard-UI-Linux/issues/3)): the
+window opened at 880×720 every time, so anyone who preferred it a different
+shape resized it again at every launch. It now opens at the size you last left
+it, maximized if that is how you left it.
+
+The size is written to `~/.local/state/adguard-ui/window.state` — ours, not
+AdGuard's. Nothing about your configuration is in it, and deleting it puts the
+window back to 880×720. It is a plain text file with three keys in it and a
+comment saying what it is for, because the person who finds it will have gone
+looking for exactly that.
+
+It is saved as you resize rather than on the way out, and that is a measured
+choice rather than a careful-sounding one: a `SIGTERM` — a logout, a session
+ending — emits none of the signals a window would, so an application that saved
+only when asked to quit would lose the whole session's resizing at the moment
+you could least explain what happened to it. The two exits that *are* signalled,
+closing the window to the tray and *Quit* in the tray menu, write it immediately
+rather than waiting for the pause after a resize to elapse.
+
+**The position is not remembered, and it is worth saying plainly that it never
+will be.** The request asked for the location too, best-effort, on the
+understanding that some desktops allow it. None do. GTK4 removed the calls that
+move a window and read where it is, and put nothing in their place; Wayland
+gives an application no way to ask where its own window is, because placement
+belongs to the compositor there. This is not something the toolkit has yet to
+add — it is a boundary, and an application that stored coordinates would be
+storing numbers it could never use. What the release notes for a future GTK
+would bring is the compositor restoring the window itself, with the application
+storing nothing.
+
+A saved size is checked before it is used. One larger than any display attached
+right now — a laptop that spent yesterday on a wide desk — is cut to fit rather
+than discarded, so the window comes back as big as the screen allows. A file
+that is truncated, edited into nonsense, absurdly large, or written by some
+later version keeps whatever is still legible in it and falls back per key for
+the rest. There is no state a file can be left in that opens the window somewhere
+you cannot reach it.
+
+Under `--background` the window is built and never shown, and nothing is written
+in that case: a window nobody has seen has no opinion about how big it should be.
+
+---
+
 ## 1.3.0 — 13 August 2026
 
 ### An About page, with a manual update
