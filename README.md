@@ -61,6 +61,8 @@ adguard-ui --background
 
 While the tray is present, closing the window only hides it and *Quit* in the tray menu exits. If the tray could not register, closing quits as usual, so there is no way to end up with a hidden application you cannot reach.
 
+**The window opens at the size you last left it**, maximized if that is how you left it, saved to `~/.local/state/adguard-ui/window.state` — this application's own file, holding three keys and nothing about your configuration. Delete it and the window is back to 880×720. A size larger than any display attached right now is cut to fit rather than thrown away, so a laptop that spent yesterday on a wide desk comes back usable. **The position is not remembered**, and it is not a gap waiting to be filled: GTK4 removed the calls that move a window and ask where it is, and under Wayland placement belongs to the compositor, which gives an application no way to ask where its own window is. Storing coordinates would be storing numbers nothing could ever use.
+
 ---
 
 ## The pages

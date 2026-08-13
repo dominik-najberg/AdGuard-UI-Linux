@@ -17,6 +17,7 @@ pub mod orphan;
 pub mod paths;
 pub mod release;
 pub mod trust;
+pub mod window_state;
 pub mod zip;
 
 pub use autostart::Autostart;
@@ -27,6 +28,7 @@ pub use helper::RootHelper;
 pub use orphan::Daemon;
 pub use release::{Release, Standing};
 pub use trust::CaTrust;
+pub use window_state::{Geometry, WindowState};
 pub use filters::Catalogue;
 pub use locale::Locale;
 pub use model::{

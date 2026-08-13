@@ -558,7 +558,7 @@ A release is a tag. Everything else — building both packages in a clean contai
 Four things happen before the tag, and all four are on the machine, not on the runner:
 
 ```bash
-cargo test --workspace --locked                 # 330 pass, 57 ignored
+cargo test --workspace --locked                 # 353 pass, 57 ignored
 make package                                    # both packages build here first
 git status --porcelain                          # must be empty
 git log --oneline -1
