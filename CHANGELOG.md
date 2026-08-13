@@ -11,7 +11,7 @@ This file is the one changelog.
 
 ---
 
-## Unreleased
+## 1.4.0 — 14 August 2026
 
 ### The window remembers how big it was
 

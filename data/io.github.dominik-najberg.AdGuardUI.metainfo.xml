@@ -53,6 +53,17 @@
     application is its first release.
   -->
   <releases>
+    <release version="1.4.0" type="stable" date="2026-08-14">
+      <url type="details">https://github.com/dominik-najberg/AdGuard-UI-Linux/releases/tag/v1.4.0</url>
+      <description>
+        <p>The window remembers how big it was:</p>
+        <ul>
+          <li>AdGuard UI opens at the size you last left it, maximized if that is how you left it, instead of at the same fixed size every time.</li>
+          <li>A size larger than any display attached right now is cut to fit rather than discarded, so a laptop brought home from a wider desk comes back usable.</li>
+          <li>The position is not remembered. GTK4 gives an application no way to ask where its own window is or to put it back, and under Wayland placement belongs to the desktop rather than to the application.</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.3.0" type="stable" date="2026-08-13">
       <url type="details">https://github.com/dominik-najberg/AdGuard-UI-Linux/releases/tag/v1.3.0</url>
       <description>
