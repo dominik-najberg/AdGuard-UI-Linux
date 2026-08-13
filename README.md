@@ -97,6 +97,18 @@ Three groups at the foot of that page do more than set a key:
 
 **Start at login** writes the autostart entry described above, and is the only control here that changes nothing in `proxy.yaml`. It neither starts nor stops AdGuard's protection — what runs the proxy at login is AdGuard's own arrangement, not this — and it is painted from the file every time the window is focused, so it agrees with whatever a startup-applications editor last did. The Status page carries a read-only row reporting it, which leads here.
 
+**About** — the two version numbers this application had never shown anywhere: its own, and the AdGuard CLI's, with the path the CLI was found at. Below them, one button that updates AdGuard's filter lists, DNS filter lists, userscripts, Safe Browsing data and certificate revocation data, and asks whether a newer AdGuard CLI has been released.
+
+![The About page](docs/screenshots/about.png)
+
+Above the button, a row says when new filter data last arrived. That is deliberately *changed* and not *checked*: AdGuard's daemon refreshes on its own every few hours — measured, on days when nothing here ran a command — and the timestamp behind the row only moves when something actually came down. So a long gap means the lists have not been revised, not that nothing has looked, and the row says as much rather than leaving it to be misread as staleness. It costs two local database reads and no network, which is why there is no check-on-launch option: a silent check at startup would spend a download to learn what the daemon already knew, and by being silent would tell you none of it.
+
+It reports each component in AdGuard's own words rather than summarising them. That is a measurement rather than a preference: Safe Browsing and certificate revocation answer *Updated* on every single run of a working install, so a line reading "2 of 6 updated" would say the same thing forever while appearing to describe your machine. A component that fails says so and invites another go — failures here are common and have cleared on the next attempt every time they were measured.
+
+**A separate button checks whether a newer AdGuard UI has been released.** That is the one thing this application sends anywhere by itself — everything else it causes goes through `adguard-cli` — so the group says so above the button rather than leaving you to find out. The request names the application and its version and carries nothing about you or your machine, it happens only when you press it, and it reports rather than installs: releases are a `.deb` and a tarball with no apt repository behind them, so nothing updates this application on its own.
+
+**An available application update is reported and never installed.** Updating AdGuard replaces its privileged helper, and this application performs no privileged operation of its own — so it names `adguard-cli update` and leaves running it to you, exactly as it does for AdGuard's root helper and its certificate.
+
 **Backup and restore** exports your settings to a zip and restores one, with a third button beside the log level that bundles the logs for a bug report. Each of the three says the thing you would otherwise have to find out: a round trip **loses your DNS filter choices and DNS user rules**, because only `proxy.yaml` is exported; a restore leaves the **licence and the certificate untouched**; and the logs bundle **includes your configuration and not your browsing record**. A chosen zip is identified before anything happens to it, so handing the restore a logs bundle is refused with an explanation rather than accepted and half-applied.
 
 ![Traffic capture, Start at login, and Backup and restore, at the foot of the Advanced page](docs/screenshots/advanced-backup.png)

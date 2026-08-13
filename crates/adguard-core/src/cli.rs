@@ -19,7 +19,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use crate::model::{Consent, Filter, FilterAction, FilterSet, License, ProxyStatus};
+use crate::model::{
+    ComponentUpdate, Consent, Filter, FilterAction, FilterSet, License, ProxyStatus, UpdatePart,
+    UpdateReport, Verdict,
+};
 use crate::paths;
 
 /// Deadline for the local commands — `status`, `config get/set`.
@@ -501,6 +504,49 @@ impl Cli {
             Some(message) => Err(Error::Refused { message }),
             None => Ok(last_line(&out.stdout).unwrap_or_default()),
         }
+    }
+
+    /// Refresh the filter lists, DNS filter lists, userscripts, Safe Browsing
+    /// and CRLite, and ask whether a newer AdGuard CLI exists.
+    ///
+    /// **The command's name is the one misleading thing about it.** It is not a
+    /// check: five of the six components are *updated*, and only the sixth — the
+    /// application — is merely checked. Anything that describes this to a user
+    /// has to say so, which is why nothing in the UI is labelled with the word
+    /// "check" alone (contract §14).
+    ///
+    /// # What it does not tell you
+    ///
+    /// The exit status. Measured over fourteen runs, five of which failed a
+    /// component: **every one of them exited 0 with empty stderr**. So this is
+    /// the strongest form of contract §3's rule in the tree — the status is not
+    /// merely half-trustworthy here, it carries no information about the outcome
+    /// at all, and [`parse_update_report`] derives every verdict from the text.
+    ///
+    /// It does not name the component in its failures either. `Failed to update
+    /// filters` is what both the HTTP filter and the DNS filter component print,
+    /// so the pairing with the header is the only thing that distinguishes them
+    /// and is done in the parser rather than left to a caller.
+    ///
+    /// # It needs no licence, and it takes seconds
+    ///
+    /// Unlike `status`, `license`, `filters list` and every `filters` write
+    /// subcommand, this runs on an unlicensed install and really updates there —
+    /// so the control that calls it needs no licence caveat.
+    ///
+    /// [`NETWORK_TIMEOUT`] rather than [`LOCAL_TIMEOUT`]: the measured range is
+    /// 1.8–7.3 s, but this is the one command in the app that reaches
+    /// `filters.adtidy.org` for everything at once, and a hang there is what the
+    /// generous deadline exists for.
+    ///
+    /// Callers must still re-read whatever they display: `UpdateReport::changed`
+    /// says a catalogue moved, and the catalogue itself says what it moved to.
+    pub fn check_update(&self) -> Result<UpdateReport, Error> {
+        let out = self.run_within(&["check-update"], NETWORK_TIMEOUT)?;
+        parse_update_report(&out.stdout).ok_or_else(|| Error::Unparseable {
+            args: "check-update".to_owned(),
+            output: out.stdout.clone(),
+        })
     }
 
     /// Read the licence.
@@ -1622,6 +1668,93 @@ fn parse_license(stdout: &str) -> Option<License> {
     saw_status.then_some(license)
 }
 
+/// What a `check-update` header line opens with.
+const CHECKING: &str = "Checking ";
+/// And what it closes with. Three full stops, as measured — not an ellipsis.
+const UPDATES: &str = " updates...";
+
+/// Parse `adguard-cli check-update`.
+///
+/// The output is pairs — a `Checking <name> updates...` line, then a verdict on
+/// the next — and three things about that shape decide how this is written
+/// (contract §14):
+///
+/// **The verdict is meaningless without its header**, because `Failed to update
+/// filters` is what both filter components print. So a verdict is never held
+/// anywhere but beside the name it answers.
+///
+/// **A first run prints `Created data directory <path>` before the first
+/// header.** Everything ahead of the first header is skipped rather than
+/// treated as a verdict with nothing to belong to, which is what would make a
+/// first run — the very run a new install performs — unparseable.
+///
+/// **A header the CLI never answered is kept, not dropped.** Truncated output
+/// means a component whose outcome is unknown, and a report that silently
+/// listed five components where AdGuard named six would be a UI claiming
+/// completeness it does not have. It arrives as [`Verdict::Unrecognised`]
+/// carrying an empty sentence.
+///
+/// `None` only when not a single header was seen, which is the [§3] rule about
+/// unrecognised shapes: fail loudly, rather than hand back an empty report that
+/// reads exactly like a run in which nothing needed doing.
+///
+/// [§3]: ../../../docs/cli-contract.md
+fn parse_update_report(stdout: &str) -> Option<UpdateReport> {
+    let mut components: Vec<ComponentUpdate> = Vec::new();
+    let mut pending: Option<UpdatePart> = None;
+
+    let unanswered = |part: UpdatePart| ComponentUpdate {
+        part,
+        verdict: Verdict::Unrecognised,
+        said: String::new(),
+    };
+
+    for line in stdout.lines().map(str::trim) {
+        if line.is_empty() {
+            continue;
+        }
+        match header(line) {
+            Some(part) => {
+                // Two headers in a row: the previous component was announced and
+                // never answered.
+                if let Some(previous) = pending.replace(part) {
+                    components.push(unanswered(previous));
+                }
+            }
+            // Only the line immediately after a header is a verdict. Anything
+            // else — the created-directory line, or noise between pairs — falls
+            // through here with nothing pending and is ignored.
+            None => {
+                if let Some(part) = pending.take() {
+                    components.push(ComponentUpdate {
+                        part,
+                        verdict: Verdict::classify(line),
+                        said: line.to_owned(),
+                    });
+                }
+            }
+        }
+    }
+
+    if let Some(part) = pending.take() {
+        components.push(unanswered(part));
+    }
+
+    (!components.is_empty()).then_some(UpdateReport { components })
+}
+
+/// The component a `Checking … updates...` line announces, or `None` for any
+/// other line.
+///
+/// Both ends are required. Matching the prefix alone would read the CLI's own
+/// `Checking for updates` prose — were it ever to print any — as a component
+/// named `for`.
+fn header(line: &str) -> Option<UpdatePart> {
+    line.strip_prefix(CHECKING)
+        .and_then(|rest| rest.strip_suffix(UPDATES))
+        .map(UpdatePart::from_header)
+}
+
 /// Keep the shape of some output and drop every value in it.
 ///
 /// For the one failure path that would otherwise quote `license` output
@@ -2651,5 +2784,248 @@ mod tests {
             "expected well over one pipe buffer, got {} bytes",
             out.stdout.len()
         );
+    }
+
+    // ---- check-update, contract §14 ----
+    //
+    // All four fixtures are real captures from 9 August 2026, v1.4.13, and
+    // carry no ANSI escapes because this command emits none — which is why
+    // they are written as plain text where `RUNNING` above is not.
+
+    /// A run in which nothing needed doing, except the two components that say
+    /// `Updated` on every run of a working install.
+    const CLEAN: &str = "Checking filters updates...\n\
+         Up to date\n\
+         Checking DNS filters updates...\n\
+         Up to date\n\
+         Checking userscripts updates...\n\
+         Up to date\n\
+         Checking SafebrowsingV2 updates...\n\
+         Updated\n\
+         Checking CRLite updates...\n\
+         Updated\n\
+         Checking app updates...\n\
+         Up to date\n";
+
+    /// The **DNS** filters failed here. Exit was 0 and stderr was empty.
+    const DNS_FAILED: &str = "Checking filters updates...\n\
+         Up to date\n\
+         Checking DNS filters updates...\n\
+         Failed to update filters\n\
+         Checking userscripts updates...\n\
+         Up to date\n\
+         Checking SafebrowsingV2 updates...\n\
+         Updated\n\
+         Checking CRLite updates...\n\
+         Updated\n\
+         Checking app updates...\n\
+         Up to date\n";
+
+    /// The **HTTP** filters failed here — and the sentence is the same one.
+    const FILTERS_FAILED: &str = "Checking filters updates...\n\
+         Failed to update filters\n\
+         Checking DNS filters updates...\n\
+         Up to date\n\
+         Checking userscripts updates...\n\
+         Up to date\n\
+         Checking SafebrowsingV2 updates...\n\
+         Updated\n\
+         Checking CRLite updates...\n\
+         Updated\n\
+         Checking app updates...\n\
+         Up to date\n";
+
+    /// A first run against a virgin `$XDG_DATA_HOME`, opening with a line that
+    /// is not part of any pair.
+    const FIRST_RUN: &str = "Created data directory /tmp/sandbox/adguard-cli\n\
+         Checking filters updates...\n\
+         1 filter(s) updated\n\
+         Checking DNS filters updates...\n\
+         Failed to update filters\n\
+         Checking userscripts updates...\n\
+         Up to date\n\
+         Checking SafebrowsingV2 updates...\n\
+         Up to date\n\
+         Checking CRLite updates...\n\
+         Up to date\n\
+         Checking app updates...\n\
+         Up to date\n";
+
+    fn report(stdout: &str) -> UpdateReport {
+        parse_update_report(stdout).expect("should parse")
+    }
+
+    #[test]
+    fn parses_a_clean_check_update() {
+        let report = report(CLEAN);
+        let parts: Vec<_> = report.components.iter().map(|c| c.part.clone()).collect();
+        assert_eq!(
+            parts,
+            vec![
+                UpdatePart::Filters,
+                UpdatePart::DnsFilters,
+                UpdatePart::Userscripts,
+                UpdatePart::SafeBrowsing,
+                UpdatePart::CrLite,
+                UpdatePart::App,
+            ],
+            "the six components, in the order AdGuard listed them"
+        );
+        assert!(report.failures().next().is_none());
+        assert_eq!(report.app_notice(), None, "an up-to-date app has nothing to say");
+        assert!(!report.changed(&UpdatePart::Filters));
+        assert!(report.changed(&UpdatePart::SafeBrowsing));
+    }
+
+    /// **The trap in contract §14.** `Failed to update filters` is printed for
+    /// a failure of either filter component and names neither, so the header is
+    /// the only thing that says which one. Two real captures differing in
+    /// nothing but which header the identical sentence sits under.
+    #[test]
+    fn check_update_pairs_each_verdict_with_its_header() {
+        let dns = report(DNS_FAILED);
+        let http = report(FILTERS_FAILED);
+
+        let said = "Failed to update filters";
+        assert_eq!(dns.part(&UpdatePart::DnsFilters).unwrap().said, said);
+        assert_eq!(http.part(&UpdatePart::Filters).unwrap().said, said);
+
+        assert_eq!(dns.part(&UpdatePart::DnsFilters).unwrap().verdict, Verdict::Failed);
+        assert_eq!(dns.part(&UpdatePart::Filters).unwrap().verdict, Verdict::UpToDate);
+        assert_eq!(http.part(&UpdatePart::Filters).unwrap().verdict, Verdict::Failed);
+        assert_eq!(http.part(&UpdatePart::DnsFilters).unwrap().verdict, Verdict::UpToDate);
+    }
+
+    /// A first run — the one every new install performs — opens with a line
+    /// that belongs to no pair. Reading it as a verdict would shift every
+    /// component onto the wrong header.
+    #[test]
+    fn check_update_skips_the_created_directory_line() {
+        let report = report(FIRST_RUN);
+        assert_eq!(report.components.len(), 6);
+        assert_eq!(report.components[0].part, UpdatePart::Filters);
+        assert_eq!(report.components[0].said, "1 filter(s) updated");
+        assert!(report.changed(&UpdatePart::Filters), "a count is a change");
+        assert_eq!(report.part(&UpdatePart::DnsFilters).unwrap().verdict, Verdict::Failed);
+    }
+
+    /// Every one of the fourteen measured runs exited 0, including the five that
+    /// failed a component. Nothing in the parse may consult the status, and a
+    /// caller must be able to see the failure that exit 0 concealed.
+    #[test]
+    fn a_failed_component_survives_a_successful_exit() {
+        let report = report(DNS_FAILED);
+        let failed: Vec<_> = report.failures().map(|c| c.part.clone()).collect();
+        assert_eq!(failed, vec![UpdatePart::DnsFilters]);
+    }
+
+    /// Of the two ways to misread a reworded sentence, only one loses something
+    /// the user needed. A failure must never be classified as a change — not
+    /// even one that ends in the word the change rule matches.
+    #[test]
+    fn failure_is_classified_before_success() {
+        assert_eq!(Verdict::classify("Failed to update filters"), Verdict::Failed);
+        assert_eq!(
+            Verdict::classify("Failed after 3 filter(s) updated"),
+            Verdict::Failed,
+            "the failure rule has to win, or a bad run reads as a good one"
+        );
+    }
+
+    #[test]
+    fn classifies_every_measured_verdict() {
+        assert_eq!(Verdict::classify("Up to date"), Verdict::UpToDate);
+        assert_eq!(Verdict::classify("Updated"), Verdict::Changed);
+        assert_eq!(Verdict::classify("1 filter(s) updated"), Verdict::Changed);
+        assert_eq!(Verdict::classify("1 DNS filter(s) updated"), Verdict::Changed);
+        assert_eq!(Verdict::classify("Failed to update filters"), Verdict::Failed);
+    }
+
+    /// What the app line says when an update exists has never been observed
+    /// (contract §14), so anything that is not `Up to date` has to reach the
+    /// user as AdGuard's own words rather than as an interpretation of them.
+    #[test]
+    fn an_unmeasured_app_verdict_is_repeated_verbatim() {
+        let stdout = "Checking app updates...\nA new version 1.5.0 is available\n";
+        let report = report(stdout);
+        assert_eq!(report.part(&UpdatePart::App).unwrap().verdict, Verdict::Unrecognised);
+        assert_eq!(report.app_notice(), Some("A new version 1.5.0 is available"));
+    }
+
+    /// A failed app *check* is not a release.
+    ///
+    /// It is already reported by `failures()`, so letting it through
+    /// `app_notice` too would show one event twice — the second time as a
+    /// notice recommending `adguard-cli update`, which is advice derived from a
+    /// check that did not finish.
+    #[test]
+    fn a_failed_app_check_is_a_failure_and_not_a_notice() {
+        let report = report("Checking app updates...\nFailed to check for updates\n");
+        assert_eq!(report.part(&UpdatePart::App).unwrap().verdict, Verdict::Failed);
+        assert_eq!(report.app_notice(), None, "a failed check is not news of a release");
+        assert_eq!(report.failures().count(), 1, "and it is not silently swallowed either");
+    }
+
+    /// An announced-but-unanswered app header would otherwise reach the page as
+    /// `Some("")` — a notice with nothing in it, saying only that something is
+    /// wrong. `failures()` does not catch this one, so the guard has to.
+    #[test]
+    fn an_empty_app_sentence_is_not_a_notice() {
+        let report = report("Checking app updates...\n");
+        assert_eq!(report.part(&UpdatePart::App).unwrap().verdict, Verdict::Unrecognised);
+        assert_eq!(report.app_notice(), None);
+    }
+
+    /// Truncated output means a component whose outcome is unknown. Dropping it
+    /// would leave a report that lists five where AdGuard named six, and reads
+    /// as complete.
+    #[test]
+    fn an_unanswered_header_is_kept_as_unrecognised() {
+        let report = report("Checking filters updates...\nUp to date\nChecking app updates...\n");
+        assert_eq!(report.components.len(), 2);
+        let app = report.part(&UpdatePart::App).unwrap();
+        assert_eq!(app.verdict, Verdict::Unrecognised);
+        assert!(app.said.is_empty());
+    }
+
+    /// A component this build has never heard of is shown under the CLI's own
+    /// name rather than dropped from a report the user reads as complete.
+    #[test]
+    fn an_unknown_component_is_carried_rather_than_dropped() {
+        let report = report("Checking quantum updates...\nUp to date\n");
+        assert_eq!(report.components[0].part, UpdatePart::Other("quantum".to_owned()));
+        assert_eq!(report.components[0].part.title(), "quantum");
+        assert_eq!(report.components[0].verdict, Verdict::UpToDate);
+    }
+
+    /// An output shape with no header at all is a failure, not an empty report
+    /// — which would render exactly like a run in which nothing needed doing.
+    #[test]
+    fn unrecognised_check_update_output_is_rejected() {
+        assert!(parse_update_report("").is_none());
+        assert!(parse_update_report("something else entirely").is_none());
+        assert!(
+            parse_update_report("Created data directory /tmp/x/adguard-cli").is_none(),
+            "the skipped line is not a report on its own"
+        );
+    }
+
+    /// Both ends of the header are required, so ordinary prose beginning
+    /// `Checking ` cannot become a component named after its second word.
+    #[test]
+    fn a_header_needs_both_of_its_ends() {
+        assert_eq!(header("Checking filters updates..."), Some(UpdatePart::Filters));
+        assert_eq!(header("Checking for updates"), None);
+        assert_eq!(header("Up to date"), None);
+    }
+
+    /// The catalogue re-reads key on this, and a page is re-read because
+    /// something was said to have moved — never because nothing was said.
+    #[test]
+    fn a_component_the_cli_did_not_mention_did_not_change() {
+        let report = report("Checking app updates...\nUp to date\n");
+        assert!(!report.changed(&UpdatePart::Filters));
+        assert!(!report.changed(&UpdatePart::DnsFilters));
+        assert_eq!(report.part(&UpdatePart::Filters), None);
     }
 }

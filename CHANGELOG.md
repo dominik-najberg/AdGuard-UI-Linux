@@ -13,6 +13,56 @@ This file is the one changelog.
 
 ## Unreleased
 
+### An About page, with a manual update
+
+Asked for from the outside ([#4](https://github.com/dominik-najberg/AdGuard-UI-Linux/issues/4)): a
+way to update AdGuard's filters and check for a new version without opening a
+terminal. It arrives as a new **About** page, last in the sidebar, which also
+gives the application somewhere to show two things it had never shown at all —
+its own version and the AdGuard CLI's, with the path the CLI was found at.
+
+One button updates the filter lists, DNS filter lists, userscripts, Safe
+Browsing data and certificate revocation data, and asks whether a newer AdGuard
+CLI has been released. Each component is reported in AdGuard's own words. There
+is deliberately no summary count: Safe Browsing and certificate revocation
+answer *Updated* on every run of a working install, so a count would read the
+same forever while appearing to describe your machine.
+
+A component that fails says so and invites another attempt, which is what the
+measurements support — failures were common and cleared on the next run every
+time. The Filters and DNS pages are re-read when their catalogues actually
+moved.
+
+A row above the button says when new filter data last arrived, read from the
+filter databases rather than fetched. It says *changed* rather than *checked* on
+purpose: AdGuard's daemon refreshes on its own every few hours, and the
+timestamp behind the row moves only when something actually came down — so a
+long gap means the lists have not been revised, not that nothing has looked.
+This is why there is no check-on-launch setting: it would re-do at every launch
+what the daemon did a few hours earlier, and under `--background` it would fire
+at login with no window to report into.
+
+A second button checks whether a newer **AdGuard UI** has been released, which
+nothing in the application could tell you before — the version row was a string
+with nothing behind it. It is the only request this application makes of its
+own, so the group discloses that above the button: it asks github.com, it names
+the application and its version, and it carries nothing about you or the
+machine. It happens only when pressed — never at launch and never on a timer —
+and it reports rather than installs, because releases are a `.deb` and a tarball
+with no apt repository behind them.
+
+The client uses the platform certificate verifier rather than bundled roots, and
+that is measured rather than idiomatic: on a machine filtering system-wide,
+AdGuard intercepts this very connection and re-signs it with its own CA, which
+lives in the system trust store. Bundled roots would fail on exactly the
+machines this application is for.
+
+**An available application update is reported, never installed.** Updating
+AdGuard replaces its privileged helper, and this application performs no
+privileged operation of its own, so it names `adguard-cli update` and leaves
+running it to you. Automatic checks and a tray entry are both deliberately out
+of scope; the issue records why.
+
 ### Trusted custom filters, as a control on the row
 
 Asked for from the outside ([#2](https://github.com/dominik-najberg/AdGuard-UI-Linux/issues/2)): a

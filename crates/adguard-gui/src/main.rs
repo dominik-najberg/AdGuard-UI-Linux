@@ -5,6 +5,7 @@
 //! `docs/architecture.md` for the split and `docs/cli-contract.md` for the
 //! measured CLI behaviour the wrapper encodes.
 
+mod about;
 mod advanced;
 mod autostart;
 mod backup;
@@ -441,7 +442,7 @@ fn missing_cli_view(message: &str) -> adw::ToolbarView {
 }
 
 /// Sidebar entries, in order. The id doubles as the stack child name.
-const PAGES: [Page; 6] = [
+const PAGES: [Page; 7] = [
     Page {
         id: "status",
         title: "Status",
@@ -471,6 +472,14 @@ const PAGES: [Page; 6] = [
         id: "advanced",
         title: "Advanced",
         icon: "emblem-system-symbolic",
+    },
+    // Last, as #4 asked. It is the only page that is about the installation
+    // rather than about what the installation is doing, so it sorts below every
+    // page that answers a question about protection.
+    Page {
+        id: "about",
+        title: "About",
+        icon: "help-about-symbolic",
     },
 ];
 
@@ -581,6 +590,9 @@ fn main_view(cli: &Cli) -> MainView {
     // stealth switch Protection shows (handoff §3 gap 4). The master switch
     // stays on Protection, so there is still exactly one writer for that key.
     let stealth = advanced::AdvancedPage::new(cli.clone(), toasts.clone(), &STEALTH);
+    // The two version numbers, and the one control that reaches AdGuard's
+    // servers because the user asked it to (#4).
+    let about = about::AboutPage::new(cli.clone(), toasts.clone());
 
     let stack = gtk::Stack::new();
     stack.add_named(status.widget(), Some(PAGES[0].id));
@@ -589,7 +601,39 @@ fn main_view(cli: &Cli) -> MainView {
     stack.add_named(&dns.widget(), Some(PAGES[3].id));
     stack.add_named(stealth.widget(), Some(PAGES[4].id));
     stack.add_named(advanced.widget(), Some(PAGES[5].id));
+    stack.add_named(about.widget(), Some(PAGES[6].id));
     toasts.set_child(Some(&stack));
+
+    // `check-update` rewrites the filter databases, and **nothing watches
+    // them**: `watch.rs` monitors `proxy.yaml` alone, so an update that moved a
+    // catalogue would otherwise sit behind a page still showing the old one
+    // until something else rebuilt it. (`architecture.md` §3 claimed those files
+    // were watched; they never have been, and this is the change that had to
+    // find out.)
+    //
+    // The About page reports what moved and reaches into nothing — the same
+    // division as `StatusPage::connect_navigate`, where the page names what it
+    // wants and the window knows which page holds it. Weak, because the sidebar
+    // holds a strong `about` and a strong capture here would close the loop.
+    about.connect_checked({
+        let filters = Rc::downgrade(&filters);
+        let dns = Rc::downgrade(&dns);
+        move |report: &adguard_core::UpdateReport| {
+            // Only on a reported change. A component the CLI did not mention, or
+            // one that failed, has moved nothing worth re-reading — and a
+            // rebuild would discard the catalogue's scroll position for nothing.
+            if report.changed(&adguard_core::UpdatePart::Filters) {
+                if let Some(filters) = filters.upgrade() {
+                    filters.reload();
+                }
+            }
+            if report.changed(&adguard_core::UpdatePart::DnsFilters) {
+                if let Some(dns) = dns.upgrade() {
+                    dns.reload();
+                }
+            }
+        }
+    });
 
     let content_header = adw::HeaderBar::new();
     let content_title = adw::WindowTitle::new(PAGES[0].title, "");
@@ -609,12 +653,18 @@ fn main_view(cli: &Cli) -> MainView {
         let advanced = advanced.clone();
         let stealth = stealth.clone();
         let dns = dns.clone();
+        let about = about.clone();
         move |_| match stack.visible_child_name().as_deref() {
             Some("protection") => protection.reload(),
             Some("filters") => filters.reload(),
             Some("dns") => dns.reload(),
             Some("stealth") => stealth.reload(),
             Some("advanced") => advanced.reload(),
+            // Re-reads the CLI's version and nothing else. Deliberately does
+            // **not** run `check-update`: on every other page this button is a
+            // cheap re-read, and here that would make it a network fetch with
+            // side effects on the user's filters.
+            Some("about") => about.reload(),
             _ => status.reload(),
         }
     });
@@ -982,5 +1032,28 @@ mod tests {
     #[test]
     fn status_is_the_first_page() {
         assert_eq!(PAGES[0].id, "status");
+    }
+
+    /// About is last, which is where [#4] asked for it and where it belongs:
+    /// every page above it answers a question about protection, and this one is
+    /// about the installation. A page inserted after it would put a version
+    /// number between two settings pages.
+    ///
+    /// [#4]: https://github.com/dominik-najberg/AdGuard-UI-Linux/issues/4
+    #[test]
+    fn about_is_the_last_page() {
+        assert_eq!(PAGES.last().expect("PAGES is never empty").id, "about");
+    }
+
+    /// Each id names exactly one page. They are stack child names, sidebar
+    /// lookups and the refresh button's match arms all at once, so a duplicate
+    /// would be a page that cannot be shown rather than a compile error.
+    #[test]
+    fn every_page_id_is_distinct() {
+        let mut ids: Vec<_> = PAGES.iter().map(|page| page.id).collect();
+        ids.sort_unstable();
+        let count = ids.len();
+        ids.dedup();
+        assert_eq!(ids.len(), count, "two pages share an id");
     }
 }

@@ -81,7 +81,7 @@ There is no push/event mechanism anywhere in the CLI, so:
 
 - **Runtime status** — poll `adguard-cli status` on a ~2 s timer while a window is open; slow to ~10 s when only the tray is visible. At 10 ms per call this is negligible. Implemented in `status.rs` as one tick in five while the window is hidden, which is only possible because the tray shares this process (§4).
 - **Config** — watched with `gio::FileMonitor`, in `adguard-gui/src/watch.rs`. External edits (the user is expected to hand-edit; the CLI even suggests it) appear live in the UI.
-- **Filters** — watch the `.db` files with the same mechanism, debounced; the daemon rewrites them on update.
+- **Filters** — ~~watch the `.db` files with the same mechanism, debounced; the daemon rewrites them on update.~~ **This was never built, and the line stood here for two milestones describing something that does not exist.** `watch.rs` monitors `proxy.yaml` and nothing else; the `agflm_*.db` files have no monitor, so a catalogue that moves behind the app's back is invisible until something rebuilds the page. It went unnoticed because every path that changed a catalogue until now was one this application had itself taken, and each of those re-reads on its own. The About page's update control is the first that changes them *without* being the page that renders them, and it therefore re-reads them explicitly rather than relying on this — see `main_view`'s `connect_checked`. Whether the monitor is worth building is open; what is not open is this file claiming it exists.
 
 **A file monitor on `proxy.yaml` cannot trust its events.** Measured (contract §5): *every* `adguard-cli` invocation rewrites the file and touches its mtime, even `--version`, and even when no byte changes. Combined with the 2 s `status` poll above, a naive monitor would fire continuously against changes we caused ourselves — and each reload would repaint the page under the user's pointer.
 
@@ -174,6 +174,7 @@ An `AdwApplicationWindow` with `AdwNavigationSplitView`, plus `AdwToastOverlay` 
 | **DNS** | DNS filter list, user rules, upstream/fallback/bootstrap servers, listen port, ECH blocking | `agflm_dns.db`, `dns_filtering.*` |
 | **Advanced** | Proxy mode, HTTPS filtering, secure DNS filtering, ports, listen address, auth, outbound proxy, worker threads, log level | `proxy.yaml` → `config set` |
 | **Stealth** | The 26 settings behind the one `stealthmode.enabled` switch Protection shows: cookies, tracking, identity, browser APIs, anti-DPI | `proxy.yaml` → `config set` |
+| **About** | The two version numbers — this application's and the CLI's — the binary's path, when filter data last changed, the one control that updates filters and asks after a newer AdGuard CLI, a result row per component in AdGuard's own words, a *Check* for a newer AdGuard UI, and the project links. Last in the sidebar: the only page about the installation rather than about what it is doing | `--version`, `check-update` (contract §14), `agflm_*.db`, and **one HTTPS request to github.com** — §6 |
 
 Notes that shape the widgets:
 
@@ -484,6 +485,44 @@ The corollary is worth stating for anyone tempted to add one later: a root-invok
 
 `data/io.github.dominik-najberg.AdGuardUI.policy` was deleted with the auto-mode work. It declared three polkit actions against `/usr/libexec/adguard-ui-helper`, a binary that was never written and now never will be, and its own header still asserted that AdGuard "ships no polkit policy … so there is nothing to reuse" — the conclusion contract §8 retracted. Nothing installed it; `building.md` §4 says so and now says how to remove it if an older checkout did.
 
+### The one request this application makes of its own
+
+Everything else in this document is about not doing things: no daemon, no
+privileged operation, no writes outside the CLI. This is the exception, and it is
+worth stating plainly because it changes a property the project had until 1.2.0
+— **the application never spoke to anything but `adguard-cli`.**
+
+The About page's *Check* asks `api.github.com` whether a newer AdGuard UI has
+been released. Four constraints make that acceptable rather than a slippery
+slope:
+
+- **It happens only when a button is pressed.** Never at launch, never on a
+  timer, never as a side effect of anything else. A check on launch was proposed
+  and refused for its own reasons (contract §14); this one is refused for this
+  one as well.
+- **It is disclosed where it is made**, in the group's description, before the
+  button rather than in a changelog. A user running an ad blocker meets the fact
+  that this application can talk to a third party at the moment it matters.
+- **It carries nothing about the user.** The request is a `GET` with a
+  `User-Agent` naming the application and its version. No identifier, no
+  configuration, no machine detail.
+- **It reports and never acts.** Releases are a `.deb` and a tarball with no apt
+  repository behind them, so there is nothing to install even if this were
+  willing to. It names the release and offers the notes.
+
+**The certificate path is a measured requirement, not a default.** On a machine
+filtering system-wide — which is what this application exists to configure —
+AdGuard intercepts *this very connection* and re-signs it with its own CA. That
+CA is in the **system** trust store. So the client must use the platform
+verifier: a bundled Mozilla root set would fail on precisely the machines this
+application is for, and it would fail in a way that looks like GitHub being
+down. Measured 11 August 2026 — the live suite's request appears in AdGuard's own
+`access.log`, named after the test binary, and validates. The feature selection
+in the workspace manifest carries that reasoning where a reader will meet it.
+
+`adguard-core/src/release.rs` holds it, and it is the one module in that crate
+that is not about `adguard-cli` at all.
+
 ### Clearing a wedged proxy process is not one of these
 
 One recovery the app *does* perform itself, and the boundary is worth stating precisely so this section is not read as forbidding it.
@@ -589,6 +628,10 @@ One measured detail no plan carried: **the stock `location` is `'.'`** — measu
 ### Added after v2's scope closed
 
 **The trusted-custom-filter control** (§5), built 6 August 2026 for [issue #2](https://github.com/dominik-najberg/AdGuard-UI-Linux/issues/2). It is recorded here for the same reason the certificate and browser-integration checks are recorded above v1's list: it is not a scope change so much as the missing half of something already in. Custom filter install by URL was v1 *In*, removal followed it, and a list's trusted state is the third thing that can be true of a row this application was already rendering — reachable only from a terminal until someone outside said so.
+
+**The About page and its update control** (§5), built 9 August 2026 for [issue #4](https://github.com/dominik-najberg/AdGuard-UI-Linux/issues/4) — the second item to arrive from outside, and the first that adds a page. It also gave the application somewhere to put two things it had never shown at all: its own version, and the CLI's.
+
+Three decisions in it are this section's rather than the page's. **It reports an available application update and never applies one** — `adguard-cli update` re-runs an installer over the suid root helper, and §6's rule is that this application performs no privileged operation of its own; naming a command is what it already does for that helper and for the certificate. **Automatic or periodic checks are out**, because a GUI that may not be running is a poor scheduler and the daemon refreshes filters on its own. **And there is no tray entry**: a two-minute network operation started from a menu has nowhere to report progress or a result, and §4's reason for the tray sharing this process — one writer, one view — argues against giving it a second way to start one.
 
 **What is worth carrying forward is where it came from.** Every other feature in both milestones was chosen from the inside, and this one was not; nothing in either list had proposed it, and taking it turned up CLI behaviour four measurements deep that no amount of re-reading the contract would have produced (contract §6, `handoff.md` §0). This section stays the scope authority, and an item arriving from outside is a legitimate way for something to enter it — it does not get to skip the measure-first rule, and this one did not.
 
