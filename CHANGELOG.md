@@ -11,6 +11,33 @@ This file is the one changelog.
 
 ---
 
+## Unreleased
+
+### The removal button now greys its own row while it asks
+
+Found by reading the code rather than reported
+([#5](https://github.com/dominik-najberg/AdGuard-UI-Linux/issues/5)): the trash
+button on a custom filter list asked *Remove this filter list?* without greying
+anything out first, so nothing on the row stopped a second click landing in the
+moment before the dialog appeared. Two clicks fast enough — a physical
+double-click, not anything anyone does on purpose — opened two dialogs for the
+same list, and answering both left a *Filter not found* toast behind an
+otherwise successful removal.
+
+**Nothing could ever be lost by it, and it is listed here as tidiness rather
+than as a data-loss fix.** AdGuard never reuses a filter's id, so the second
+command had nothing left to delete and could only be refused; what it cost was a
+duplicated dialog and a toast that read like a failure.
+
+The row now goes insensitive the moment the button is pressed and stays that way
+until the question is answered — the switch and the trust padlock with it, so
+nothing else can be started against a list that is already being asked about.
+Cancelling puts the row straight back, and confirming leaves it grey for the
+length of the removal, as before. That is what every other control on this page
+already did, and this was the one that did not.
+
+---
+
 ## 1.4.0 — 14 August 2026
 
 ### The window remembers how big it was
