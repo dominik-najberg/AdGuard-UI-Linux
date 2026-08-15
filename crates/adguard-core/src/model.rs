@@ -1541,6 +1541,77 @@ impl FilterCatalogue {
     }
 }
 
+/// One installed userscript, as the Extensions page renders it.
+///
+/// Assembled by [`crate::userscripts`] from two sources that answer different
+/// questions — the `userscripts/` directory for what is installed, `proxy.yaml`
+/// for what is switched on. See contract §15.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Userscript {
+    /// The filename stem of the pair, e.g. `adguard-extra`.
+    ///
+    /// This is what `userscripts enable|disable|remove` is given — though the
+    /// CLI matches it as a *substring* against ids and titles alike, which is
+    /// what [`Self::ambiguous`] is about.
+    pub id: String,
+    /// Localised `name`, already fallen back through the bare language to the
+    /// plain `name` key. Empty when the metadata carries none.
+    pub name: String,
+    /// Localised `description`; empty when there is none.
+    pub description: String,
+    /// `version` from the metadata. `None` when the script's source carried no
+    /// `@version` — the CLI stores `""` for it, and issue #9 asks for the
+    /// version *"when it is available"*, so absence is a state to render
+    /// rather than a blank to print.
+    pub version: Option<String>,
+    /// `homepageURL`, falling back to `supportURL`. `None` when neither is set,
+    /// which is the ordinary case for a script installed from a bare URL.
+    pub homepage: Option<String>,
+    /// `downloadURL` — where the script came from, and the only thing that
+    /// makes a reinstall possible. `None` for a script whose metadata omits it.
+    pub download_url: Option<String>,
+    /// Whether `proxy.yaml`'s `userscripts:` list carries this script.
+    pub enabled: bool,
+    /// Whether the CLI can be made to act on this script at all.
+    ///
+    /// `true` when this id is a case-insensitive substring of **another**
+    /// installed script's id or title, which makes every `enable`, `disable`
+    /// and `remove` naming it refuse with `Multiple userscripts match …` — even
+    /// when the exact id was passed, because there is no exact-match flag to
+    /// reach for (contract §15).
+    ///
+    /// Computed here rather than in the GUI so that the value a row is drawn
+    /// from is the value that knows the row cannot be acted on. A page that
+    /// worked this out for itself would be re-deriving a CLI behaviour from a
+    /// widget.
+    pub ambiguous: bool,
+}
+
+impl Userscript {
+    /// What to call this script on screen.
+    ///
+    /// The id is the fallback rather than a placeholder: it is a real name the
+    /// user can act on, it is what the CLI's own messages will echo, and a
+    /// script with no `@name` is far likelier than a filter with no title —
+    /// nothing validates a userscript's metadata block.
+    pub fn display_name(&self) -> &str {
+        if self.name.trim().is_empty() {
+            &self.id
+        } else {
+            &self.name
+        }
+    }
+
+    /// Whether the two controls that change this script may be offered.
+    ///
+    /// The switch, the trash and the reinstall all go through a name the CLI
+    /// resolves by substring, so an ambiguous script can be shown and read but
+    /// not touched.
+    pub fn actionable(&self) -> bool {
+        !self.ambiguous
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

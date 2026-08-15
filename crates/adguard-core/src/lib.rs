@@ -17,6 +17,7 @@ pub mod orphan;
 pub mod paths;
 pub mod release;
 pub mod trust;
+pub mod userscripts;
 pub mod window_state;
 pub mod zip;
 
@@ -34,5 +35,5 @@ pub use locale::Locale;
 pub use model::{
     ComponentUpdate, Consent, Filter, FilterAction, FilterCatalogue, FilterGroup, FilterSet,
     FilterState, Kind, License, ProxyStatus, Setting, SettingGroup, Toggle, UpdatePart,
-    UpdateReport, Verdict, ADVANCED, ANNOYANCE_TERMS, FILTER_SETTINGS, SETUP, STEALTH,
+    UpdateReport, Userscript, Verdict, ADVANCED, ANNOYANCE_TERMS, FILTER_SETTINGS, SETUP, STEALTH,
 };

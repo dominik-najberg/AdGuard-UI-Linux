@@ -276,6 +276,42 @@ impl Config {
         DnsListenPort::from_int(self.int_at(key::DNS_LISTEN_PORT)?)
     }
 
+    /// The `meta:` path of every **enabled** userscript, in file order.
+    ///
+    /// This key is where a userscript's on/off state lives, and that is not a
+    /// guess about the file's layout — it is the whole state model. Measured
+    /// (contract §15): there is no `enabled` flag anywhere, in the config or in
+    /// the script's own metadata. `userscripts disable` **deletes the entry**
+    /// and leaves both files on disk, so this list answers *what is running*
+    /// while [`crate::paths::userscripts_dir`] answers *what is installed*.
+    /// Neither is the whole picture and [`crate::userscripts`] joins them.
+    ///
+    /// [`Self::list_at`] cannot read it: the entries are mappings
+    /// (`- meta: … content: …`), and that method drops everything that is not
+    /// a scalar. Only `meta` is returned because it is the file the reader
+    /// wants and its stem is the id; `content` names the JavaScript, which
+    /// nothing in this application opens.
+    ///
+    /// An absent, null or empty key all answer with an empty vector — three
+    /// spellings of *nothing is switched on*, which is a state a stock install
+    /// reaches the moment the last script is disabled (the CLI writes
+    /// `userscripts: []`). A malformed entry is skipped rather than failing
+    /// the read, on the same per-key tolerance as everything else here: it
+    /// costs that one row and not the page.
+    pub fn enabled_userscripts(&self) -> Vec<&str> {
+        self.at(key::USERSCRIPTS)
+            .as_vec()
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter_map(|entry| entry["meta"].as_str())
+                    .map(str::trim)
+                    .filter(|meta| !meta.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// The state of one Protection switch.
     ///
     /// `None` means the key is absent or holds something that is not a
@@ -533,6 +569,16 @@ pub mod key {
     /// would mean the GUI silently keeps the CLI's default answer to a question
     /// the CLI thought worth asking. Seeded `false`.
     pub const SEND_CRASH_REPORTS: &str = "send_crash_reports";
+
+    /// The enabled userscripts — a sequence of `meta`/`content` mappings.
+    ///
+    /// Read by [`Config::enabled_userscripts`] and **never written through
+    /// this constant**. It is a list key, so `config get` refuses it (contract
+    /// §5), but unlike `dns_filtering.filters` it is not written with
+    /// `list-add`/`list-remove` either: `userscripts enable`/`disable` own it,
+    /// and they take a script name rather than a config value. It is here so
+    /// the reader has one spelling of the path, not because anything sets it.
+    pub const USERSCRIPTS: &str = "userscripts";
 
     // --- the DNS page ---
     // `dns_filtering.filters` is the only real sequence of the four: it answers

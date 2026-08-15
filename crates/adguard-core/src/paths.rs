@@ -12,6 +12,7 @@ const ROOT_HELPER: &str = "adguard_root_helper";
 const CERT_INSTALLER: &str = "install_cert.sh";
 const DATA_SUBDIR: &str = "adguard-cli";
 const CONFIG_FILE: &str = "proxy.yaml";
+const USERSCRIPTS_SUBDIR: &str = "userscripts";
 
 fn home() -> Option<PathBuf> {
     env::var_os("HOME").map(PathBuf::from)
@@ -180,6 +181,32 @@ pub fn user_rules_file() -> Option<PathBuf> {
 /// The user's own DNS filtering rules.
 pub fn dns_user_rules_file() -> Option<PathBuf> {
     Some(data_dir()?.join("dns_user.txt"))
+}
+
+/// Where installed userscripts live: a `<id>.meta.json` + `<id>.user.js` pair
+/// per script, the filename stem being the id `userscripts enable|disable|remove`
+/// matches against.
+///
+/// **This directory says what is *installed*, and nothing more.** Whether a
+/// script is switched on is `proxy.yaml`'s `userscripts:` list —
+/// [`crate::Config::enabled_userscripts`] — because `userscripts disable`
+/// deletes the config entry and leaves both files right here (contract §15).
+/// A reader that consulted only one of the two would report every disabled
+/// script as absent, or every installed one as running.
+///
+/// The directory may not exist: it is created when the first script is
+/// installed, and a stock install has AdGuard Extra in it from the start.
+pub fn userscripts_dir() -> Option<PathBuf> {
+    Some(data_dir()?.join(USERSCRIPTS_SUBDIR))
+}
+
+/// [`userscripts_dir`] under an explicitly given `$XDG_DATA_HOME`.
+///
+/// For the same reason [`config_file_under`] exists: a [`crate::Cli`] pointed
+/// at a sandbox sets the variable on the child only, so it cannot ask this
+/// process's environment where its own data went.
+pub fn userscripts_dir_under(xdg_data_home: &Path) -> PathBuf {
+    data_dir_under(xdg_data_home).join(USERSCRIPTS_SUBDIR)
 }
 
 /// SQLite catalogue of HTTP/HTTPS filters. Open read-only.
