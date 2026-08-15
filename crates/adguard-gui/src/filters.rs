@@ -507,6 +507,30 @@ impl FiltersPage {
     /// subtler would be reached by the same gesture that toggles the list, and
     /// "off" and "gone" are exactly the two things that must not be confusable
     /// here.
+    ///
+    /// **The row is fenced at the click, not at the answer**, which it was not
+    /// until [issue #5]. The confirmation is presented from a spawned future, so
+    /// it is not up when this handler returns; GDK can dispatch more than one
+    /// queued event in a single main-loop iteration, and a click landing in that
+    /// gap used to get a future — and a dialog — of its own. Picking skips an
+    /// insensitive widget, so desensitising *here* closes the gap, where
+    /// [`remove`]'s own `set_sensitive(false)` runs only once the user has
+    /// already answered.
+    ///
+    /// What it cost was small, and that is not why it was fixed. Answering two
+    /// dialogs with *Remove* issued two `filters remove` for one id, the second
+    /// refused with `Filter not found`, so the outcome was a duplicated dialog
+    /// and a spurious toast rather than data loss — ids are never reused and the
+    /// row is already gone (contract §6). The reason is that every other action
+    /// on this page fences its own row at the click, [`toggle`] and
+    /// [`toggle_trust`] alike, and this was the one confirmed action that did
+    /// not: a rule the code applies consistently everywhere else, with one
+    /// exception nothing justified.
+    ///
+    /// [issue #5]: https://github.com/dominik-najberg/AdGuard-UI-Linux/issues/5
+    /// [`remove`]: Self::remove
+    /// [`toggle`]: Self::toggle
+    /// [`toggle_trust`]: Self::toggle_trust
     fn remove_button(self: &Rc<Self>, filter: &Filter) -> gtk::Button {
         let button = gtk::Button::from_icon_name("user-trash-symbolic");
         button.set_tooltip_text(Some("Remove this list"));
@@ -529,10 +553,22 @@ impl FiltersPage {
             let Some(this) = this.upgrade() else {
                 return;
             };
+            // The whole row rather than the button, exactly as `toggle_trust`
+            // does it: the switch and the trust control grey out with the trash,
+            // so nothing else can be started against a filter the user is
+            // already being asked about — and a second click cannot reach this
+            // button to open a second dialog.
+            if let Some(row) = this.rows.borrow().get(&filter.id) {
+                row.switch.set_sensitive(false);
+            }
             let filter = filter.clone();
             glib::spawn_future_local(async move {
                 if this.confirm_removal(&filter).await {
                     this.remove(&filter);
+                } else if let Some(row) = this.rows.borrow().get(&filter.id) {
+                    // Nothing was sent and nothing was painted, so the row is
+                    // the only thing there is to put back.
+                    row.switch.set_sensitive(true);
                 }
             });
         });
@@ -583,6 +619,13 @@ impl FiltersPage {
         if let Some(row) = self.rows.borrow().get(&id) {
             // Insensitive for the duration, so the switch cannot be flipped on
             // a filter that is being deleted.
+            //
+            // Already insensitive when the button is what called: that path
+            // fences the row at the click and holds it across the confirmation,
+            // for the reason `remove_button` gives. Kept anyway, because this is
+            // the fence that outlives the dialog — the CLI call is where the row
+            // spends most of its time greyed out — and because a guard beside
+            // the call site is one somebody can add a second call site around.
             row.switch.set_sensitive(false);
         }
 
