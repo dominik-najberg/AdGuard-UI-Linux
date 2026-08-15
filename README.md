@@ -99,6 +99,10 @@ Three groups at the foot of that page do more than set a key:
 
 **Start at login** writes the autostart entry described above, and is the only control here that changes nothing in `proxy.yaml`. It neither starts nor stops AdGuard's protection — what runs the proxy at login is AdGuard's own arrangement, not this — and it is painted from the file every time the window is focused, so it agrees with whatever a startup-applications editor last did. The Status page carries a read-only row reporting it, which leads here.
 
+**Backup and restore** exports your settings to a zip and restores one, with a third button beside the log level that bundles the logs for a bug report. Each of the three says the thing you would otherwise have to find out: a round trip **loses your DNS filter choices and DNS user rules**, because only `proxy.yaml` is exported; a restore leaves the **licence and the certificate untouched**; and the logs bundle **includes your configuration and not your browsing record**. A chosen zip is identified before anything happens to it, so handing the restore a logs bundle is refused with an explanation rather than accepted and half-applied.
+
+![Traffic capture, Start at login, and Backup and restore, at the foot of the Advanced page](docs/screenshots/advanced-backup.png)
+
 **Extensions** — the userscripts AdGuard injects into the pages you visit: one switch each, the version and description from the script's own metadata, a cog with its homepage and a reinstall, and a trash behind a confirmation. New ones are added by web address; AdGuard fetches userscripts over http or https only, so a file on your computer cannot be installed — unlike a custom filter list, which can. The page reads two things at once, because AdGuard keeps them apart: the `userscripts/` directory is what is installed, and `proxy.yaml` is what is switched on. Disabling leaves the script in place, so switching one off and deleting it are different acts here as they are there.
 
 ![The Extensions page](docs/screenshots/extensions.png)
@@ -118,10 +122,6 @@ It reports each component in AdGuard's own words rather than summarising them. T
 **A separate button checks whether a newer AdGuard UI has been released.** That is the one thing this application sends anywhere by itself — everything else it causes goes through `adguard-cli` — so the group says so above the button rather than leaving you to find out. The request names the application and its version and carries nothing about you or your machine, it happens only when you press it, and it reports rather than installs: releases are a `.deb` and a tarball with no apt repository behind them, so nothing updates this application on its own.
 
 **An available application update is reported and never installed.** Updating AdGuard replaces its privileged helper, and this application performs no privileged operation of its own — so it names `adguard-cli update` and leaves running it to you, exactly as it does for AdGuard's root helper and its certificate.
-
-**Backup and restore** exports your settings to a zip and restores one, with a third button beside the log level that bundles the logs for a bug report. Each of the three says the thing you would otherwise have to find out: a round trip **loses your DNS filter choices and DNS user rules**, because only `proxy.yaml` is exported; a restore leaves the **licence and the certificate untouched**; and the logs bundle **includes your configuration and not your browsing record**. A chosen zip is identified before anything happens to it, so handing the restore a logs bundle is refused with an explanation rather than accepted and half-applied.
-
-![Traffic capture, Start at login, and Backup and restore, at the foot of the Advanced page](docs/screenshots/advanced-backup.png)
 
 A **first-run assistant** covers the other end: on a machine with no `proxy.yaml` at all it checks the licence, seeds a configuration with one guarded `configure`, asks four questions, and writes the answers before handing over to the pages above. It also offers **restore from a backup**, in every branch including the two that will not set anything up — restoring is not licence-gated where seeding a configuration is, so it is reachable by exactly the user that screen otherwise turns away.
 
