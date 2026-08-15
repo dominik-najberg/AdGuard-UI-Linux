@@ -12,6 +12,7 @@ mod backup;
 mod browser_integration;
 mod certificate;
 mod dns;
+mod extensions;
 mod filter_settings;
 mod filters;
 mod geometry;
