@@ -264,9 +264,15 @@ adguard-cli userscripts enable  <userscript-name>
 adguard-cli userscripts disable <userscript-name>
 ```
 
-Userscripts are injected into filtered pages. `install` takes a URL only (not a local path). `remove`/`enable`/`disable` take the script's **name/ID** as shown by `list` — e.g. `adguard-extra`, not the display title "AdGuard Extra". AdGuard Extra ships pre-installed.
+Userscripts are injected into filtered pages. AdGuard Extra ships pre-installed, and **arbitrary third-party userscripts install alongside it** — measured 15 August 2026; `proxy.yaml`'s own comment that only AdGuard Extra is supported is stale. See contract §15, which is the authority for everything below.
 
-Scripts are stored as a `.meta.json` + `.user.js` pair under `~/.local/share/adguard-cli/userscripts/` and referenced from the `userscripts:` list in `proxy.yaml`.
+`install` takes an **http(s) URL only**. A local path and a `file://` URL are both refused with `Failed to install userscript`, which is where this differs from `filters install` — that one accepts both. The same sentence covers a 404 and a body that is not a userscript, so it says nothing about which went wrong. Re-installing a URL already installed updates it in place **and silently re-enables it** if it had been disabled.
+
+`remove`/`enable`/`disable` do **not** take an id. They take a case-insensitive **substring matched against both the id and the title**, with no exact-match flag — so `adguard-extra`, `AdGuard Extra` and `ADGUARD-EX` all reach the same script. The consequence is a trap: when one script's id or title contains another's, the shorter one cannot be named at all, and `enable`/`disable`/`remove` refuse it with `Multiple userscripts match …` even when the exact id was passed. Contract §15 has the measurement.
+
+**Enabled state lives in `proxy.yaml`, not in the script.** A userscript is enabled when it appears in the `userscripts:` list and disabled when it does not; `disable` removes the entry and leaves the files on disk. Neither the `.meta.json` nor the config entry carries an `enabled` flag.
+
+Scripts are stored as a `.meta.json` + `.user.js` pair under `~/.local/share/adguard-cli/userscripts/`, where the filename stem is the id. The metadata file carries the `@name`, `@version`, `@description`, `@homepage` and download URL — including localised `name:xx`/`description:xx` for ~40 languages — none of which `list` prints.
 
 ### Updates
 
@@ -349,7 +355,7 @@ Main file: `~/.local/share/adguard-cli/proxy.yaml`. Values below are this machin
 | `adguard_headers_enabled` | `false` | Adds `X-Adguard-Filtered` and `X-Adguard-Rule` **to responses**, on their way to the browser, naming the rule that matched. For debugging. The remote site never receives them — measured, 2 August 2026; the previous gloss named no direction, which is the ambiguity that made the measurement necessary |
 | `auto_enable_language_filters` | `true` | Adds and enables catalogue filters for **the language of the pages you visit as well as your system locale**. Never disables anything. Corrected 2 August 2026 — the previous gloss said "matching your system language", which dropped the half that runs continuously |
 | `filters` | `flm://`, `user.txt` | Active HTTP filter sources. `flm://` = the managed filter-list database; `user.txt` = your custom rules. |
-| `userscripts` | list of meta/content pairs | Installed userscripts |
+| `userscripts` | list of meta/content pairs | **Enabled** userscripts. Presence in this list *is* the enabled state — `userscripts disable` deletes the entry and leaves the files in `userscripts/`, so the directory and this key answer different questions. Contract §15 |
 | `apps` | see below | Per-application filtering rules |
 | `log_level` | `info` | Logging verbosity |
 | `access_log_file` | `access.log` | Access log filename. Resolved against `<data>/logs/`, **not** the data dir — measured 2 August 2026, the file is at `~/.local/share/adguard-cli/logs/access.log`. Do not generalise that base to the other relative keys; see contract §9 |

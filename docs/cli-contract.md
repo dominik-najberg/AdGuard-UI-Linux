@@ -1650,6 +1650,7 @@ Six components, in that fixed order, each announced by a `Checking <name> update
 | `Updated` | SafebrowsingV2, CRLite | — but see below, it says this every time |
 | `1 filter(s) updated` | filters | a count, and the noun is the component's |
 | `1 DNS filter(s) updated` | DNS filters | as above |
+| `1 userscript(s) updated` | userscripts | measured 15 August 2026 by ageing an installed script's metadata to `0.0.1` and watching it come back at `1.1.36`. The same `…updated` ending, so it needs no special case — see §15 |
 | `Failed to update filters` | **filters *and* DNS filters** | the trap in this section |
 
 **The failure sentence is the same for two different components, and it names neither.** Across the five failures `Failed to update filters` was printed under `Checking DNS filters updates...` three times and under `Checking filters updates...` twice — the identical string either way. So the *header* is the only thing that says which component failed, and a parser or a UI that keeps the verdict lines alone will report a DNS failure as an HTTP-filter failure, or vice versa. Pair each verdict with the header above it and never let the two travel separately. `UpdateReport` does that pairing, and `check_update_pairs_each_verdict_with_its_header` pins it against the two real captures that differ in nothing else.
@@ -1755,3 +1756,203 @@ The app line has printed `Up to date` in all fourteen runs, because 1.4.13 is cu
 **`adguard-cli update` is not measured and is never invoked**, which are the same decision. It re-runs an installer over a suid `adguard_root_helper`, and this application performs no privileged operation of its own ([§8](#8-privileged-operations), `architecture.md` §1) — it detects and instructs, as it already does for the root helper and the certificate. Not calling it is what makes not measuring it free, and it joins the list in `handoff.md` §3 item 7 for that reason. `update_channel` stays unclassified on the same grounds.
 
 **No ANSI escapes appear in any of the fourteen runs.** Not a counter-example to [§4](#4-ansi-escapes-are-unconditional), which is about the CLI ignoring every opt-out rather than about every command colouring its output — but it does mean the stripper is a no-op on this command, and that the test fixtures are plain text rather than escape-laden captures.
+
+---
+
+## 15. Userscripts
+
+`userscripts` is the command behind [issue #9](https://github.com/dominik-najberg/AdGuard-UI-Linux/issues/9), and nothing about it was recorded here before this section: `architecture.md` §7 had put the feature out of scope twice, so the five subcommands had never been measured beyond confirming that `list` returned one row. Measured 15 August 2026 on v1.4.13, in a throwaway `$XDG_DATA_HOME` seeded with the real install's `proxy.yaml`, `userscripts/` directory and licence. The machine's own install was diffed afterwards and was untouched.
+
+### The upstream moved, and this section is the evidence
+
+§7's standing decision rested on a fact that is no longer true: *only AdGuard Extra is supported*, so the feature was one switch for one pre-enabled script. That claim came from `proxy.yaml`'s own comment, which still reads:
+
+```yaml
+# List of userscripts. Currently only AdGuard Extra is supported.
+userscripts:
+  - meta: 'userscripts/adguard-extra.meta.json'
+    content: 'userscripts/adguard-extra.user.js'
+```
+
+**The comment is stale.** Two arbitrary third-party userscripts, written for this measurement and served over loopback HTTP, installed and sat alongside AdGuard Extra — all three enumerated by `list`, all three carried in the `userscripts:` list, no complaint from the CLI at any point:
+
+```
+[x] | Title: AdGuard Extra                                   2026-08-15 11:44:02
+    |    ID: adguard-extra
+[ ] | Title: Hello Sandbox                                   2026-08-15 11:44:42
+    |    ID: hello
+[x] | Title: Hello World                                     2026-08-15 11:45:27
+    |    ID: hello-world
+```
+
+§7 said to re-check when `adguard-cli` moved and to revisit the decision if the upstream ever supported more. Both halves are now discharged: it moved, and the decision was revisited.
+
+### Enabled is not a flag — it is presence in `proxy.yaml`
+
+The most consequential finding, because every obvious guess is wrong. There is no `enabled` key anywhere: not in `proxy.yaml`'s entries, which carry only `meta` and `content`, and not in the script's own `.meta.json`, whose 100 keys were enumerated and hold nothing of the kind.
+
+**A userscript is enabled when it appears in the `userscripts:` list, and disabled when it does not.** `disable` deletes the entry and rewrites the key — down to `userscripts: []` when it was the only one — and leaves both files on disk:
+
+```
+$ adguard-cli userscripts disable adguard-extra
+Userscript 'AdGuard Extra' disabled successfully
+
+  userscripts:                                        userscripts: []
+-   - meta: 'userscripts/adguard-extra.meta.json'
+-     content: 'userscripts/adguard-extra.user.js'
+```
+
+So the state a UI renders comes from **two sources that must be read together**: the `userscripts/` directory says what is *installed*, and `proxy.yaml` says what is *on*. Neither answers on its own — the directory cannot tell a disabled script from an enabled one, and the config cannot see a script that is installed but off.
+
+It also means `proxy.yaml` is where an external change lands, so the same `watch.rs` subscription that reconciles the settings pages reconciles these switches. A `userscripts disable` typed in a terminal moves a row in this application without anything else being consulted.
+
+**`enable` does not restore the file byte-for-byte.** The stock entry quotes its paths and the rewritten one does not:
+
+```yaml
+userscripts:
+  - meta: userscripts/adguard-extra.meta.json
+    content: userscripts/adguard-extra.user.js
+```
+
+Harmless as YAML and identical to `yaml-rust2`, but worth knowing before anyone compares a hash across an enable — [§5](#every-invocation-rewrites-proxyyaml) already says a moved hash means nothing until it has been diffed, and this is a diff that changes only quoting.
+
+### Do not parse `userscripts list` — read the `.meta.json`
+
+[§6](#6-do-not-parse-filters-list)'s argument, in a second place. The table is bold-escaped ([§4](#4-ansi-escapes-are-unconditional)) and carries a checkbox, a title, an id and a timestamp:
+
+```
+Installed userscripts:
+    | Details                                                Last update
+[x] | Title: AdGuard Extra                                   2026-07-29 21:03:22
+    |    ID: adguard-extra
+```
+
+**It has no version and no description** — and the version is exactly what issue #9 asks to display. Both are on disk. Every script is a `<id>.meta.json` + `<id>.user.js` pair in `userscripts/`, where the id is the filename stem, and the JSON is strictly better data than the table:
+
+| Key | Notes |
+| --- | --- |
+| `name`, `description` | plus `name:xx` / `description:xx` for ~40 languages — **localised, and the table is not** |
+| `version` | what #9 asks for; `""` on a script whose source omits `@version` |
+| `homepageURL`, `supportURL` | either may be `""`; AdGuard Extra carries both |
+| `downloadURL` | where it came from — **this is what makes a reinstall possible** |
+| `updateURL` | AdGuard Extra has one; a script installed from a plain URL gets `""` |
+| `icon` | a base64 PNG data URI — 16,226 bytes of AdGuard Extra's 25,661-byte metadata file, and `""` for a script without one |
+| `match`, `include`, `exclude`, `grant`, `connect`, `require`, `resource` | the metadata block's lists |
+| `run-at`, `noframes`, `unsafe_csp_required` | behaviour |
+
+The localised keys are BCP-47-shaped (`pt-PT`, `zh-HK`, `pt`, `zh`) where the filter database's `filter_localisation.lang` is POSIX (`pt_BR` — [§6](#localisation-tags-are-posix-not-bcp-47)). **The two are not interchangeable**, and `crate::locale` answers in the form the *database* uses, so anything reading these files converts rather than assuming a match.
+
+### `enable`/`disable`/`remove` match by substring, and it is a trap
+
+They do not take an id. They take a **case-insensitive substring matched against both the id and the title**, and there is no exact-match flag anywhere in `--help-all`. Measured, every one at exit 0:
+
+```
+$ adguard-cli userscripts disable "AdGuard Extra"    # the title works
+Userscript 'AdGuard Extra' disabled successfully
+$ adguard-cli userscripts disable "Hello"            # a partial title works
+Userscript 'Hello Sandbox' disabled successfully
+$ adguard-cli userscripts enable "ADGUARD-EXTRA"     # case is ignored
+Userscript 'AdGuard Extra' enabled successfully
+```
+
+Convenient from a shell, and the reason it matters is the collision. With `hello` and `hello-world` both installed, the **exact id of an installed script is refused**:
+
+```
+$ adguard-cli userscripts disable hello
+Multiple userscripts match 'hello'. Please specify more precisely:
+  - Hello Sandbox (ID: hello)
+  - Hello World (ID: hello-world)
+```
+
+There is nothing more precise to be specified. `hello` *is* that script's whole id, the flag that would disambiguate does not exist, and the same refusal blocks `enable` and `remove` alike.
+
+**So a userscript whose id or title is a substring of another installed script's id or title cannot be switched on, switched off, or removed — by this application or by anyone using the CLI.** It is an upstream boundary and not a gap in the wrapper: no argument reaches past it. What the application can do is *see it coming* — it knows every id and every title, so it can compute the collision before rendering a control and say why the row is inert, rather than offering a switch that fails at exit 0. That is the same treatment `architecture.md` §7 records for the window position: build the half that exists, and name the other half as a boundary.
+
+The condition is cheap to state and worth stating exactly, because a narrower version of it would be wrong: a script is unreachable when its id is a substring of *another* script's id **or title** — not merely of another id, since the match runs against both fields.
+
+### `install` is network-only, and refuses a local file
+
+Unlike `filters install`, which takes a URL or a path through the same positional and normalises the path to `file://` ([§6](#installing-a-custom-filter)), this takes a URL and nothing else. Measured, both at exit 0, nothing written:
+
+```
+$ adguard-cli userscripts install /tmp/hello.user.js
+Failed to install userscript
+$ adguard-cli userscripts install file:///tmp/hello.user.js
+Failed to install userscript
+```
+
+**But `http://127.0.0.1:<port>/…` works**, which is what keeps a test suite honest: `userscripts_sandbox.rs` serves its fixtures from a loopback socket and reaches no network, exactly as `filters_sandbox.rs` reaches none through `file://`. The two suites arrive at hermeticity by different routes because the two commands accept different things.
+
+```
+$ adguard-cli userscripts install http://127.0.0.1:8731/hello.user.js
+Userscript installed and enabled successfully
+```
+
+**`Failed to install userscript` is the only failure sentence, and it covers everything.** A 404, a body that is not a userscript, a local path and a `file://` URL all produce that one line — indistinguishable, so neither the wrapper nor the UI may claim to know which happened. The same rule [§6](#installing-a-custom-filter) states for `Failed to install the filter from URL`, with an even blunter message: this one does not even echo what was passed.
+
+Note the confirmation says **"installed and enabled"**. A new script arrives switched on; there is no install-disabled path.
+
+### Re-installing is the update path, and it silently re-enables
+
+Installing a URL that is already installed is not refused — it overwrites in place. Measured by editing the served file's `@version` between two installs:
+
+```
+version before: 0.2.1
+version after:  0.9.9
+```
+
+That makes *Reinstall* buildable from the recorded `downloadURL`, and it is the only update mechanism a single script has ([`check-update`](#14-checking-for-updates) refreshes userscripts wholesale but says only `Up to date` or otherwise for the component as a whole).
+
+**It also turns a disabled script back on.** The script above was disabled before the second install and enabled after it, with no mention of the fact in the output. Anything offering a reinstall has to disclose that, because the user who disabled a script and then updates it did not ask for it to start running again.
+
+### Every refusal is exit 0, and each has its own sentence
+
+[§3](#3-exit-codes-are-only-half-trustworthy) once more. Success must be defined positively, and the refusals are worth telling apart because they mean different things:
+
+| Output | Meaning | Recoverable? |
+| --- | --- | --- |
+| `Userscript 'X' enabled successfully` | it worked, or was already on | — |
+| `Userscript 'X' disabled successfully` | it worked | — |
+| `Userscript 'X' removed successfully` | files deleted, entry dropped | — |
+| `Userscript installed and enabled successfully` | it worked | — |
+| `Userscript 'X' is not enabled` | `disable` on something already off — a no-op, not a failure | nothing to do |
+| `No userscripts matching 'x'` | no id or title contains the string | the id is wrong |
+| `Multiple userscripts match 'x'` + a list | the substring trap above | **no** — permanent while both are installed |
+| `Failed to install userscript` | 404, bad body, local path, bad host | retry with a different URL |
+
+`enable` on an already-enabled script answers `enabled successfully` rather than the `is not enabled` form its opposite uses — so the two no-ops are **not** symmetrical, and only the `disable` one is detectable from the text.
+
+### AdGuard's own four, and where they come from
+
+The four userscripts AdGuard bundles with its Windows and Mac applications are
+all installable on Linux from AdGuard's own CDN. Measured 15 August 2026, each
+into a throwaway data directory:
+
+| Script | id | URL | AdGuard ships it |
+| --- | --- | --- | --- |
+| AdGuard Extra | `adguard-extra` | `…/release/adguard-extra/1.0/adguard-extra.user.js` | **on** |
+| AdGuard Popup Blocker | `popupblocker` | `…/release/popup-blocker/2.5/popupblocker.user.js` | **on** |
+| AdGuard Assistant | `assistant` | `…/release/assistant/4.3/assistant.user.js` | off |
+| Web of Trust | `wot` | `…/release/adguard-wot/1.0/wot.user.js` | off |
+
+All on `https://userscripts.adtidy.org`. `adguard-cli` ships only *Extra*; the
+other three install exactly as any third-party script does.
+
+**The version in the path is a channel, not a release.** `…/assistant/4.3/…`
+served Assistant **4.4.13** and `…/adguard-extra/1.0/…` served Extra **1.1.36**,
+so these URLs stay current on their own and nothing here needs to track a
+release. It also means a local copy of a script goes stale while its URL does
+not — measured against four `.txt` copies taken from a Windows install, every
+one of which was behind the CDN by at least a patch version.
+
+**None of the four collides with another** under the substring rule above:
+`adguard-extra`, `popupblocker`, `assistant` and `wot` are each absent from the
+other three's ids and titles, so all four are switchable with all four
+installed. That is a property of these particular names rather than a
+guarantee, which is why `the_recommended_four_do_not_collide_with_each_other`
+re-derives it from the rule rather than trusting the observation.
+
+**`install` always enables**, so arriving in AdGuard's own default state takes
+two commands for the two that ship off — install, then disable.
+
+**None of these is proof of anything**, as everywhere in this file. `remove` reports success and the caller confirms by the pair of files being gone and the entry having left `proxy.yaml`; a switch confirms against `proxy.yaml`; an install confirms against the directory. The re-read is the verdict, and the sentence is only a hint about which re-read to expect.

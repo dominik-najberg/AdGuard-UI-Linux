@@ -208,7 +208,7 @@ impl UpdatePart {
 pub enum Verdict {
     /// `Up to date`.
     UpToDate,
-    /// `Updated`, or `N filter(s) updated`.
+    /// `Updated`, `N filter(s) updated`, or `N userscript(s) updated`.
     Changed,
     /// `Failed to update filters`, whichever component it was about.
     Failed,
@@ -227,7 +227,9 @@ impl Verdict {
     const UP_TO_DATE: &'static str = "Up to date";
     /// Every failure seen opens with this.
     const FAILED: &'static str = "Failed";
-    /// `Updated` and `N filter(s) updated` both end here.
+    /// `Updated`, `N filter(s) updated` and `N userscript(s) updated` all end
+    /// here — which is why the counted shapes needed no special case when the
+    /// Extensions page started reading one of them.
     const UPDATED: &'static str = "updated";
 
     /// Read one verdict line.
@@ -1538,6 +1540,166 @@ impl FilterCatalogue {
                 (!filters.is_empty()).then_some((group, filters))
             })
             .collect()
+    }
+}
+
+/// One installed userscript, as the Extensions page renders it.
+///
+/// Assembled by [`crate::userscripts`] from two sources that answer different
+/// questions — the `userscripts/` directory for what is installed, `proxy.yaml`
+/// for what is switched on. See contract §15.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Userscript {
+    /// The filename stem of the pair, e.g. `adguard-extra`.
+    ///
+    /// This is what `userscripts enable|disable|remove` is given — though the
+    /// CLI matches it as a *substring* against ids and titles alike, which is
+    /// what [`Self::ambiguous`] is about.
+    pub id: String,
+    /// Localised `name`, already fallen back through the bare language to the
+    /// plain `name` key. Empty when the metadata carries none.
+    pub name: String,
+    /// Localised `description`; empty when there is none.
+    pub description: String,
+    /// `version` from the metadata. `None` when the script's source carried no
+    /// `@version` — the CLI stores `""` for it, and issue #9 asks for the
+    /// version *"when it is available"*, so absence is a state to render
+    /// rather than a blank to print.
+    pub version: Option<String>,
+    /// `homepageURL`, falling back to `supportURL`. `None` when neither is set,
+    /// which is the ordinary case for a script installed from a bare URL.
+    pub homepage: Option<String>,
+    /// `downloadURL` — where the script came from, and the only thing that
+    /// makes a reinstall possible. `None` for a script whose metadata omits it.
+    pub download_url: Option<String>,
+    /// Whether `proxy.yaml`'s `userscripts:` list carries this script.
+    pub enabled: bool,
+    /// Whether the CLI can be made to act on this script at all.
+    ///
+    /// `true` when this id is a case-insensitive substring of **another**
+    /// installed script's id or title, which makes every `enable`, `disable`
+    /// and `remove` naming it refuse with `Multiple userscripts match …` — even
+    /// when the exact id was passed, because there is no exact-match flag to
+    /// reach for (contract §15).
+    ///
+    /// Computed here rather than in the GUI so that the value a row is drawn
+    /// from is the value that knows the row cannot be acted on. A page that
+    /// worked this out for itself would be re-deriving a CLI behaviour from a
+    /// widget.
+    pub ambiguous: bool,
+}
+
+/// One of AdGuard's own userscripts, offered before it is installed.
+///
+/// The catalogue rows on the Extensions page: name, description and the URL to
+/// fetch, for a script the user does not have yet. See [`RECOMMENDED`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Recommended {
+    /// The id this will land under once installed — the stem of [`Self::url`]'s
+    /// filename, because that is how AdGuard names the pair (contract §15).
+    ///
+    /// It is what an installed script is matched against to drop it out of the
+    /// catalogue, so a wrong value here would leave a row offering to install
+    /// something the user already has. `recommended_ids_match_their_urls` pins
+    /// the two together.
+    pub id: &'static str,
+    pub name: &'static str,
+    /// AdGuard's own English description, from the script's metadata block.
+    ///
+    /// Only ever shown *before* installation. Afterwards the row is built from
+    /// the installed metadata file, which carries the same text translated into
+    /// ~40 languages — so this is the one string on the page that cannot be
+    /// localised, and it is on screen only until the user acts on it.
+    pub description: &'static str,
+    pub url: &'static str,
+    /// Whether AdGuard's own apps ship this one switched on.
+    ///
+    /// `userscripts install` always enables (contract §15), so a script whose
+    /// default is `false` is installed and then disabled — two commands for one
+    /// button, which is what it costs to arrive in the state AdGuard's other
+    /// apps put the user in.
+    pub enabled_by_default: bool,
+}
+
+/// The four userscripts AdGuard bundles with its own applications.
+///
+/// AdGuard for Windows ships these four installed, with *Extra* and *Popup
+/// Blocker* switched on and *Assistant* and *Web of Trust* off. AdGuard CLI
+/// ships only *Extra*, so the other three are reachable on Linux exactly as any
+/// third-party script is — by URL — and the point of this table is that the
+/// user should not have to go and find those URLs.
+///
+/// **They are offered and never installed unsolicited.** A userscript runs
+/// inside the pages the user visits, and this application does not fetch or run
+/// anything on its own behalf (`architecture.md` §7).
+///
+/// # The URLs are channels, not versions
+///
+/// Measured 15 August 2026: the paths carry a major version that does not track
+/// the script's own — `…/assistant/4.3/assistant.user.js` served Assistant
+/// **4.4.13**, and `…/adguard-extra/1.0/…` served Extra **1.1.36**. So these
+/// stay current without this table tracking releases, and the version shown on a
+/// row always comes from the installed metadata rather than from here.
+///
+/// All four were installed from these URLs into a throwaway data directory and
+/// came back with the ids below, none of them colliding by substring with
+/// another's id or title — so all four are actionable together, which is not
+/// something a catalogue could assume.
+pub const RECOMMENDED: [Recommended; 4] = [
+    Recommended {
+        id: "adguard-extra",
+        name: "AdGuard Extra",
+        description: "AdGuard Extra is designed to solve complicated cases when regular ad \
+                      blocking rules aren't enough.",
+        url: "https://userscripts.adtidy.org/release/adguard-extra/1.0/adguard-extra.user.js",
+        enabled_by_default: true,
+    },
+    Recommended {
+        id: "popupblocker",
+        name: "AdGuard Popup Blocker",
+        description: "Blocks pop-up ads on web pages",
+        url: "https://userscripts.adtidy.org/release/popup-blocker/2.5/popupblocker.user.js",
+        enabled_by_default: true,
+    },
+    Recommended {
+        id: "assistant",
+        name: "AdGuard Assistant",
+        description: "Provides easy and convenient way to manage filtering right from the browser",
+        url: "https://userscripts.adtidy.org/release/assistant/4.3/assistant.user.js",
+        enabled_by_default: false,
+    },
+    Recommended {
+        id: "wot",
+        name: "Web of Trust",
+        description: "Check out any website for reputation and safety information based on \
+                      users' experience.",
+        url: "https://userscripts.adtidy.org/release/adguard-wot/1.0/wot.user.js",
+        enabled_by_default: false,
+    },
+];
+
+impl Userscript {
+    /// What to call this script on screen.
+    ///
+    /// The id is the fallback rather than a placeholder: it is a real name the
+    /// user can act on, it is what the CLI's own messages will echo, and a
+    /// script with no `@name` is far likelier than a filter with no title —
+    /// nothing validates a userscript's metadata block.
+    pub fn display_name(&self) -> &str {
+        if self.name.trim().is_empty() {
+            &self.id
+        } else {
+            &self.name
+        }
+    }
+
+    /// Whether the two controls that change this script may be offered.
+    ///
+    /// The switch, the trash and the reinstall all go through a name the CLI
+    /// resolves by substring, so an ambiguous script can be shown and read but
+    /// not touched.
+    pub fn actionable(&self) -> bool {
+        !self.ambiguous
     }
 }
 

@@ -186,6 +186,48 @@ pub enum Error {
     /// faithfully report the flag we had just cleared.
     #[error("the user's own rules are not a subscribable list — their trust is not this application's to set")]
     UserRulesNotTrustable,
+
+    /// A userscript name the CLI could not narrow to one script.
+    ///
+    /// Its own variant rather than a [`Self::Refused`] because the two mean
+    /// opposite things to a caller. A refusal is a condition that may pass — a
+    /// bad URL can be retyped, a lapsed licence renewed. This one **cannot**:
+    /// `enable`, `disable` and `remove` match a case-insensitive substring
+    /// against every id and title and offer no exact-match flag, so a script
+    /// whose id is contained in another's is unreachable for as long as both
+    /// are installed, and re-trying with the exact id — which is what a user
+    /// would reasonably do — produces exactly this again (contract §15).
+    ///
+    /// `candidates` is what the CLI listed, so a caller can say which scripts
+    /// collided rather than only that something did. Measured: the refusal is
+    /// at exit 0 and leaves `proxy.yaml` untouched, so nothing needs undoing.
+    ///
+    /// [`crate::Userscript::ambiguous`] predicts this before a command is run,
+    /// which is where the UI should act on it. This variant is the backstop for
+    /// the case the prediction cannot cover: another window, or a terminal,
+    /// installing a colliding script between the read and the click.
+    #[error("`{name}` names more than one userscript ({}), and AdGuard offers no way to be more specific", candidates.join(", "))]
+    AmbiguousUserscript {
+        name: String,
+        candidates: Vec<String>,
+    },
+
+    /// A blank userscript name. **We** refused, before spawning anything.
+    ///
+    /// The third error here that describes a bug rather than a condition, and
+    /// it is [`Self::UserRulesNotTrustable`]'s reasoning exactly — a guard
+    /// beside a call site is one somebody can add a second call site around.
+    ///
+    /// Measured, and the reason this is not merely tidiness: the empty string
+    /// is a **wildcard**. Every id contains it, so on an install with one
+    /// script `userscripts disable ""` disables that script and reports
+    /// success — the user's only userscript, switched off by a name that names
+    /// nothing. With two installed it is ambiguous instead, which means the
+    /// damage depends on how many scripts happen to be present. Whitespace is
+    /// not trimmed by the CLI (`'   '` matched nothing), but it is trimmed here
+    /// so that a name which is blank in any sense is refused the same way.
+    #[error("a userscript has to be named — the empty string matches every installed script")]
+    UnnamedUserscript,
 }
 
 /// Captured, ANSI-stripped result of one invocation.
@@ -1000,6 +1042,187 @@ impl Cli {
         }
     }
 
+    /// Switch a userscript on — put it back into `proxy.yaml`'s list.
+    ///
+    /// See [`Self::userscript_action`] for everything the three verbs share,
+    /// which is nearly all of it.
+    ///
+    /// **`enable` on an already-enabled script reports success**, where its
+    /// opposite reports `Userscript 'X' is not enabled`. The two no-ops are not
+    /// symmetrical and only `disable`'s is visible in the text; nothing here
+    /// depends on the difference, because the caller re-reads either way.
+    pub fn userscripts_enable(&self, name: &str) -> Result<(), Error> {
+        self.userscript_action("enable", name, "enabled successfully")
+    }
+
+    /// Switch a userscript off — take it out of `proxy.yaml`'s list.
+    ///
+    /// The files stay on disk: this is not a removal, and a script disabled
+    /// here is still installed and still on the page (contract §15).
+    pub fn userscripts_disable(&self, name: &str) -> Result<(), Error> {
+        self.userscript_action("disable", name, "disabled successfully")
+    }
+
+    /// Delete a userscript: both files, and its entry if it had one.
+    ///
+    /// Unlike [`Self::userscripts_disable`] this is not reversible without the
+    /// source — so the caller owes the user a confirmation first, exactly as
+    /// custom-filter removal does (`architecture.md` §5).
+    pub fn userscripts_remove(&self, name: &str) -> Result<(), Error> {
+        self.userscript_action("remove", name, "removed successfully")
+    }
+
+    /// The shared half of the three userscript verbs.
+    ///
+    /// # The name is not an id, and that is the whole hazard
+    ///
+    /// All three take what the help calls a `<userscript-name>`, and it is
+    /// **matched as a case-insensitive substring against every installed
+    /// script's id *and* title**. Measured on v1.4.13 (contract §15):
+    /// `adguard-extra`, `AdGuard Extra`, `ADGUARD-EX` and `Extra` all reach the
+    /// same script. There is no exact-match flag in `--help-all`.
+    ///
+    /// Two consequences, and neither is avoidable by passing a better string:
+    ///
+    /// - **The empty string matches everything.** On a one-script install
+    ///   `disable ""` switches that script off and reports success. Refused
+    ///   here before spawning — see [`Error::UnnamedUserscript`].
+    /// - **An id contained in another script's id or title is unreachable.**
+    ///   `disable hello` is refused while `hello-world` is installed, even
+    ///   though `hello` is the exact id. That comes back as
+    ///   [`Error::AmbiguousUserscript`] carrying the candidates the CLI named,
+    ///   and [`crate::Userscript::ambiguous`] predicts it so the UI can decline
+    ///   to offer the control at all.
+    ///
+    /// # The `--` guard is mandatory, and measured so
+    ///
+    /// Both the name and the URL are positionals, and CLI11 still reads a
+    /// leading `-` as an option. Measured:
+    ///
+    /// ```text
+    /// $ adguard-cli userscripts disable -bogus
+    /// <userscript-name> is required          # exit 1, nothing done
+    /// $ adguard-cli userscripts disable -- -bogus
+    /// No userscripts matching '-bogus'       # exit 0, parsed
+    /// ```
+    ///
+    /// A userscript id is a filename stem and AdGuard chooses it, so a leading
+    /// dash is unlikely — but "unlikely" is what the guard costs nothing to
+    /// stop being load-bearing about. It changes nothing for ordinary names,
+    /// verified above for `adguard-extra` in both directions.
+    ///
+    /// # Success is positive, and it is not proof
+    ///
+    /// Every refusal is at exit 0 ([§3](../docs/cli-contract.md)), so the
+    /// confirmation is matched rather than the status read, and even then it
+    /// only means the CLI said it acted. The caller re-reads `proxy.yaml` and
+    /// the directory, which is what [`crate::userscripts::read`] is for.
+    fn userscript_action(&self, verb: &str, name: &str, confirmation: &str) -> Result<(), Error> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(Error::UnnamedUserscript);
+        }
+
+        let args = ["userscripts", verb, "--", name];
+        let out = self.run_within(&args, LOCAL_TIMEOUT)?;
+
+        // Before the confirmation check, not after: the ambiguous refusal names
+        // no verb and would otherwise fall through to the generic `Refused`
+        // below, losing the candidate list that is the only useful thing in it.
+        if let Some(candidates) = ambiguous_userscripts(&out.stdout) {
+            return Err(Error::AmbiguousUserscript {
+                name: name.to_owned(),
+                candidates,
+            });
+        }
+        if confirms_userscript(&out.stdout, confirmation) {
+            Ok(())
+        } else {
+            Err(Error::Refused {
+                message: first_line(&out.stdout).unwrap_or_else(|| {
+                    format!("`adguard-cli {}` said nothing at all", args.join(" "))
+                }),
+            })
+        }
+    }
+
+    /// Install a userscript from a URL.
+    ///
+    /// # It is network-only, unlike `filters install`
+    ///
+    /// The one place these two commands diverge, and it is measured rather than
+    /// assumed (contract §15). `filters install` takes a URL *or* a local path
+    /// through the same positional; this takes a URL. A path and a `file://`
+    /// URL are both refused:
+    ///
+    /// ```text
+    /// $ adguard-cli userscripts install /tmp/hello.user.js
+    /// Failed to install userscript
+    /// $ adguard-cli userscripts install file:///tmp/hello.user.js
+    /// Failed to install userscript
+    /// ```
+    ///
+    /// So the row that calls this asks for an http(s) URL and says so, rather
+    /// than letting a user discover it by having a file picker fail. A loopback
+    /// HTTP server does work, which is what keeps `userscripts_sandbox.rs`
+    /// hermetic without reaching the network.
+    ///
+    /// # One sentence covers every failure
+    ///
+    /// `Failed to install userscript` is printed for a 404, a body that is not
+    /// a userscript, an unresolvable host, a local path and a string that was
+    /// never a URL — and unlike the filter command's version it does not even
+    /// echo what was passed. **Neither this function nor its caller may claim
+    /// to know which happened.**
+    ///
+    /// # The `--` guard prevents a silent no-op here, not just a rejection
+    ///
+    /// Worse than the `disable` case above, and the reason the guard is not
+    /// optional. Measured:
+    ///
+    /// ```text
+    /// $ adguard-cli userscripts install -http://example.org/x.user.js
+    /// Install a userscript from URL          # the help text
+    /// Usage: adguard-cli userscripts install [OPTIONS] <userscript-url>
+    /// …                                      # exit 0, nothing installed
+    /// ```
+    ///
+    /// The leading `-h` is read as `--help`, so the command prints usage, exits
+    /// **0**, and installs nothing. Without the guard that is a success status
+    /// on a command that did not run — the one shape this module works hardest
+    /// to never return `Ok` for. With it, the same string reaches the installer
+    /// and fails honestly.
+    ///
+    /// # Re-installing is the update path, and it re-enables
+    ///
+    /// A URL already installed is not refused: the pair is overwritten in place
+    /// (measured, version `0.2.1` -> `0.9.9`) **and a disabled script is
+    /// switched back on**, silently. Anything offering this as *Reinstall* has
+    /// to disclose that, because a user who disabled a script did not ask for
+    /// updating it to start it running again.
+    ///
+    /// [`NETWORK_TIMEOUT`] for the reason [`Self::filters_install`] gives: this
+    /// is a network command throughout, and a caller owes the user a progress
+    /// state for it.
+    pub fn userscripts_install(&self, url: &str) -> Result<(), Error> {
+        let url = url.trim();
+        if url.is_empty() {
+            return Err(Error::UnnamedUserscript);
+        }
+
+        let args = ["userscripts", "install", "--", url];
+        let out = self.run_within(&args, NETWORK_TIMEOUT)?;
+        if confirms_userscript(&out.stdout, "installed and enabled successfully") {
+            Ok(())
+        } else {
+            Err(Error::Refused {
+                message: first_line(&out.stdout).unwrap_or_else(|| {
+                    format!("`adguard-cli {}` said nothing at all", args.join(" "))
+                }),
+            })
+        }
+    }
+
     /// Write one setting into `proxy.yaml`.
     ///
     /// The only sanctioned way to change the file: `config set` was measured to
@@ -1348,13 +1571,29 @@ fn redact_error(err: Error, secret: &str) -> Error {
         Error::Unlicensed { message } => Error::Unlicensed {
             message: redact(&message, secret),
         },
+        // Echoes an argument this crate passed — a userscript name. No caller
+        // reaches it through a secret-bearing command today, since the only
+        // route here is `config set` on a credential key; it is redacted anyway
+        // for `Unlicensed`'s reason, that a leak depending on two functions
+        // staying unrelated is not one worth leaving in place. The candidates
+        // are AdGuard's own words about scripts it found and are treated the
+        // same way for the same reason.
+        Error::AmbiguousUserscript { name, candidates } => Error::AmbiguousUserscript {
+            name: redact(&name, secret),
+            candidates: candidates
+                .iter()
+                .map(|candidate| redact(candidate, secret))
+                .collect(),
+        },
         // Carry no echo of the value. `AlreadyConfigured` holds only a path we
-        // derived ourselves, and it — like `UserRulesNotTrustable`, which holds
-        // nothing at all — is raised before any argument is passed.
+        // derived ourselves, and it — like `UserRulesNotTrustable` and
+        // `UnnamedUserscript`, which hold nothing at all — is raised before any
+        // argument is passed.
         other @ (Error::BinaryNotFound
         | Error::Spawn { .. }
         | Error::AlreadyConfigured { .. }
-        | Error::UserRulesNotTrustable) => other,
+        | Error::UserRulesNotTrustable
+        | Error::UnnamedUserscript) => other,
     }
 }
 
@@ -1444,6 +1683,63 @@ fn confirms_trust(stdout: &str) -> bool {
         .any(|line| {
             line.starts_with("Filter with ID:") && line.ends_with("successfully updated trust")
         })
+}
+
+/// Recognise a userscript command's confirmation.
+///
+/// A third shape, sharing an anchor with neither [`confirms`] (`Filter [<x>]
+/// <verb>`) nor [`confirms_trust`] (`Filter with ID: …`). Measured on v1.4.13,
+/// at exit 0, on stdout, each as the command's only line:
+///
+/// ```text
+/// Userscript 'AdGuard Extra' enabled successfully
+/// Userscript 'AdGuard Extra' disabled successfully
+/// Userscript 'AdGuard Extra' removed successfully
+/// Userscript installed and enabled successfully
+/// ```
+///
+/// Note the fourth: `install` does **not** name the script, because it has not
+/// read the metadata yet at the point it prints. So the matcher cannot require
+/// a quoted name, and anchors on the leading `Userscript` and the trailing
+/// verb phrase alone.
+///
+/// The suffix match is what keeps `disabled successfully` from being satisfied
+/// by an `enabled successfully` line — `ends_with` on the whole phrase, rather
+/// than `contains`, because "enabled" is a substring of "disabled" and a
+/// careless `contains("enabled")` would report every disable as a success.
+fn confirms_userscript(stdout: &str, confirmation: &str) -> bool {
+    stdout
+        .lines()
+        .map(str::trim)
+        .any(|line| line.starts_with("Userscript") && line.ends_with(confirmation))
+}
+
+/// The names a userscript command could not choose between, if it refused.
+///
+/// Measured, at exit 0, with `proxy.yaml` left untouched:
+///
+/// ```text
+/// Multiple userscripts match 'hello'. Please specify more precisely:
+///   - Hello Sandbox (ID: hello)
+///   - Hello World (ID: hello-world)
+/// ```
+///
+/// Returns the candidate lines with their `- ` stripped, so a caller can name
+/// what collided; `None` when the output is not this refusal at all. An empty
+/// vector is possible in principle — the header with no list under it — and is
+/// returned as `Some(vec![])` rather than `None`, because the refusal did
+/// happen and the caller must not read it as a success for want of details.
+fn ambiguous_userscripts(stdout: &str) -> Option<Vec<String>> {
+    let mut lines = stdout.lines().map(str::trim);
+    lines.find(|line| line.starts_with("Multiple userscripts match"))?;
+    Some(
+        lines
+            .filter_map(|line| line.strip_prefix("- "))
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_owned)
+            .collect(),
+    )
 }
 
 /// What the CLI's `Enable these filters? (yes/no):` prompt accepts.
@@ -2896,6 +3192,45 @@ mod tests {
         assert_eq!(http.part(&UpdatePart::DnsFilters).unwrap().verdict, Verdict::UpToDate);
     }
 
+    /// A userscript update announces itself in a shape of its own, and the
+    /// Extensions page is re-read off it.
+    ///
+    /// Measured 15 August 2026 (contract §15): a userscript whose installed
+    /// metadata was aged to `0.0.1` was refetched to `1.1.36`, and the run said
+    /// `1 userscript(s) updated`. Nothing needed adding to the parser —
+    /// [`Verdict`] keys on the trailing `updated` that `N filter(s) updated`
+    /// already ends with — and this test exists to say that on purpose rather
+    /// than by luck: a future parser that special-cased the filter wording would
+    /// silently stop reporting userscript updates, and the only symptom would be
+    /// a page showing a version that is no longer installed.
+    #[test]
+    fn a_userscript_update_is_a_change() {
+        const UPDATED: &str = "\
+Checking filters updates...
+Up to date
+Checking DNS filters updates...
+Up to date
+Checking userscripts updates...
+1 userscript(s) updated
+Checking SafebrowsingV2 updates...
+Up to date
+Checking CRLite updates...
+Up to date
+Checking app updates...
+Up to date
+";
+        let report = report(UPDATED);
+        assert_eq!(
+            report.part(&UpdatePart::Userscripts).unwrap().verdict,
+            Verdict::Changed
+        );
+        assert!(
+            report.changed(&UpdatePart::Userscripts),
+            "the Extensions page reloads off this"
+        );
+        assert!(!report.changed(&UpdatePart::Filters), "and nothing else moved");
+    }
+
     /// A first run — the one every new install performs — opens with a line
     /// that belongs to no pair. Reading it as a verdict would shift every
     /// component onto the wrong header.
@@ -3027,5 +3362,111 @@ mod tests {
         assert!(!report.changed(&UpdatePart::Filters));
         assert!(!report.changed(&UpdatePart::DnsFilters));
         assert_eq!(report.part(&UpdatePart::Filters), None);
+    }
+
+    // --- userscripts (contract §15) ---
+
+    /// The four measured confirmations, each matched by its own phrase.
+    #[test]
+    fn userscript_confirmations_are_recognised() {
+        for (output, phrase) in [
+            ("Userscript 'AdGuard Extra' enabled successfully", "enabled successfully"),
+            ("Userscript 'AdGuard Extra' disabled successfully", "disabled successfully"),
+            ("Userscript 'AdGuard Extra' removed successfully", "removed successfully"),
+            ("Userscript installed and enabled successfully", "installed and enabled successfully"),
+        ] {
+            assert!(confirms_userscript(output, phrase), "{output:?} did not confirm {phrase:?}");
+        }
+    }
+
+    /// "enabled" is a substring of "disabled", so a matcher built on `contains`
+    /// would report every successful *enable* as a successful *disable* — and
+    /// the UI would settle the switch in the wrong position while believing the
+    /// CLI agreed with it.
+    #[test]
+    fn an_enable_does_not_confirm_a_disable() {
+        let enabled = "Userscript 'AdGuard Extra' enabled successfully";
+        assert!(!confirms_userscript(enabled, "disabled successfully"));
+
+        let disabled = "Userscript 'AdGuard Extra' disabled successfully";
+        assert!(confirms_userscript(disabled, "disabled successfully"));
+    }
+
+    /// The measured no-op and the measured miss are refusals, not successes.
+    #[test]
+    fn the_no_op_and_the_miss_confirm_nothing() {
+        for output in [
+            "Userscript 'Hello Sandbox' is not enabled",
+            "No userscripts matching 'no-such-script'",
+            "Failed to install userscript",
+        ] {
+            for phrase in ["enabled successfully", "disabled successfully", "removed successfully"] {
+                assert!(!confirms_userscript(output, phrase), "{output:?} confirmed {phrase:?}");
+            }
+        }
+    }
+
+    /// `install` does not name the script it installed, so the matcher must not
+    /// require a quoted name.
+    #[test]
+    fn the_install_confirmation_names_no_script() {
+        assert!(confirms_userscript(
+            "Userscript installed and enabled successfully",
+            "installed and enabled successfully"
+        ));
+    }
+
+    /// The ambiguous refusal, with the candidates the caller needs to name what
+    /// collided.
+    #[test]
+    fn the_ambiguous_refusal_yields_its_candidates() {
+        let output = "Multiple userscripts match 'hello'. Please specify more precisely:\n                        - Hello Sandbox (ID: hello)\n  - Hello World (ID: hello-world)";
+        let candidates = ambiguous_userscripts(output).expect("recognised as ambiguous");
+        assert_eq!(
+            candidates,
+            ["Hello Sandbox (ID: hello)", "Hello World (ID: hello-world)"]
+        );
+    }
+
+    /// Everything that is not that refusal answers `None`, so an ordinary
+    /// success is never mistaken for one.
+    #[test]
+    fn other_output_is_not_ambiguous() {
+        for output in [
+            "Userscript 'AdGuard Extra' enabled successfully",
+            "No userscripts matching 'x'",
+            "",
+        ] {
+            assert!(ambiguous_userscripts(output).is_none(), "{output:?}");
+        }
+    }
+
+    /// The header alone still means the command was refused. Reporting `None`
+    /// for want of a candidate list would let the caller fall through to the
+    /// success check on a command that did nothing.
+    #[test]
+    fn the_header_alone_is_still_a_refusal() {
+        let candidates =
+            ambiguous_userscripts("Multiple userscripts match 'x'. Please specify more precisely:")
+                .expect("still a refusal");
+        assert!(candidates.is_empty());
+    }
+
+    /// The empty-string wildcard never reaches the CLI. Measured: on a
+    /// one-script install `disable ""` switches that script off and reports
+    /// success, so this guard is the only thing between a blank name and the
+    /// user's only userscript.
+    #[test]
+    fn a_blank_userscript_name_is_refused_before_spawning() {
+        let Ok(cli) = Cli::discover() else { return };
+        for name in ["", "   ", "\t"] {
+            assert!(
+                matches!(cli.userscripts_disable(name), Err(Error::UnnamedUserscript)),
+                "{name:?} was not refused"
+            );
+            assert!(matches!(cli.userscripts_enable(name), Err(Error::UnnamedUserscript)));
+            assert!(matches!(cli.userscripts_remove(name), Err(Error::UnnamedUserscript)));
+            assert!(matches!(cli.userscripts_install(name), Err(Error::UnnamedUserscript)));
+        }
     }
 }

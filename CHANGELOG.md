@@ -13,6 +13,77 @@ This file is the one changelog.
 
 ## Unreleased
 
+### An Extensions page, for the userscripts AdGuard runs
+
+Asked for in [#9](https://github.com/dominik-najberg/AdGuard-UI-Linux/issues/9),
+carrying feedback from **Aggressive_Bad_7344**: a place to see the installed
+userscripts, switch each on and off, add one, and remove one. It is the fourth
+feature here to arrive from outside, and the first that reverses a decision this
+project had taken twice.
+
+**Userscripts were out of scope, on a fact that stopped being true.** Both
+earlier decisions rested on AdGuard's own statement — still in the shipped
+`proxy.yaml` — that only AdGuard Extra is supported: one switch, for one script,
+that ships already enabled. A page for that is navigation without content, and
+the scope note said to re-check when AdGuard CLI moved. It has. Measured against
+1.4.13, arbitrary third-party userscripts install and run alongside AdGuard
+Extra, so the page has an unbounded list of things you chose, which is what makes
+it a page.
+
+Each row carries the script's name and, where the metadata has one, its version
+and description — read from the userscript's own metadata file rather than from
+`adguard-cli userscripts list`, which prints neither. Names and descriptions are
+localised where the script supplies translations, in the same way filter names
+already are. Beside each row: a cog with **Homepage** and **Reinstall**, and a
+trash behind a confirmation that names the URL the script came from, because that
+URL is the only way back.
+
+**Reinstall says what it will do before doing it.** Re-installing is how a
+userscript is updated, and it also switches a disabled script back on — measured,
+with no way to ask it not to. So the confirmation mentions that, and only when it
+applies.
+
+**One row cannot be used, and says so instead of pretending.** AdGuard matches a
+userscript by substring against every installed script's name and id, with no way
+to be more exact, so a script whose id is contained in another's cannot be
+switched or removed at all — not from here, and not from a terminal. Where that
+happens the row still shows the script and its state, takes a warning icon, and
+explains that the collision is what is in the way; its switch, trash and cog are
+all inert rather than offered and then failing. This is AdGuard's limit rather
+than the application's, and the row says which.
+
+**AdGuard's own four are offered without you having to find them.** AdGuard for
+Windows and Mac come with four userscripts — Extra, Popup Blocker, Assistant and
+Web of Trust — where AdGuard CLI ships only Extra. A *From AdGuard* group lists
+whichever of them you do not have, with an **Add** button each, and adds them in
+the state AdGuard's own applications use: Extra and Popup Blocker switched on,
+Assistant and Web of Trust switched off. A script you already have drops out of
+that list rather than appearing twice, so an empty group means you have all
+four.
+
+**Nothing is installed unless you press Add.** A userscript runs inside the
+pages you visit, and this application does not fetch or run one on its own
+initiative any more than it performs a privileged operation on its own. The
+addresses are AdGuard's, over https, and the versions come from whatever AdGuard
+is serving rather than from a list here — their URLs are channels, so they stay
+current on their own.
+
+**Adding one takes a web address.** AdGuard installs userscripts only over http
+or https — a file on your computer is refused, unlike a custom filter list, which
+can be added from a path — so the group says so above the field rather than
+letting a paste fail with a message that explains nothing.
+
+Switching a script on or off in a terminal moves the row here, like every other
+setting this application watches: a userscript is enabled precisely when
+`proxy.yaml` lists it, so that file is the state rather than a copy of it.
+
+![The Extensions page](docs/screenshots/extensions.png)
+
+Nothing here reads, runs, or vouches for a userscript's code. **Edit** and
+**Storage**, which AdGuard for Windows offers in the same menu, are deliberately
+absent: each is a feature in its own right, and neither is something this
+application has any other reason to contain.
+
 ### The removal button now greys its own row while it asks
 
 Found by reading the code rather than reported

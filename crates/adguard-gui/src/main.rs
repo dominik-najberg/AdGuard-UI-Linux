@@ -12,6 +12,7 @@ mod backup;
 mod browser_integration;
 mod certificate;
 mod dns;
+mod extensions;
 mod filter_settings;
 mod filters;
 mod geometry;
@@ -495,7 +496,7 @@ fn missing_cli_view(message: &str) -> adw::ToolbarView {
 }
 
 /// Sidebar entries, in order. The id doubles as the stack child name.
-const PAGES: [Page; 7] = [
+const PAGES: [Page; 8] = [
     Page {
         id: "status",
         title: "Status",
@@ -525,6 +526,15 @@ const PAGES: [Page; 7] = [
         id: "advanced",
         title: "Advanced",
         icon: "emblem-system-symbolic",
+    },
+    // Below the settings pages and above About: it is about what AdGuard is
+    // doing, so it belongs with the pages that answer that — but it is the only
+    // one listing things the user installed rather than settings AdGuard ships,
+    // which is why it sorts after them rather than beside Filters.
+    Page {
+        id: "extensions",
+        title: "Extensions",
+        icon: "application-x-addon-symbolic",
     },
     // Last, as #4 asked. It is the only page that is about the installation
     // rather than about what the installation is doing, so it sorts below every
@@ -643,6 +653,9 @@ fn main_view(cli: &Cli) -> MainView {
     // stealth switch Protection shows (handoff §3 gap 4). The master switch
     // stays on Protection, so there is still exactly one writer for that key.
     let stealth = advanced::AdvancedPage::new(cli.clone(), toasts.clone(), &STEALTH);
+    // The installed userscripts, read from `userscripts/` and `proxy.yaml`
+    // together and written through `adguard-cli userscripts` (#9).
+    let extensions = extensions::ExtensionsPage::new(cli.clone(), toasts.clone());
     // The two version numbers, and the one control that reaches AdGuard's
     // servers because the user asked it to (#4).
     let about = about::AboutPage::new(cli.clone(), toasts.clone());
@@ -654,7 +667,8 @@ fn main_view(cli: &Cli) -> MainView {
     stack.add_named(&dns.widget(), Some(PAGES[3].id));
     stack.add_named(stealth.widget(), Some(PAGES[4].id));
     stack.add_named(advanced.widget(), Some(PAGES[5].id));
-    stack.add_named(about.widget(), Some(PAGES[6].id));
+    stack.add_named(extensions.widget(), Some(PAGES[6].id));
+    stack.add_named(about.widget(), Some(PAGES[7].id));
     toasts.set_child(Some(&stack));
 
     // `check-update` rewrites the filter databases, and **nothing watches
@@ -671,6 +685,7 @@ fn main_view(cli: &Cli) -> MainView {
     about.connect_checked({
         let filters = Rc::downgrade(&filters);
         let dns = Rc::downgrade(&dns);
+        let extensions = Rc::downgrade(&extensions);
         move |report: &adguard_core::UpdateReport| {
             // Only on a reported change. A component the CLI did not mention, or
             // one that failed, has moved nothing worth re-reading — and a
@@ -683,6 +698,22 @@ fn main_view(cli: &Cli) -> MainView {
             if report.changed(&adguard_core::UpdatePart::DnsFilters) {
                 if let Some(dns) = dns.upgrade() {
                     dns.reload();
+                }
+            }
+            // Userscripts are one of the five components `check-update` really
+            // updates, and the only thing on screen that would show it is the
+            // version under a script's name. Measured: a userscript aged to
+            // `0.0.1` came back at `1.1.36` reported as `1 userscript(s)
+            // updated` (contract §15).
+            //
+            // **Nothing else would notice.** `watch.rs` reconciles this page
+            // from `proxy.yaml`, and an update rewrites the *metadata* file
+            // while leaving that key exactly as it was — so the watcher sees no
+            // row move, reports nothing, and the page goes on showing a version
+            // that is no longer installed until something else rebuilds it.
+            if report.changed(&adguard_core::UpdatePart::Userscripts) {
+                if let Some(extensions) = extensions.upgrade() {
+                    extensions.reload();
                 }
             }
         }
@@ -706,6 +737,7 @@ fn main_view(cli: &Cli) -> MainView {
         let advanced = advanced.clone();
         let stealth = stealth.clone();
         let dns = dns.clone();
+        let extensions = extensions.clone();
         let about = about.clone();
         move |_| match stack.visible_child_name().as_deref() {
             Some("protection") => protection.reload(),
@@ -713,6 +745,10 @@ fn main_view(cli: &Cli) -> MainView {
             Some("dns") => dns.reload(),
             Some("stealth") => stealth.reload(),
             Some("advanced") => advanced.reload(),
+            // Re-reads the userscripts directory and `proxy.yaml`. Cheap and
+            // local — it runs no command, so unlike About this is an ordinary
+            // re-read with nothing behind it.
+            Some("extensions") => extensions.reload(),
             // Re-reads the CLI's version and nothing else. Deliberately does
             // **not** run `check-update`: on every other page this button is a
             // cheap re-read, and here that would make it a network fetch with
@@ -841,6 +877,7 @@ fn main_view(cli: &Cli) -> MainView {
         &[advanced.clone(), stealth],
         &dns,
         &filters,
+        &extensions,
         &toasts,
     );
 
@@ -1096,6 +1133,24 @@ mod tests {
     #[test]
     fn about_is_the_last_page() {
         assert_eq!(PAGES.last().expect("PAGES is never empty").id, "about");
+    }
+
+    /// Extensions sits directly above About.
+    ///
+    /// Both halves matter and neither is arbitrary. It is above About because
+    /// About is the only page about the *installation*, and this one is about
+    /// what AdGuard is doing. It is below the settings pages because it lists
+    /// things the user installed rather than settings AdGuard ships — the same
+    /// reason it is not beside Filters, which is a catalogue AdGuard supplies.
+    ///
+    /// Pinned because the ordering is the whole of the page's placement
+    /// decision, and nothing else in the tree would notice it changing.
+    #[test]
+    fn extensions_sits_above_about() {
+        let position = |id| PAGES.iter().position(|page| page.id == id);
+        let extensions = position("extensions").expect("Extensions is in the sidebar");
+        let about = position("about").expect("About is in the sidebar");
+        assert_eq!(extensions + 1, about, "Extensions belongs directly above About");
     }
 
     /// Each id names exactly one page. They are stack child names, sidebar

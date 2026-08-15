@@ -44,6 +44,7 @@ use libadwaita as adw;
 
 use crate::advanced::AdvancedPage;
 use crate::dns::DnsPage;
+use crate::extensions::ExtensionsPage;
 use crate::filter_settings::FilterSettingsPage;
 use crate::protection::ProtectionPage;
 use crate::status::StatusPage;
@@ -84,6 +85,13 @@ struct State {
     /// made in a terminal would never raise the toast — which is exactly what
     /// `handoff.md` §3 item 12 warned would happen if the page were left out.
     filters: Rc<FilterSettingsPage>,
+    /// The Extensions page, and it belongs here more literally than any other
+    /// entry: for the settings pages `proxy.yaml` holds a value a row renders,
+    /// but for this one the file **is** the state. A userscript is enabled
+    /// exactly when `userscripts:` names it (contract §15), so
+    /// `adguard-cli userscripts disable` typed in a terminal moves a switch
+    /// here and nothing else in the application would ever notice.
+    extensions: Rc<ExtensionsPage>,
     /// Where the one toast goes. The window's overlay, so it appears over
     /// whichever page is showing — including a page that is not the one whose
     /// row moved, which is the common case: the user is looking at Status while
@@ -102,6 +110,7 @@ pub fn install(
     tables: &[Rc<AdvancedPage>],
     dns: &Rc<DnsPage>,
     filters: &Rc<FilterSettingsPage>,
+    extensions: &Rc<ExtensionsPage>,
     toasts: &adw::ToastOverlay,
 ) -> Option<ConfigWatch> {
     let mut watch = Watch::on_config()?;
@@ -129,6 +138,7 @@ pub fn install(
         tables: tables.to_vec(),
         dns: dns.clone(),
         filters: filters.clone(),
+        extensions: extensions.clone(),
         toasts: toasts.clone(),
     });
 
@@ -187,6 +197,7 @@ fn look(state: &Rc<State>) {
                 }
                 moved += state.dns.reconcile(&config);
                 moved += state.filters.reconcile(&config);
+                moved += state.extensions.reconcile(&config);
 
                 // The only headless evidence that the churn filter works: this
                 // line appears for a real edit and not for the app's own
