@@ -510,6 +510,76 @@ fn a_blank_name_is_refused_and_changes_nothing() {
     );
 }
 
+/// AdGuard's four bundled scripts install from the URLs the catalogue carries,
+/// and land in the state its Windows and Mac applications ship them in.
+///
+/// **The one test here that reaches the network**, and the only one in this
+/// repository that does by choice — `RECOMMENDED` names four addresses on
+/// AdGuard's own CDN, and a table of URLs nobody fetches is a table of guesses.
+/// It is what would catch AdGuard retiring a path, which is the failure the
+/// catalogue cannot survive and cannot detect any other way.
+///
+/// It also pins the thing a catalogue offering four scripts together may not
+/// assume: that none of them collides with another by substring, leaving one
+/// installed and unswitchable (contract §15).
+#[test]
+#[ignore = "invokes the real adguard-cli and reaches AdGuard's CDN"]
+fn the_recommended_scripts_install_in_the_state_adguard_ships_them() {
+    let Some(sandbox) = Sandbox::new("recommended") else {
+        return;
+    };
+
+    for entry in &adguard_core::RECOMMENDED {
+        // AdGuard Extra is already installed on a seeded sandbox; installing it
+        // again is the reinstall path and is just as valid a check of the URL.
+        sandbox
+            .cli
+            .userscripts_install(entry.url)
+            .unwrap_or_else(|err| panic!("{} would not install from {}: {err}", entry.name, entry.url));
+        if !entry.enabled_by_default {
+            sandbox
+                .cli
+                .userscripts_disable(entry.id)
+                .unwrap_or_else(|err| panic!("{} would not switch off: {err}", entry.name));
+        }
+    }
+
+    let installed = sandbox.read();
+    assert_eq!(installed.len(), 4, "expected all four, got {installed:?}");
+
+    for entry in &adguard_core::RECOMMENDED {
+        let script = installed
+            .iter()
+            .find(|s| s.id == entry.id)
+            .unwrap_or_else(|| panic!("{} did not land under id {}", entry.name, entry.id));
+
+        assert_eq!(script.name, entry.name, "the catalogue's name matches AdGuard's");
+        assert_eq!(
+            script.enabled, entry.enabled_by_default,
+            "{} should be {} after adding",
+            entry.name,
+            if entry.enabled_by_default { "on" } else { "off" }
+        );
+        assert!(
+            script.version.is_some(),
+            "{} carried no version to render",
+            entry.name
+        );
+        assert!(
+            script.actionable(),
+            "{} cannot be switched while the other three are installed",
+            entry.name
+        );
+    }
+
+    // With all four present the catalogue is empty, which is what tells the user
+    // there is nothing left to add.
+    assert!(
+        adguard_core::userscripts::recommended(&installed).is_empty(),
+        "the catalogue should be empty once all four are installed"
+    );
+}
+
 /// The machine's own install is never written to.
 ///
 /// `filters_sandbox.rs` asserts the same thing about the catalogue, and for the

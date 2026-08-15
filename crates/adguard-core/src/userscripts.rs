@@ -39,7 +39,7 @@ use std::path::Path;
 use yaml_rust2::{Yaml, YamlLoader};
 
 use crate::locale::Locale;
-use crate::model::Userscript;
+use crate::model::{Recommended, Userscript, RECOMMENDED};
 
 /// The suffix a metadata file carries, after the id.
 const META_SUFFIX: &str = ".meta.json";
@@ -67,6 +67,24 @@ pub fn read(dir: &Path, enabled: &[&str], locale: &Locale) -> Vec<Userscript> {
     mark_ambiguous(&mut scripts);
     scripts.sort_by_key(|script| script.display_name().to_lowercase());
     scripts
+}
+
+/// The recommended scripts the user does not have.
+///
+/// The Extensions page offers these and nothing else — a script already
+/// installed has a real row, with its true version and its own switch, so
+/// leaving it in the catalogue would list it twice and offer to fetch something
+/// already on disk. An empty answer therefore means *you have all four*, which
+/// is a reading worth having.
+///
+/// Matched on the id rather than the URL: a script the user installed by hand
+/// from AdGuard's URL is the same script, and one whose recorded `downloadURL`
+/// has since moved is still not something to offer again.
+pub fn recommended(installed: &[Userscript]) -> Vec<&'static Recommended> {
+    RECOMMENDED
+        .iter()
+        .filter(|entry| !installed.iter().any(|script| script.id == entry.id))
+        .collect()
 }
 
 /// The ids installed in `dir`, from the metadata files present.
@@ -516,5 +534,129 @@ mod tests {
         let missing = std::env::temp_dir().join("adguard-ui-userscripts-nowhere-at-all");
         let _ = std::fs::remove_dir_all(&missing);
         assert!(read(&missing, &[], &Locale::english()).is_empty());
+    }
+
+    // --- the catalogue of AdGuard's own scripts ---
+
+    /// Each entry's id must be the stem of its URL's filename, because that is
+    /// what AdGuard names the installed pair after.
+    ///
+    /// The one error in this table that would not show up as a crash or a
+    /// missing row: a wrong id leaves the entry in the catalogue forever,
+    /// offering to install a script the user already has, with no symptom
+    /// anywhere else. Measured ids: `adguard-extra`, `popupblocker`,
+    /// `assistant`, `wot`.
+    #[test]
+    fn recommended_ids_match_their_urls() {
+        for entry in &RECOMMENDED {
+            let stem = entry
+                .url
+                .rsplit('/')
+                .next()
+                .and_then(|file| file.strip_suffix(".user.js"))
+                .unwrap_or_else(|| panic!("{} has no .user.js filename", entry.url));
+            assert_eq!(
+                entry.id, stem,
+                "{}'s id must be the stem of its URL",
+                entry.name
+            );
+        }
+    }
+
+    /// Every URL is one of AdGuard's own, over https.
+    ///
+    /// These are the only addresses this application ever puts in front of a
+    /// one-click install, so the table is not a place a third-party host may
+    /// arrive by an edit nobody looked at twice.
+    #[test]
+    fn recommended_urls_are_adguards_own_over_https() {
+        for entry in &RECOMMENDED {
+            assert!(
+                entry.url.starts_with("https://userscripts.adtidy.org/"),
+                "{} points somewhere else: {}",
+                entry.name,
+                entry.url
+            );
+        }
+    }
+
+    /// The four AdGuard's own applications ship, in the state they ship them.
+    #[test]
+    fn the_catalogue_matches_what_adguard_bundles() {
+        let on: Vec<&str> = RECOMMENDED
+            .iter()
+            .filter(|entry| entry.enabled_by_default)
+            .map(|entry| entry.id)
+            .collect();
+        assert_eq!(on, ["adguard-extra", "popupblocker"]);
+        assert_eq!(RECOMMENDED.len(), 4);
+    }
+
+    /// No two entries share an id, which would make one of them permanently
+    /// un-droppable from the catalogue.
+    #[test]
+    fn recommended_ids_are_distinct() {
+        let mut ids: Vec<_> = RECOMMENDED.iter().map(|entry| entry.id).collect();
+        ids.sort_unstable();
+        let count = ids.len();
+        ids.dedup();
+        assert_eq!(ids.len(), count, "two entries share an id");
+    }
+
+    /// **The four can coexist**, which a catalogue offering them together may
+    /// not assume: AdGuard matches by substring across ids *and* titles, so a
+    /// bundle whose members collided would install four scripts and leave some
+    /// of them unswitchable (contract §15).
+    ///
+    /// Measured against the real four, and re-derived here from the same rule
+    /// the page uses — so adding a fifth entry that collides fails here rather
+    /// than on a user's machine.
+    #[test]
+    fn the_recommended_four_do_not_collide_with_each_other() {
+        let mut scripts: Vec<Userscript> = RECOMMENDED
+            .iter()
+            .map(|entry| {
+                let mut s = script(entry.id, entry.name);
+                s.enabled = entry.enabled_by_default;
+                s
+            })
+            .collect();
+        mark_ambiguous(&mut scripts);
+        for s in &scripts {
+            assert!(
+                s.actionable(),
+                "{} would be unswitchable alongside the others",
+                s.id
+            );
+        }
+    }
+
+    /// An installed script drops out of the catalogue, so nothing is listed
+    /// twice and an empty catalogue means "you have them all".
+    #[test]
+    fn recommended_drops_what_is_installed() {
+        assert_eq!(recommended(&[]).len(), 4, "a bare install is offered all four");
+
+        let installed = vec![script("adguard-extra", "AdGuard Extra")];
+        let offered = recommended(&installed);
+        assert_eq!(offered.len(), 3);
+        assert!(
+            !offered.iter().any(|entry| entry.id == "adguard-extra"),
+            "the installed one is still being offered"
+        );
+
+        let all: Vec<Userscript> = RECOMMENDED
+            .iter()
+            .map(|entry| script(entry.id, entry.name))
+            .collect();
+        assert!(recommended(&all).is_empty(), "nothing left to offer");
+    }
+
+    /// A script the user installed themselves still counts as installed — the
+    /// match is on the id, not on where it came from.
+    #[test]
+    fn recommended_ignores_unrelated_scripts() {
+        let installed = vec![script("sponsorblock", "SponsorBlock")];
+        assert_eq!(recommended(&installed).len(), 4);
     }
 }

@@ -1921,4 +1921,37 @@ That makes *Reinstall* buildable from the recorded `downloadURL`, and it is the 
 
 `enable` on an already-enabled script answers `enabled successfully` rather than the `is not enabled` form its opposite uses — so the two no-ops are **not** symmetrical, and only the `disable` one is detectable from the text.
 
+### AdGuard's own four, and where they come from
+
+The four userscripts AdGuard bundles with its Windows and Mac applications are
+all installable on Linux from AdGuard's own CDN. Measured 15 August 2026, each
+into a throwaway data directory:
+
+| Script | id | URL | AdGuard ships it |
+| --- | --- | --- | --- |
+| AdGuard Extra | `adguard-extra` | `…/release/adguard-extra/1.0/adguard-extra.user.js` | **on** |
+| AdGuard Popup Blocker | `popupblocker` | `…/release/popup-blocker/2.5/popupblocker.user.js` | **on** |
+| AdGuard Assistant | `assistant` | `…/release/assistant/4.3/assistant.user.js` | off |
+| Web of Trust | `wot` | `…/release/adguard-wot/1.0/wot.user.js` | off |
+
+All on `https://userscripts.adtidy.org`. `adguard-cli` ships only *Extra*; the
+other three install exactly as any third-party script does.
+
+**The version in the path is a channel, not a release.** `…/assistant/4.3/…`
+served Assistant **4.4.13** and `…/adguard-extra/1.0/…` served Extra **1.1.36**,
+so these URLs stay current on their own and nothing here needs to track a
+release. It also means a local copy of a script goes stale while its URL does
+not — measured against four `.txt` copies taken from a Windows install, every
+one of which was behind the CDN by at least a patch version.
+
+**None of the four collides with another** under the substring rule above:
+`adguard-extra`, `popupblocker`, `assistant` and `wot` are each absent from the
+other three's ids and titles, so all four are switchable with all four
+installed. That is a property of these particular names rather than a
+guarantee, which is why `the_recommended_four_do_not_collide_with_each_other`
+re-derives it from the rule rather than trusting the observation.
+
+**`install` always enables**, so arriving in AdGuard's own default state takes
+two commands for the two that ship off — install, then disable.
+
 **None of these is proof of anything**, as everywhere in this file. `remove` reports success and the caller confirms by the pair of files being gone and the entry having left `proxy.yaml`; a switch confirms against `proxy.yaml`; an install confirms against the directory. The re-read is the verdict, and the sentence is only a hint about which re-read to expect.

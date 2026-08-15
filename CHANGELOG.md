@@ -52,6 +52,22 @@ explains that the collision is what is in the way; its switch, trash and cog are
 all inert rather than offered and then failing. This is AdGuard's limit rather
 than the application's, and the row says which.
 
+**AdGuard's own four are offered without you having to find them.** AdGuard for
+Windows and Mac come with four userscripts — Extra, Popup Blocker, Assistant and
+Web of Trust — where AdGuard CLI ships only Extra. A *From AdGuard* group lists
+whichever of them you do not have, with an **Add** button each, and adds them in
+the state AdGuard's own applications use: Extra and Popup Blocker switched on,
+Assistant and Web of Trust switched off. A script you already have drops out of
+that list rather than appearing twice, so an empty group means you have all
+four.
+
+**Nothing is installed unless you press Add.** A userscript runs inside the
+pages you visit, and this application does not fetch or run one on its own
+initiative any more than it performs a privileged operation on its own. The
+addresses are AdGuard's, over https, and the versions come from whatever AdGuard
+is serving rather than from a list here — their URLs are channels, so they stay
+current on their own.
+
 **Adding one takes a web address.** AdGuard installs userscripts only over http
 or https — a file on your computer is refused, unlike a custom filter list, which
 can be added from a path — so the group says so above the field rather than

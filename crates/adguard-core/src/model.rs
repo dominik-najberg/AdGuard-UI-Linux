@@ -1587,6 +1587,95 @@ pub struct Userscript {
     pub ambiguous: bool,
 }
 
+/// One of AdGuard's own userscripts, offered before it is installed.
+///
+/// The catalogue rows on the Extensions page: name, description and the URL to
+/// fetch, for a script the user does not have yet. See [`RECOMMENDED`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Recommended {
+    /// The id this will land under once installed — the stem of [`Self::url`]'s
+    /// filename, because that is how AdGuard names the pair (contract §15).
+    ///
+    /// It is what an installed script is matched against to drop it out of the
+    /// catalogue, so a wrong value here would leave a row offering to install
+    /// something the user already has. `recommended_ids_match_their_urls` pins
+    /// the two together.
+    pub id: &'static str,
+    pub name: &'static str,
+    /// AdGuard's own English description, from the script's metadata block.
+    ///
+    /// Only ever shown *before* installation. Afterwards the row is built from
+    /// the installed metadata file, which carries the same text translated into
+    /// ~40 languages — so this is the one string on the page that cannot be
+    /// localised, and it is on screen only until the user acts on it.
+    pub description: &'static str,
+    pub url: &'static str,
+    /// Whether AdGuard's own apps ship this one switched on.
+    ///
+    /// `userscripts install` always enables (contract §15), so a script whose
+    /// default is `false` is installed and then disabled — two commands for one
+    /// button, which is what it costs to arrive in the state AdGuard's other
+    /// apps put the user in.
+    pub enabled_by_default: bool,
+}
+
+/// The four userscripts AdGuard bundles with its own applications.
+///
+/// AdGuard for Windows ships these four installed, with *Extra* and *Popup
+/// Blocker* switched on and *Assistant* and *Web of Trust* off. AdGuard CLI
+/// ships only *Extra*, so the other three are reachable on Linux exactly as any
+/// third-party script is — by URL — and the point of this table is that the
+/// user should not have to go and find those URLs.
+///
+/// **They are offered and never installed unsolicited.** A userscript runs
+/// inside the pages the user visits, and this application does not fetch or run
+/// anything on its own behalf (`architecture.md` §7).
+///
+/// # The URLs are channels, not versions
+///
+/// Measured 15 August 2026: the paths carry a major version that does not track
+/// the script's own — `…/assistant/4.3/assistant.user.js` served Assistant
+/// **4.4.13**, and `…/adguard-extra/1.0/…` served Extra **1.1.36**. So these
+/// stay current without this table tracking releases, and the version shown on a
+/// row always comes from the installed metadata rather than from here.
+///
+/// All four were installed from these URLs into a throwaway data directory and
+/// came back with the ids below, none of them colliding by substring with
+/// another's id or title — so all four are actionable together, which is not
+/// something a catalogue could assume.
+pub const RECOMMENDED: [Recommended; 4] = [
+    Recommended {
+        id: "adguard-extra",
+        name: "AdGuard Extra",
+        description: "AdGuard Extra is designed to solve complicated cases when regular ad \
+                      blocking rules aren't enough.",
+        url: "https://userscripts.adtidy.org/release/adguard-extra/1.0/adguard-extra.user.js",
+        enabled_by_default: true,
+    },
+    Recommended {
+        id: "popupblocker",
+        name: "AdGuard Popup Blocker",
+        description: "Blocks pop-up ads on web pages",
+        url: "https://userscripts.adtidy.org/release/popup-blocker/2.5/popupblocker.user.js",
+        enabled_by_default: true,
+    },
+    Recommended {
+        id: "assistant",
+        name: "AdGuard Assistant",
+        description: "Provides easy and convenient way to manage filtering right from the browser",
+        url: "https://userscripts.adtidy.org/release/assistant/4.3/assistant.user.js",
+        enabled_by_default: false,
+    },
+    Recommended {
+        id: "wot",
+        name: "Web of Trust",
+        description: "Check out any website for reputation and safety information based on \
+                      users' experience.",
+        url: "https://userscripts.adtidy.org/release/adguard-wot/1.0/wot.user.js",
+        enabled_by_default: false,
+    },
+];
+
 impl Userscript {
     /// What to call this script on screen.
     ///

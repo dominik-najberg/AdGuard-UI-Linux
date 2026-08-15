@@ -38,6 +38,10 @@ use crate::{toast, worker};
 /// One read of everything the page renders.
 struct Loaded {
     scripts: Vec<Userscript>,
+    /// AdGuard's own scripts that are not installed yet. Derived from
+    /// `scripts`, but computed on the worker thread with everything else so the
+    /// view builder has nothing left to work out.
+    offered: Vec<&'static adguard_core::Recommended>,
 }
 
 /// A rendered userscript and the state it was rendered from.
@@ -207,6 +211,9 @@ impl ExtensionsPage {
 
         let page = adw::PreferencesPage::new();
         page.add(&self.add_group());
+        if let Some(group) = self.offered_group(&loaded.offered) {
+            page.add(&group);
+        }
 
         if loaded.scripts.is_empty() {
             // Not an error: an install whose last script was removed is a
@@ -272,6 +279,131 @@ impl ExtensionsPage {
 
         group.add(&entry);
         group
+    }
+
+    /// AdGuard's own userscripts, for the ones the user has not installed.
+    ///
+    /// `None` once all four are installed — the group would be a heading over
+    /// nothing, and its absence is the useful signal that there is nothing left
+    /// to add. The same reason `FilterCatalogue::grouped` drops empty groups.
+    ///
+    /// **Offered, never installed unsolicited.** These are AdGuard's own
+    /// scripts and this is a shortcut past having to find their URLs — not a
+    /// reason for the application to fetch script the user did not ask for
+    /// (`architecture.md` §7).
+    fn offered_group(
+        self: &Rc<Self>,
+        offered: &[&'static adguard_core::Recommended],
+    ) -> Option<adw::PreferencesGroup> {
+        if offered.is_empty() {
+            return None;
+        }
+
+        let group = adw::PreferencesGroup::builder()
+            .title("From AdGuard")
+            .description(
+                "AdGuard's own userscripts, which its Windows and Mac applications come with. \
+                 AdGuard CLI ships only AdGuard Extra, so the rest are fetched on request.",
+            )
+            .build();
+
+        for entry in offered {
+            let row = adw::ActionRow::builder()
+                .title(entry.name)
+                .subtitle(offered_subtitle(entry))
+                .build();
+            row.set_use_markup(false);
+            row.set_subtitle_lines(2);
+
+            let add = gtk::Button::builder()
+                .label("Add")
+                .valign(gtk::Align::Center)
+                .build();
+            add.add_css_class("suggested-action");
+
+            let this = Rc::downgrade(self);
+            let entry = *entry;
+            add.connect_clicked(move |button| {
+                let Some(this) = this.upgrade() else {
+                    return;
+                };
+                // Fenced at the click, like every other action here: the fetch
+                // takes seconds and a second press would issue a second install.
+                button.set_sensitive(false);
+                this.add_recommended(entry);
+            });
+
+            add.set_tooltip_text(Some(&format!("Add {}", entry.name)));
+            row.add_suffix(&add);
+            // Deliberately **not** the row's activatable widget. Setting it
+            // makes `AdwActionRow` give the button the row's own name — a walk
+            // confirms it announcing as "AdGuard Popup Blocker", with the word
+            // *Add* surviving only as a label inside it, so the one thing the
+            // control does is the thing a screen reader would not say. And
+            // pressing this downloads and runs somebody else's script, which
+            // should take a press on the button rather than a click anywhere
+            // along a row the user might merely be reading.
+            //
+            // The button's own text is what names it, and an explicit
+            // accessible label does **not** override it — measured both before
+            // and after the row is assembled, so it is the widget's rule and
+            // not a question of ordering. That leaves three buttons all reading
+            // "Add", distinguished by the list item each sits in; the tooltip
+            // carries the script's name for the pointer, and unlike the trash
+            // buttons on the rows below there is no unnamed control here to
+            // fix.
+            group.add(&row);
+        }
+
+        Some(group)
+    }
+
+    /// Install one of AdGuard's own scripts, in the state AdGuard ships it.
+    ///
+    /// Two commands for one button where the default is *off*: `install` always
+    /// enables (contract §15), so *Assistant* and *Web of Trust* are installed
+    /// and then switched off. Doing it here rather than leaving the user to
+    /// notice is the whole point of the catalogue — arriving in the state
+    /// AdGuard's other applications put them in.
+    ///
+    /// **A failed disable is not a failed install.** The script is on the
+    /// machine either way, so the toast says what happened rather than
+    /// pretending nothing did, and the row that appears will show it switched
+    /// on — which is true, and is the state the user can then change.
+    fn add_recommended(self: &Rc<Self>, entry: &'static adguard_core::Recommended) {
+        let cli = self.cli.clone();
+        let this = self.clone();
+        worker::run(
+            move || {
+                if let Err(err) = cli.userscripts_install(entry.url) {
+                    return Err(err.to_string());
+                }
+                if !entry.enabled_by_default {
+                    if let Err(err) = cli.userscripts_disable(entry.id) {
+                        return Ok(Some(err.to_string()));
+                    }
+                }
+                Ok(None)
+            },
+            move |result: Result<Option<String>, String>| {
+                match result {
+                    Ok(None) => this
+                        .toasts
+                        .add_toast(toast(&format!("Added {}", entry.name))),
+                    Ok(Some(why)) => this.toasts.add_toast(toast(&format!(
+                        "Added {}, but it could not be switched off: {why}",
+                        entry.name
+                    ))),
+                    // AdGuard's own sentence, which for an install says nothing
+                    // about the cause.
+                    Err(refused) => this.toasts.add_toast(toast(&refused)),
+                }
+                // Either way the page is rebuilt: a success moves the row from
+                // the catalogue into the list, and a failure has to put the
+                // button back.
+                this.reload();
+            },
+        );
     }
 
     /// One script's row: a switch, what it is, and the controls that change it.
@@ -819,7 +951,8 @@ fn read(locale: &Locale) -> Result<Loaded, String> {
     let dir = adguard_core::paths::userscripts_dir()
         .ok_or_else(|| "Could not locate AdGuard's data directory".to_owned())?;
     let scripts = userscripts::read(&dir, &config.enabled_userscripts(), locale);
-    Ok(Loaded { scripts })
+    let offered = userscripts::recommended(&scripts);
+    Ok(Loaded { scripts, offered })
 }
 
 /// Is `id` among these `meta:` paths? The config holds a path and the page
@@ -850,6 +983,26 @@ fn subtitle(script: &Userscript) -> String {
         (None, false) => description.to_owned(),
         (None, true) => "No description".to_owned(),
     }
+}
+
+/// What a catalogue row says under its name.
+///
+/// AdGuard's description, plus a word about where it will land when the default
+/// is *off* — the button says "Add" either way, and a script that arrives
+/// switched off would otherwise look like an install that half-worked.
+///
+/// No version here: nothing knows one until the script is fetched, and the URLs
+/// are channels rather than pinned releases (`RECOMMENDED`). Printing the
+/// version from the table would be quoting a number this application made up.
+fn offered_subtitle(entry: &adguard_core::Recommended) -> String {
+    if entry.enabled_by_default {
+        return entry.description.to_owned();
+    }
+    // AdGuard writes some of these descriptions with a closing full stop and
+    // some without, so the dash has to join onto either without leaving
+    // "experience. — added" in the middle of a sentence.
+    let description = entry.description.trim_end_matches('.');
+    format!("{description} — added switched off, as AdGuard ships it")
 }
 
 /// A row that states something rather than doing anything.
@@ -950,6 +1103,30 @@ mod tests {
         s.ambiguous = true;
         assert_eq!(subtitle(&s), AMBIGUOUS_SUBTITLE);
         assert!(!subtitle(&s).contains("Something useful"));
+    }
+
+    /// A catalogue row whose default is *off* says so, because the button says
+    /// "Add" either way and a script arriving switched off would otherwise read
+    /// as an install that half-worked.
+    #[test]
+    fn an_off_by_default_catalogue_row_says_where_it_lands() {
+        let wot = adguard_core::RECOMMENDED
+            .iter()
+            .find(|entry| entry.id == "wot")
+            .expect("Web of Trust is in the catalogue");
+        let subtitle = offered_subtitle(wot);
+        assert!(subtitle.contains("switched off"));
+        // Its description ends in a full stop; the dash must not follow one.
+        assert!(
+            !subtitle.contains(". —"),
+            "the note ran onto a finished sentence: {subtitle}"
+        );
+
+        let extra = adguard_core::RECOMMENDED
+            .iter()
+            .find(|entry| entry.id == "adguard-extra")
+            .expect("AdGuard Extra is in the catalogue");
+        assert_eq!(offered_subtitle(extra), extra.description);
     }
 
     /// The config holds paths; the page holds ids.

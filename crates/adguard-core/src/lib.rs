@@ -34,6 +34,7 @@ pub use filters::Catalogue;
 pub use locale::Locale;
 pub use model::{
     ComponentUpdate, Consent, Filter, FilterAction, FilterCatalogue, FilterGroup, FilterSet,
-    FilterState, Kind, License, ProxyStatus, Setting, SettingGroup, Toggle, UpdatePart,
-    UpdateReport, Userscript, Verdict, ADVANCED, ANNOYANCE_TERMS, FILTER_SETTINGS, SETUP, STEALTH,
+    FilterState, Kind, License, ProxyStatus, Recommended, Setting, SettingGroup, Toggle,
+    UpdatePart, UpdateReport, Userscript, Verdict, ADVANCED, ANNOYANCE_TERMS, FILTER_SETTINGS,
+    RECOMMENDED, SETUP, STEALTH,
 };
