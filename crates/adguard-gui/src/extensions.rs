@@ -79,13 +79,20 @@ const AMBIGUOUS_SUBTITLE: &str =
     "AdGuard cannot tell this apart from another installed script, so it cannot be \
      switched or removed — rename or remove the other one";
 
-/// The placeholder on the add row.
+/// What the add row's group says above the field.
 ///
-/// It says http(s) because `userscripts install` refuses everything else —
+/// It names the scheme because `userscripts install` refuses everything else —
 /// measured, a local path and a `file://` URL are both rejected with the same
-/// unhelpful sentence (contract §15). Saying so here is cheaper than letting a
-/// user discover it by having a paste fail.
-const ADD_PLACEHOLDER: &str = "https://example.org/script.user.js";
+/// unhelpful sentence, which explains none of that (contract §15). Saying so
+/// here is cheaper than letting a user discover it by having a paste fail.
+///
+/// In the group description rather than as a placeholder on the field:
+/// `AdwEntryRow` has no `placeholder-text` property, and reaching for one
+/// through `set_property` panics at run time rather than failing to compile.
+/// No other page here sets a placeholder either.
+const ADD_DESCRIPTION: &str =
+    "AdGuard fetches userscripts over the web, so this takes an http or https address \
+     ending in .user.js — a file on this computer cannot be installed.";
 
 pub struct ExtensionsPage {
     /// Swapped wholesale — spinner, error, or the list — which is simpler and
@@ -232,10 +239,7 @@ impl ExtensionsPage {
     fn add_group(self: &Rc<Self>) -> adw::PreferencesGroup {
         let group = adw::PreferencesGroup::builder()
             .title("Add an extension")
-            .description(
-                "AdGuard fetches userscripts over the web, so this takes an http or https \
-                 address — a file on this computer cannot be installed.",
-            )
+            .description(ADD_DESCRIPTION)
             .build();
 
         let entry = adw::EntryRow::builder()
@@ -245,9 +249,6 @@ impl ExtensionsPage {
         // The one place this page shows a string the user is about to act on;
         // `&` in a URL is ordinary and markup would mangle it.
         entry.set_use_markup(false);
-        // `AdwEntryRow` has no placeholder property of its own; the inner
-        // editable does, and this is how the DNS page sets one too.
-        entry.set_property("placeholder-text", ADD_PLACEHOLDER);
 
         let spinner = adw::Spinner::builder()
             .width_request(16)
