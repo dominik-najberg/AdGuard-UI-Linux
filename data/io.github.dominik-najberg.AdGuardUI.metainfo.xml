@@ -53,6 +53,18 @@
     application is its first release.
   -->
   <releases>
+    <release version="1.5.0" type="stable" date="2026-08-15">
+      <url type="details">https://github.com/dominik-najberg/AdGuard-UI-Linux/releases/tag/v1.5.0</url>
+      <description>
+        <p>An Extensions page, for the userscripts AdGuard runs:</p>
+        <ul>
+          <li>Every installed userscript is listed with its version and description, and each one can be switched on or off, removed, or reinstalled from where it came from.</li>
+          <li>AdGuard's own four userscripts — Extra, Popup Blocker, Assistant and Web of Trust — can be added in one press, in the state AdGuard's other applications ship them in. Nothing is fetched until you ask for it.</li>
+          <li>New userscripts are added by web address. AdGuard installs them over http and https only, so the page says so rather than letting a file be chosen and refused.</li>
+          <li>A userscript AdGuard cannot tell apart from another one says so on its row instead of offering controls that would not work.</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.4.0" type="stable" date="2026-08-14">
       <url type="details">https://github.com/dominik-najberg/AdGuard-UI-Linux/releases/tag/v1.4.0</url>
       <description>

@@ -11,7 +11,7 @@ This file is the one changelog.
 
 ---
 
-## Unreleased
+## 1.5.0 — 15 August 2026
 
 ### An Extensions page, for the userscripts AdGuard runs
 
