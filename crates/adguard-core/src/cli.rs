@@ -3192,6 +3192,45 @@ mod tests {
         assert_eq!(http.part(&UpdatePart::DnsFilters).unwrap().verdict, Verdict::UpToDate);
     }
 
+    /// A userscript update announces itself in a shape of its own, and the
+    /// Extensions page is re-read off it.
+    ///
+    /// Measured 15 August 2026 (contract §15): a userscript whose installed
+    /// metadata was aged to `0.0.1` was refetched to `1.1.36`, and the run said
+    /// `1 userscript(s) updated`. Nothing needed adding to the parser —
+    /// [`Verdict`] keys on the trailing `updated` that `N filter(s) updated`
+    /// already ends with — and this test exists to say that on purpose rather
+    /// than by luck: a future parser that special-cased the filter wording would
+    /// silently stop reporting userscript updates, and the only symptom would be
+    /// a page showing a version that is no longer installed.
+    #[test]
+    fn a_userscript_update_is_a_change() {
+        const UPDATED: &str = "\
+Checking filters updates...
+Up to date
+Checking DNS filters updates...
+Up to date
+Checking userscripts updates...
+1 userscript(s) updated
+Checking SafebrowsingV2 updates...
+Up to date
+Checking CRLite updates...
+Up to date
+Checking app updates...
+Up to date
+";
+        let report = report(UPDATED);
+        assert_eq!(
+            report.part(&UpdatePart::Userscripts).unwrap().verdict,
+            Verdict::Changed
+        );
+        assert!(
+            report.changed(&UpdatePart::Userscripts),
+            "the Extensions page reloads off this"
+        );
+        assert!(!report.changed(&UpdatePart::Filters), "and nothing else moved");
+    }
+
     /// A first run — the one every new install performs — opens with a line
     /// that belongs to no pair. Reading it as a verdict would shift every
     /// component onto the wrong header.

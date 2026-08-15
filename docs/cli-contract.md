@@ -1650,6 +1650,7 @@ Six components, in that fixed order, each announced by a `Checking <name> update
 | `Updated` | SafebrowsingV2, CRLite | — but see below, it says this every time |
 | `1 filter(s) updated` | filters | a count, and the noun is the component's |
 | `1 DNS filter(s) updated` | DNS filters | as above |
+| `1 userscript(s) updated` | userscripts | measured 15 August 2026 by ageing an installed script's metadata to `0.0.1` and watching it come back at `1.1.36`. The same `…updated` ending, so it needs no special case — see §15 |
 | `Failed to update filters` | **filters *and* DNS filters** | the trap in this section |
 
 **The failure sentence is the same for two different components, and it names neither.** Across the five failures `Failed to update filters` was printed under `Checking DNS filters updates...` three times and under `Checking filters updates...` twice — the identical string either way. So the *header* is the only thing that says which component failed, and a parser or a UI that keeps the verdict lines alone will report a DNS failure as an HTTP-filter failure, or vice versa. Pair each verdict with the header above it and never let the two travel separately. `UpdateReport` does that pairing, and `check_update_pairs_each_verdict_with_its_header` pins it against the two real captures that differ in nothing else.

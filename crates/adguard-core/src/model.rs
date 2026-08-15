@@ -208,7 +208,7 @@ impl UpdatePart {
 pub enum Verdict {
     /// `Up to date`.
     UpToDate,
-    /// `Updated`, or `N filter(s) updated`.
+    /// `Updated`, `N filter(s) updated`, or `N userscript(s) updated`.
     Changed,
     /// `Failed to update filters`, whichever component it was about.
     Failed,
@@ -227,7 +227,9 @@ impl Verdict {
     const UP_TO_DATE: &'static str = "Up to date";
     /// Every failure seen opens with this.
     const FAILED: &'static str = "Failed";
-    /// `Updated` and `N filter(s) updated` both end here.
+    /// `Updated`, `N filter(s) updated` and `N userscript(s) updated` all end
+    /// here — which is why the counted shapes needed no special case when the
+    /// Extensions page started reading one of them.
     const UPDATED: &'static str = "updated";
 
     /// Read one verdict line.

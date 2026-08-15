@@ -685,6 +685,7 @@ fn main_view(cli: &Cli) -> MainView {
     about.connect_checked({
         let filters = Rc::downgrade(&filters);
         let dns = Rc::downgrade(&dns);
+        let extensions = Rc::downgrade(&extensions);
         move |report: &adguard_core::UpdateReport| {
             // Only on a reported change. A component the CLI did not mention, or
             // one that failed, has moved nothing worth re-reading — and a
@@ -697,6 +698,22 @@ fn main_view(cli: &Cli) -> MainView {
             if report.changed(&adguard_core::UpdatePart::DnsFilters) {
                 if let Some(dns) = dns.upgrade() {
                     dns.reload();
+                }
+            }
+            // Userscripts are one of the five components `check-update` really
+            // updates, and the only thing on screen that would show it is the
+            // version under a script's name. Measured: a userscript aged to
+            // `0.0.1` came back at `1.1.36` reported as `1 userscript(s)
+            // updated` (contract §15).
+            //
+            // **Nothing else would notice.** `watch.rs` reconciles this page
+            // from `proxy.yaml`, and an update rewrites the *metadata* file
+            // while leaving that key exactly as it was — so the watcher sees no
+            // row move, reports nothing, and the page goes on showing a version
+            // that is no longer installed until something else rebuilds it.
+            if report.changed(&adguard_core::UpdatePart::Userscripts) {
+                if let Some(extensions) = extensions.upgrade() {
+                    extensions.reload();
                 }
             }
         }
