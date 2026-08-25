@@ -1098,6 +1098,25 @@ There are exactly five long spans in fourteen days and they land on exactly the 
 
 Replaying that rule at three failures over two hours, evaluated every half hour across the whole fourteen days: **522 of 718 readings report a bypass, and every one of them falls inside one of the five spans that were genuinely unprotected.** None falls outside them. On the 25.08 event the first alarm lands at 05:00, about two hours after the 03:01 failure — one to two ping intervals, which is why this corroborates the root-helper check rather than racing it.
 
+#### A 502 does not say where the request stopped
+
+The rule above rests on failures, and a failure is not self-explaining. AdGuard's internal request answers **502 when nothing is reaching the proxy, and 502 when the proxy is fine and `filters.adtidy.org` — or the network — is not.** Nothing on the line separates them: across all ten rotations, every one of the 256 internal 502s carries `-` where each of the 1,062 successes carries an upstream address, so a failure to connect and a refusal to try look identical.
+
+What separates them is the rest of the log, and it is the same coincidence the day table reports from the other end. The two states differ in what the *user's* traffic is doing: a bypass takes traffic away from the proxy, so the proxy's log empties, while a dead upstream leaves the traffic arriving and failing there, so the log keeps filling. Measured across the five bypassed spans against everything else:
+
+| | Duration | Other clients' entries | Rate |
+| --- | ---: | ---: | ---: |
+| bypassed 11.08 13:21 – 15.08 12:03 | 94.7 h | 7 | **0.1/h** |
+| bypassed 16.08 15:00 – 17.08 13:10 | 22.2 h | 12 | **0.5/h** |
+| bypassed 18.08 13:51 – 20.08 10:17 | 44.4 h | 37 | **0.8/h** |
+| bypassed 20.08 20:36 – 21.08 14:48 | 18.2 h | 8 | **0.4/h** |
+| bypassed 25.08 02:56 – 25.08 19:56 | 17.0 h | 87 | **5.1/h** |
+| everywhere else | 236.0 h | 244,518 | **1,036/h** |
+
+Four orders of magnitude. The busiest two hours inside a real bypass reach 43/h — `chronyd`, a little `chrome`, `slack`, the things that reach the proxy without needing the redirect — so a threshold of two entries a minute sits 2.8× above the worst measured bypass and 8.6× below ordinary traffic. Replaying the fortnight with that veto in place changes nothing: the same five spans, the same 522 readings.
+
+**It does not close the gap entirely.** A machine that is powered on and has been off the network for hours logs neither its own traffic nor a successful check, and reads exactly as a bypass does. Nothing in `access.log` can separate those two, which is why the state this feeds names the observation and offers that reading rather than asserting a bypass.
+
 **Two practical limits, both measured.** A full 10 MiB generation of `access.log` spans about twenty-five hours of ordinary traffic and about ten of the heaviest, so a reader wanting a two-hour window needs single-digit mebibytes of tail, not kilobytes. And **rotation can empty the window**: it happened while this was being written, leaving `access.log` covering three minutes. The generation before it has to be read too. Neither limit bites where it would matter most — rotation is driven by traffic volume and a bypass in `auto` mode produces none, so a bypass cannot roll its own evidence away.
 
 #### It is upstream's, it is fixed, and the fix is not on the release channel

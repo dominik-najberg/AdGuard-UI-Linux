@@ -60,7 +60,7 @@
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use adguard_core::config::key;
 use adguard_core::{
@@ -275,13 +275,18 @@ pub struct StatusPage {
     /// alongside it (contract §3).
     busy: Cell<bool>,
 
-    /// What AdGuard's own log last said about traffic reaching the proxy, and
-    /// when that was asked.
+    /// What AdGuard's own log last said about traffic reaching the proxy —
+    /// **and the proxy run it said it about**.
     ///
     /// Cached rather than read on every poll, for the reason
-    /// [`ACCESS_LOG_EVERY`] gives. `None` means never asked, which is also what
-    /// [`Self::act`] resets it to.
-    filtering: Cell<Filtering>,
+    /// [`ACCESS_LOG_EVERY`] gives, and the run is what keeps that cache honest.
+    /// A verdict is scoped to one run; a restart ends the run and the evidence
+    /// with it. This page cannot rely on having caused that restart — a
+    /// terminal, a packaging script or `systemd` can end a run without it
+    /// noticing — so the cache expires by *identity* and not only by age. See
+    /// [`read_evidence`], which discards a verdict whose run no longer matches
+    /// and re-reads on the spot rather than waiting out the interval.
+    filtering: Cell<Cached>,
     filtering_read: Cell<Option<Instant>>,
 
     /// Whether the main window is on screen. False while only the tray is.
@@ -593,7 +598,7 @@ impl StatusPage {
             finish: finish.clone(),
             licence: RefCell::new(Licence::Unknown),
             busy: Cell::new(false),
-            filtering: Cell::new(Filtering::Unseen),
+            filtering: Cell::new(None),
             filtering_read: Cell::new(None),
             window_visible: Cell::new(true),
             ticks: Cell::new(0),
@@ -848,7 +853,7 @@ impl StatusPage {
     /// happened. Stamping it here instead would start the five minutes running
     /// on a read that never took place — and the first tick of every start-up,
     /// where `status` has yet to answer, is exactly such a tick.
-    fn access_log_due(&self) -> (bool, Filtering) {
+    fn access_log_due(&self) -> (bool, Cached) {
         let due = self
             .filtering_read
             .get()
@@ -862,8 +867,8 @@ impl StatusPage {
         result: Result<ProxyStatus, (bool, String)>,
         evidence: Evidence,
     ) {
-        let (bypass, filtering, read) = evidence;
-        self.filtering.set(filtering);
+        let (bypass, cached, read) = evidence;
+        self.filtering.set(cached);
         if read {
             self.filtering_read.set(Some(Instant::now()));
         }
@@ -1025,13 +1030,10 @@ impl StatusPage {
 
     fn act(self: &Rc<Self>, action: Action) {
         self.busy.set(true);
-        // A restart is the measured cure and it ends the run the log verdict was
-        // scoped to, so the evidence behind it is stale the moment this is
-        // pressed. Dropped rather than aged out, or a cured install would go on
-        // reporting a bypass for up to `ACCESS_LOG_EVERY` — over the very button
-        // that had just fixed it.
-        self.filtering.set(Filtering::Unseen);
-        self.filtering_read.set(None);
+        // Nothing is dropped here on purpose. A restart ends the run the log
+        // verdict was scoped to, and `read_evidence` expires the cache on the
+        // run's identity rather than on this page having pressed the button —
+        // which is the only version that also covers a restart from a terminal.
         for b in [&self.primary, &self.restart] {
             b.set_sensitive(false);
         }
@@ -1255,16 +1257,31 @@ impl StatusPage {
                          requests through the HTTP proxy now fail. The SOCKS5 proxy is \
                          unaffected. Restart to recover."
                     }
-                    // Cause unknown, so the sentence names the observation
-                    // rather than a mechanism — AdGuard's own requests through
-                    // the proxy, which is what was actually seen to fail. The
-                    // cache advice is kept: whatever the cause, pages loaded
-                    // while this was true were fetched unfiltered.
+                    // **Cause unknown, so the sentence claims no cause.** Both
+                    // halves of what was seen are named — AdGuard's own checks
+                    // failing, and nothing else arriving either — because
+                    // together they are the evidence, and either alone would be
+                    // consistent with a working proxy behind a dead upstream.
+                    //
+                    // The last sentence is the one that keeps this honest.
+                    // `access.rs` can rule out a dead `filters.adtidy.org`
+                    // while browsing works, because that leaves the log busy;
+                    // it cannot rule out a machine that has been off the
+                    // network altogether, which empties the log exactly as a
+                    // bypass does. Naming that reading is what lets a user who
+                    // knows they were offline dismiss this, instead of
+                    // concluding the indicator lies.
+                    //
+                    // The cache advice is conditional here and unconditional
+                    // above, and the difference is measurement: a dead helper
+                    // was *seen* to leave a cache full of ads, and this state
+                    // may not have loaded anything at all.
                     Bypass::Unreached => {
-                        "The proxy is running, but AdGuard's own requests through it have \
-                         been failing for hours, so traffic is not reaching the filters. \
-                         Restart to recover — pages already loaded may keep their ads \
-                         until you clear the browser's cache."
+                        "The proxy is running, but for hours nothing has been getting \
+                         through it — neither AdGuard's own hourly checks nor any other \
+                         traffic. Restart to recover, and clear the browser's cache if \
+                         pages still show ads afterwards. A machine that has been offline \
+                         for hours looks the same from here."
                     }
                 }
                 .to_owned(),
@@ -1623,10 +1640,18 @@ fn read_status(cli: &Cli) -> Result<ProxyStatus, (bool, String)> {
     cli.status().map_err(classify)
 }
 
+/// A log verdict and the proxy run it was read in.
+///
+/// The pair, never the verdict alone: a verdict outlives the run it describes
+/// only as a falsehood, and the start time is what a later reading compares
+/// against to notice. `None` is *no cached verdict*, which is what a restart
+/// leaves behind and what makes the next reading go to the log immediately.
+type Cached = Option<(SystemTime, Filtering)>;
+
 /// What [`read_evidence`] hands back: the bypass to render if there is one, the
-/// log verdict to remember, and whether the log was actually read this time —
-/// which is what re-arms [`ACCESS_LOG_EVERY`].
-type Evidence = (Option<Bypass>, Filtering, bool);
+/// verdict and run to remember, and whether the log was actually read this time
+/// — which is what re-arms [`ACCESS_LOG_EVERY`].
+type Evidence = (Option<Bypass>, Cached, bool);
 
 /// Everything this page knows about a bypass, and the log verdict to remember.
 ///
@@ -1652,36 +1677,48 @@ fn read_evidence(
     cli: &Cli,
     status: &Result<ProxyStatus, (bool, String)>,
     log_due: bool,
-    cached: Filtering,
+    cached: Cached,
 ) -> Evidence {
     if !matches!(status, Ok(status) if status.running) {
-        return (None, Filtering::Unseen, false);
+        return (None, None, false);
     }
     let found = orphan::daemons(cli.binary());
     let [daemon] = found.as_slice() else {
-        return (None, Filtering::Unseen, false);
+        return (None, None, false);
     };
+    // An undatable run has no window to read and nothing to key a cache on, and
+    // reading one unscoped would count a previous run's failures against it.
+    let Some(started) = daemon.started_at() else {
+        return (None, None, false);
+    };
+    // **The cache expires on identity, not only on age.** A verdict belongs to
+    // the run it was read in, and a restart from anywhere — this page, a
+    // terminal, `systemd` — starts a new one. Carrying the old verdict across
+    // that boundary would leave a cured install reporting a bypass for up to
+    // `ACCESS_LOG_EVERY`, over the very restart that fixed it.
+    let carried = cached.filter(|(run, _)| *run == started);
 
     // The corpse first: it is cheaper, it is immediate, and it names the cause,
     // so a bypass it can explain is never reported as one nothing can — and the
     // log is not read at all, because nothing it could say would change this.
     if helper::process(daemon.pid()) == HelperProcess::Defunct {
-        return (Some(Bypass::Helper { redirected: redirects_traffic() }), cached, false);
+        return (Some(Bypass::Helper { redirected: redirects_traffic() }), carried, false);
     }
 
-    let (filtering, read) = match log_due.then(|| daemon.started_at()) {
-        // Due, and the run could be dated: the one path that reads the log.
-        Some(Some(started)) => (access::filtering(started), true),
-        // Due, and it could not. An undatable run has no window to read, and
-        // reading one unscoped would count a previous run's failures.
-        Some(None) => (Filtering::Unseen, false),
-        None => (cached, false),
-    };
-    (
-        (filtering == Filtering::Bypassed).then_some(Bypass::Unreached),
-        filtering,
-        read,
-    )
+    // Not due *and* still speaking for this run is the only way to skip the
+    // read. A run this page has no verdict for is read now, whatever the
+    // interval says, so a restart is answered on the next tick rather than five
+    // minutes later.
+    if let (false, Some((_, filtering))) = (log_due, carried) {
+        return (bypass_of(filtering), carried, false);
+    }
+    let filtering = access::filtering(started);
+    (bypass_of(filtering), Some((started, filtering)), true)
+}
+
+/// The one verdict a caller may act on, as the panel's evidence.
+fn bypass_of(filtering: Filtering) -> Option<Bypass> {
+    (filtering == Filtering::Bypassed).then_some(Bypass::Unreached)
 }
 
 /// Does this install redirect traffic into the proxy, rather than wait on its

@@ -59,6 +59,20 @@
 //! a dead helper is reported the moment `/proc` shows the corpse, and this
 //! answers hours later for the bypasses that have no corpse to show.
 //!
+//! # The failures alone are not enough, and the log carries the rest
+//!
+//! A 502 means the request did not get through. It does not say *where* it
+//! stopped, and a healthy proxy answers exactly the same way when
+//! `filters.adtidy.org` — or the network — is unreachable. Reported as a bypass,
+//! that would tell a user their pages had been loading unfiltered when they had
+//! not been loading at all.
+//!
+//! So the window has to be quiet in the other sense too: **nobody else's traffic
+//! may be reaching the proxy either**. A bypass takes traffic away from the
+//! proxy, so its log empties; a dead upstream leaves the traffic arriving and
+//! failing, so its log keeps filling. [`OTHER_TRAFFIC_PER_MINUTE`] has the
+//! measurement and the one case this still cannot separate.
+//!
 //! **Scoping to the run is still load-bearing.** A restart is the measured cure,
 //! and failures logged before one must not count against the run that followed
 //! it, or the panel would go on reporting a bypass the user had just fixed.
@@ -155,6 +169,39 @@ const PREVIOUS: &str = "access.log.1";
 /// normally and a minimum of nineteen in one that was not.
 const FAILURES: usize = 3;
 
+/// How much of everybody else's traffic may appear in the failure window before
+/// it stops being evidence of a bypass.
+///
+/// **The failures alone do not distinguish a bypass from a dead upstream.**
+/// AdGuard's internal request answers 502 when nothing is reaching the proxy,
+/// and it answers 502 when the proxy is fine and `filters.adtidy.org` — or the
+/// network — is not. Every 502 measured here carries `-` where a successful one
+/// carries an upstream address, so the line itself cannot tell the two apart.
+///
+/// What can is the rest of the log. The two states differ in what the *user's*
+/// traffic is doing:
+///
+/// - **Bypassed.** Traffic is not being redirected into the proxy, so it never
+///   appears in the proxy's log. Measured across the five bypassed spans on the
+///   reference machine: **0.1 to 5.1 entries an hour**, against **1,036 an
+///   hour** everywhere else — four orders of magnitude, and the same
+///   coincidence contract §8's day table reports from the other end.
+/// - **Upstream or network down.** Traffic *is* still being redirected into the
+///   proxy; it arrives and fails there, so the log keeps filling.
+///
+/// So a window busy with other clients is a window in which traffic is reaching
+/// the proxy, whatever AdGuard's own request made of it. Two entries a minute
+/// is 2.8× the worst rate measured inside a real bypass — 43 an hour, over the
+/// two hours of 25.08 that carried the most — and 8.6× below the ordinary one.
+///
+/// **It does not close the gap entirely, and the wording of the state says so.**
+/// A machine that is powered on and has been off the network for hours logs
+/// neither its own traffic nor a successful check, and reads from here exactly
+/// as a bypass does. Nothing in this file can separate those two, so the panel
+/// names the observation and offers that reading rather than asserting a
+/// bypass.
+const OTHER_TRAFFIC_PER_MINUTE: i64 = 2;
+
 /// How long those failures must span.
 ///
 /// Two hours — two ping intervals — against a measured maximum of one hour of
@@ -237,9 +284,22 @@ fn verdict(tail: &str, since: i64) -> Filtering {
     // the module header measures. A success empties it, so what survives to the
     // end of the loop is exactly the tail of the run.
     let mut failures: Vec<i64> = Vec::new();
+    // Everybody else's requests inside that same window — see
+    // [`OTHER_TRAFFIC_PER_MINUTE`]. Counted by position rather than by time,
+    // which is exact because the log is chronological and costs no parse: the
+    // window opens at the first trailing failure, so a line that is neither an
+    // internal entry nor blank counts from that point on.
+    let mut others: i64 = 0;
 
     for line in tail.lines() {
         let Some((at, status)) = internal_entry(line) else {
+            // Permissive on purpose, and the opposite way round from
+            // `internal_entry`: a line this cannot read still counts as
+            // somebody's traffic, so a format that has drifted quietens the
+            // verdict here too rather than sharpening it.
+            if !failures.is_empty() && !line.trim().is_empty() {
+                others += 1;
+            }
             continue;
         };
         // Before the daemon started, so it belongs to a run a restart has
@@ -250,7 +310,11 @@ fn verdict(tail: &str, since: i64) -> Filtering {
         if (200..300).contains(&status) {
             reached = true;
             failures.clear();
+            others = 0;
         } else {
+            if failures.is_empty() {
+                others = 0;
+            }
             failures.push(at);
         }
     }
@@ -261,11 +325,15 @@ fn verdict(tail: &str, since: i64) -> Filtering {
         (Some(first), Some(last)) => (last - first).max(0),
         _ => 0,
     };
-    if failures.len() >= FAILURES && span >= SPAN.as_secs() as i64 {
+    let quiet = others <= span / 60 * OTHER_TRAFFIC_PER_MINUTE;
+    if failures.len() >= FAILURES && span >= SPAN.as_secs() as i64 && quiet {
         Filtering::Bypassed
     } else if reached {
         Filtering::Reaching
     } else {
+        // Includes the vetoed case: other traffic is reaching the proxy, so the
+        // failures are not evidence of a bypass — and nothing here has seen a
+        // success either, so they are not evidence of health.
         Filtering::Unseen
     }
 }
@@ -767,6 +835,75 @@ mod tests {
         assert_eq!(read(&live, run_at(midnight())), Filtering::Reaching);
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// **The guard against a dead upstream.** The same failures, in a window
+    /// busy with somebody else's requests, are not evidence of a bypass — a
+    /// bypass takes traffic *away* from the proxy, so a proxy still being asked
+    /// for things is a proxy traffic is still reaching.
+    #[test]
+    fn failures_beside_other_traffic_are_not_a_bypass() {
+        let mut log: Vec<String> = (2..8)
+            .map(|hour| entry(&format!("{hour:02}:56:42"), "502"))
+            .collect();
+        assert_eq!(verdict(&log.join("\n"), midnight()), Filtering::Bypassed);
+
+        // A browser going about its business through the same proxy, at a rate
+        // this machine reaches inside a minute of ordinary use.
+        for _ in 0..2_000 {
+            log.push(REAL.to_owned());
+        }
+        assert_eq!(verdict(&log.join("\n"), midnight()), Filtering::Unseen);
+    }
+
+    /// The trickle that survives a real bypass must not veto it.
+    ///
+    /// Measured on the reference machine: 87 entries — `chronyd`, a little
+    /// `chrome`, `slack` — across the busiest two hours of the 25.08 bypass,
+    /// which is 43 an hour against an ordinary rate of 1,036. The threshold sits
+    /// between them, and this is the side of it that has to keep working.
+    #[test]
+    fn the_trickle_that_survives_a_bypass_does_not_veto_it() {
+        let mut log: Vec<String> = Vec::new();
+        for hour in 2..8 {
+            log.push(entry(&format!("{hour:02}:56:42"), "502"));
+            // 43 an hour, spread through the window rather than heaped at
+            // either end, because the count is what is being tested.
+            for _ in 0..43 {
+                log.push(REAL.to_owned());
+            }
+        }
+        assert_eq!(verdict(&log.join("\n"), midnight()), Filtering::Bypassed);
+    }
+
+    /// A line the parser cannot read counts as somebody's traffic, not as
+    /// nothing. The permissive direction here is the quiet one: an unreadable
+    /// log vetoes the verdict rather than sharpening it.
+    #[test]
+    fn unreadable_lines_count_towards_the_veto() {
+        let mut log: Vec<String> = (2..8)
+            .map(|hour| entry(&format!("{hour:02}:56:42"), "502"))
+            .collect();
+        for _ in 0..2_000 {
+            log.push("something this parser has never seen".to_owned());
+        }
+        assert_eq!(verdict(&log.join("\n"), midnight()), Filtering::Unseen);
+    }
+
+    /// Traffic from *before* the window does not veto what happens after it.
+    /// The window opens at the first trailing failure, and a busy morning
+    /// followed by a silent afternoon is the shape a bypass beginning at noon
+    /// actually has.
+    #[test]
+    fn traffic_before_the_window_does_not_veto_it() {
+        let mut log = vec![entry("01:56:42", "200")];
+        for _ in 0..5_000 {
+            log.push(REAL.to_owned());
+        }
+        for hour in 2..8 {
+            log.push(entry(&format!("{hour:02}:56:42"), "502"));
+        }
+        assert_eq!(verdict(&log.join("\n"), midnight()), Filtering::Bypassed);
     }
 
     /// A log that is not there is not a bypass — the state a machine that has
