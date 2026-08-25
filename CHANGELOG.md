@@ -11,6 +11,36 @@ This file is the one changelog.
 
 ---
 
+## Unreleased
+
+### The Status page notices a proxy that is running and no longer filtering
+
+**"Protection is on" was able to sit over a browser full of ads.** `adguard-cli status` reports what is configured and what is listening, and never whether traffic reaches it, so every reading this page had was consistent with nothing being filtered at all.
+
+Measured on the reference machine on 25 August 2026: AdGuard's root helper died at 03:01 with the daemon still serving, and for the next seventeen hours `status` reported a running proxy with system-wide filtering enabled while nothing was filtered. Reading back through the rotated logs, five of the previous twelve days had gone the same way. The cure each time was the **Restart** button that was sitting there all along, with nothing on screen to suggest pressing it.
+
+This is not this application's bug to fix. It is [`AdguardTeam/AdGuardCLI#136`](https://github.com/AdguardTeam/AdGuardCLI/issues/136), closed *Resolution: Done* on 1 August 2026 with a fix bound for the nightly channel — and v1.4.13, published three months earlier, is still the newest build on the release channel. Until that changes, an install tracking releases has it. What a wrapper can do is notice, and AdGuard's own engineer named the check when narrowing that issue down: whether the `adguard_root_helper` process is still running.
+
+So the hero panel gains a state between on and off. It reports a **contradiction**, never a single fact — `status` says running *and* the helper is positively seen to be dead — and it acts only on a corpse it can see, never on a helper merely missing. An absence has too many innocent readings, and a false alarm would teach you to disregard the one indicator that will eventually be telling the truth.
+
+**It says which failure happened, because a dead helper does two different things.** In `auto` mode the redirect stops and nothing is filtered, silently. In `manual` — the CLI's default — only the HTTP proxy breaks, while the SOCKS5 proxy beside it serves normally, so a SOCKS5 user is told what actually stopped rather than that nothing is filtered.
+
+**The panel mentions your browser cache, and that is not padding.** Pages loaded during a bypass were fetched unfiltered and cached that way, so a restart fixes the next request and leaves the ads already on disk — measured, where a restart alone left one site serving ads from Chrome's cache until it was cleared. Told only to restart, you would reasonably conclude the restart had not worked.
+
+### The tray says it too
+
+`--background` is what the autostart entry runs at login, and it presents no window, so the tray icon is the only thing you see. It now shows a warning glyph rather than the high-security shield, and reads *AdGuard — not filtering* rather than *running*.
+
+Its menu gains **Restart proxy** in that state and only in that state — the one thing measured to clear a bypass, offered where there is no window to reach the Status page's button on. It stays hidden otherwise: a restart is a second of no protection, not something to leave lying in the menu of an install that is working.
+
+### A setting that is on and doing nothing says so
+
+While bypassed, *System-wide filtering* went on reading a green **Enabled** beside a panel saying protection reached no traffic. Both were true — the setting is on, and it is doing nothing — but on one screen they read as a disagreement, and the green is the half you believe.
+
+It now reads **Enabled, not in effect**. The word changes and not only the colour, which is the rule those rows are built on: colour carries the same fact as the word and never instead of it, so the row survives being read by someone who cannot tell the two greens apart.
+
+---
+
 ## 1.5.0 — 15 August 2026
 
 ### An Extensions page, for the userscripts AdGuard runs

@@ -104,6 +104,22 @@ The count gates the toast and does not appear in it. One key can legitimately mo
 
 Because semantic failures exit 0 (contract §3), every mutation follows **act → re-read → reconcile**. Set a toggle, then re-read `proxy.yaml` and render from that. Never optimistically flip a switch and assume it stuck; the UI state must always be a projection of observed reality.
 
+### `status` reports intent, and the Status page must not call it protection
+
+The rule above is about our own writes. This one is about AdGuard's reading, and it is the harder half: **`adguard-cli status` says what is configured and what is listening, and never whether traffic reaches it.** Both facts can be true while nothing is being filtered, and the page whose whole question is *am I protected?* would answer yes.
+
+That is not hypothetical. Contract §8 measures a root helper that dies mid-session with the daemon still serving: in `auto` mode the redirect stops and pages load unfiltered, silently, while `status` reports a running proxy with system-wide filtering enabled. Five of twelve measured days on the reference machine went that way.
+
+So the page carries a state for it, `Runtime::Bypassed`, and three rules hold it up:
+
+- **It fires on a contradiction, never on one fact.** `status` says running *and* the helper is positively seen to be dead. Either alone is ordinary — a healthy install has a running proxy, and an unrecognised process tree has no helper we can name. This is the same pairing §11's wedged-proxy recovery uses, inverted.
+- **Only positive evidence counts.** A corpse in `/proc` is evidence; an absence is not, and `HelperProcess::Unseen` is deliberately not actionable. A false alarm here teaches the user to disregard the one indicator that will eventually be telling the truth, which is worse than missing a detection.
+- **It says which failure happened.** A dead helper stops the redirect in `auto` and breaks only the HTTP proxy in `manual`, where SOCKS5 keeps serving (contract §8). One wording for both would tell a SOCKS5 user nothing was filtered while their traffic was filtered normally.
+
+The same fact reaches the tray, which is not a nicety: `--background` is what the autostart entry runs, and there the tray is the only surface there is. See §4.
+
+**It is a wrapper's job to notice, not to fix.** The bug is AdGuard's, it is fixed upstream, and the fix has not reached the release channel this application's users are on. When it does, this state simply stops occurring — the check costs a `/proc` walk and no privilege, so there is nothing to unwind.
+
 ---
 
 ## 4. Threading, and why the tray is not its own process
@@ -150,6 +166,14 @@ The Status page is told the window is hidden before the first poll rather than a
 The group also carries the one caveat this flag has, and carries it as a fact about *this* session rather than as a general warning: with no StatusNotifierItem host, a background start has nowhere to appear and exits 1. The window knows whether the tray registered — it is the same process — so the page is told, and the group description says so beside the switch instead of leaving the user to find it in the journal. It goes in the *description* rather than the row's subtitle for the reason the listen-address group's credential requirement does: the row already names a path, and a path plus that caveat is four lines in a row that shows three.
 
 **Neither the switch nor its documentation says whether AdGuard's protection starts at login**, and the omission is deliberate. On the reference machine an enabled `adguard-cli.service` user unit brings the proxy up, but this application does not install, read or depend on that — so "your protection starts either way" is a reassurance it cannot check, and it would be false on a machine without one. What is checkable is the direction the claim actually needs: the entry runs `adguard-ui --background`, which never calls `start`. So every string says what this switch does *not* do, and leaves the proxy's own arrangements to AdGuard.
+
+### The tray carries the bypass, because in `--background` it is the whole UI
+
+§3's `Runtime::Bypassed` would be worth little if it stopped at the window. The autostart entry runs `--background`, which registers the tray and presents no window, so on the login path the tray icon is the only thing a user ever sees — and a proxy that has stopped filtering can sit there for a whole session. Deciding the tray's icon and title from `status.running` alone put the healthy shield over exactly that state.
+
+So the status observer carries the bypass beside the `ProxyStatus`, and `State` holds it as its own field rather than as a third value of `running`: the proxy really is running, and everything that follows from that — what stopping means, what the menu offers — is unchanged. What changes is only what the tray may claim. The icon becomes a warning glyph rather than either shield, and the title says *not filtering* rather than *running*, because a user who reads only the tooltip must not come away reassured.
+
+The menu gains **Restart proxy** in that state and only in that state. A restart is the one thing measured to clear a bypass, and with no window there is nothing to reach the Status page's button on — reporting a stoppage with no way to act on it would be a notification rather than a control. It stays hidden otherwise: a restart is a second of no protection, not something to leave lying in the menu of an install that is working.
 
 ### And it is reported on Status
 
