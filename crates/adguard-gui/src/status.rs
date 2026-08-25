@@ -158,7 +158,15 @@ enum Runtime {
     /// **silent and deceptive**: the panel would otherwise say "Protection is
     /// on" over a browser full of ads, which is the one thing this page exists
     /// not to do.
-    Bypassed,
+    ///
+    /// `redirected` carries [`Config::redirects_traffic`], because a dead
+    /// helper does two different things and the panel must not describe the
+    /// wrong one. In `auto` mode the redirect stops and nothing is filtered at
+    /// all. In `manual` — the CLI's default — the HTTP proxy answers 502 while
+    /// the SOCKS5 proxy beside it serves normally, so a user reaching AdGuard
+    /// over SOCKS5 is still filtered and must not be told otherwise, nor sent
+    /// to clear a cache that was never filled unfiltered.
+    Bypassed { redirected: bool },
     Down,
     Unreadable { message: String },
 }
@@ -240,7 +248,7 @@ pub struct StatusPage {
     /// The tray renders the same runtime state this page does, and this is how
     /// it gets it — rather than polling `status` itself, which is what a second
     /// process had to do.
-    observer: RefCell<Option<Box<dyn Fn(&ProxyStatus)>>>,
+    observer: RefCell<Option<Box<dyn Fn(&ProxyStatus, bool)>>>,
 
     /// Notified when a figure or a row here is clicked to go somewhere else.
     ///
@@ -686,10 +694,10 @@ impl StatusPage {
                     Ok(status) if status.running => read_helper(&cli),
                     _ => HelperProcess::Unseen,
                 };
-                (status, licence, helper)
+                (status, licence, helper, read_redirected(helper))
             },
-            move |(status, licence, helper)| {
-                this.settle_status(status, helper);
+            move |(status, licence, helper, redirected)| {
+                this.settle_status(status, helper, redirected);
                 match licence {
                     Ok(licence) => this.licence_read(licence),
                     Err((unlicensed, message)) => this.licence_refused(unlicensed, message),
@@ -783,9 +791,9 @@ impl StatusPage {
                     Ok(status) if status.running => read_helper(&cli),
                     _ => HelperProcess::Unseen,
                 };
-                (status, helper)
+                (status, helper, read_redirected(helper))
             },
-            move |(status, helper)| this.settle_status(status, helper),
+            move |(status, helper, redirected)| this.settle_status(status, helper, redirected),
         );
     }
 
@@ -794,9 +802,10 @@ impl StatusPage {
         self: &Rc<Self>,
         result: Result<ProxyStatus, (bool, String)>,
         helper: HelperProcess,
+        redirected: bool,
     ) {
         match result {
-            Ok(status) => self.apply(&status, helper),
+            Ok(status) => self.apply(&status, helper, redirected),
             Err((unlicensed, message)) => {
                 // Kept in the panel rather than a toast: a failing `status`
                 // repeats every two seconds and would bury the UI in toasts.
@@ -823,7 +832,18 @@ impl StatusPage {
     }
 
     /// Report every `status` read to `observer` — the tray's source of state.
-    pub fn connect_status(&self, observer: impl Fn(&ProxyStatus) + 'static) {
+    ///
+    /// The second argument is whether the proxy is running and **bypassed**: a
+    /// root helper positively seen to be dead, so nothing reaches the filters.
+    /// It is passed separately because [`ProxyStatus`] cannot carry it —
+    /// `status` reports what is configured and listening and nothing else, and
+    /// that gap is the whole reason this page has a `Bypassed` state.
+    ///
+    /// Handing the tray only `ProxyStatus` was this check's blind spot: in
+    /// `--background`, which the autostart entry runs at login, the tray is the
+    /// only surface there is, and it would have gone on showing a healthy icon
+    /// for the whole session.
+    pub fn connect_status(&self, observer: impl Fn(&ProxyStatus, bool) + 'static) {
         self.observer.replace(Some(Box::new(observer)));
     }
 
@@ -864,6 +884,13 @@ impl StatusPage {
 
     pub fn stop_proxy(self: &Rc<Self>) {
         self.act(Action::Stop);
+    }
+
+    /// Restart the proxy, as the tray's "Restart proxy" item does — the item
+    /// that only appears while the helper is dead, because a restart is the
+    /// only thing measured to bring it back.
+    pub fn restart_proxy(self: &Rc<Self>) {
+        self.act(Action::Restart);
     }
 
     /// Clear a wedged leftover proxy process left behind by a previous session.
@@ -997,14 +1024,14 @@ impl StatusPage {
         }
     }
 
-    fn apply(&self, status: &ProxyStatus, helper: HelperProcess) {
+    fn apply(&self, status: &ProxyStatus, helper: HelperProcess, redirected: bool) {
         // The contradiction, and only the contradiction: a proxy `status` calls
         // running whose root helper we can positively see to be dead. Neither
         // half means anything alone — a healthy install has a running proxy,
         // and an unknown helper is the answer on any machine whose process tree
         // this application does not recognise.
         self.set_runtime(match (status.running, helper) {
-            (true, HelperProcess::Defunct) => Runtime::Bypassed,
+            (true, HelperProcess::Defunct) => Runtime::Bypassed { redirected },
             (true, _) => Runtime::Up,
             (false, _) => Runtime::Down,
         });
@@ -1031,7 +1058,7 @@ impl StatusPage {
         self.system_dns.set(status.system_dns_filtering);
 
         if let Some(observer) = self.observer.borrow().as_ref() {
-            observer(status);
+            observer(status, matches!(&*self.runtime.borrow(), Runtime::Bypassed { .. }));
         }
     }
 
@@ -1050,7 +1077,7 @@ impl StatusPage {
             // proxy is up and stopping it is what that means. The *cure* for a
             // bypass is the Restart beside it, which is why that button is
             // shown in this state too.
-            Runtime::Up | Runtime::Bypassed => Some(Action::Stop),
+            Runtime::Up | Runtime::Bypassed { .. } => Some(Action::Stop),
             Runtime::Down => Some(Action::Start),
             // The button is insensitive in both, so this is belt-and-braces
             // rather than a reachable path — and it is the right answer if a
@@ -1115,16 +1142,31 @@ impl StatusPage {
             // measured on 2026-08-25, where a restart alone left 9gag serving
             // ads from Chrome's cache until it was cleared. A user told only to
             // restart would reasonably conclude the restart had not worked.
-            Runtime::Bypassed => (
+            Runtime::Bypassed { redirected } => (
                 "dialog-warning-symbolic",
                 Some(style::HERO_OFF),
                 Some("NOT FILTERING"),
                 Some(style::BADGE_OFF),
-                "Protection is not reaching your traffic",
-                "The proxy is running, but AdGuard's root helper has stopped and nothing \
-                 is being filtered. Restart to recover — pages already loaded may keep \
-                 their ads until you clear the browser's cache."
-                    .to_owned(),
+                if *redirected {
+                    "Protection is not reaching your traffic"
+                } else {
+                    "The HTTP proxy has stopped working"
+                },
+                if *redirected {
+                    // `auto`: the redirect is gone, so everything reaches the
+                    // internet untouched and the cache fills with it.
+                    "The proxy is running, but AdGuard's root helper has stopped and \
+                     nothing is being filtered. Restart to recover — pages already \
+                     loaded may keep their ads until you clear the browser's cache."
+                } else {
+                    // `manual`: loud rather than silent, and only half the
+                    // endpoints. Measured (contract §8) — so no cache advice,
+                    // because nothing loaded unfiltered to be cached.
+                    "The proxy is running, but AdGuard's root helper has stopped and \
+                     requests through the HTTP proxy now fail. The SOCKS5 proxy is \
+                     unaffected. Restart to recover."
+                }
+                .to_owned(),
                 Some(STOP_BUTTON),
             ),
             // The CLI's own sentence, verbatim: it names the reason — a lapsed
@@ -1153,7 +1195,7 @@ impl StatusPage {
                 Runtime::Down => Some("warning"),
                 // Red rather than the amber a deliberate stop gets. This one is
                 // not a state the user chose.
-                Runtime::Bypassed => Some("error"),
+                Runtime::Bypassed { .. } => Some("error"),
                 Runtime::Unreadable { .. } => Some("error"),
             },
         );
@@ -1202,7 +1244,7 @@ impl StatusPage {
         // Shown in `Bypassed` as well as `Up`, and for a better reason than
         // symmetry: a restart is the *only* thing measured to clear a bypass,
         // so the state that reports one has to offer it.
-        let restartable = matches!(&*runtime, Runtime::Up | Runtime::Bypassed);
+        let restartable = matches!(&*runtime, Runtime::Up | Runtime::Bypassed { .. });
         self.restart.set_visible(restartable);
         self.restart.set_sensitive(restartable);
     }
@@ -1495,6 +1537,23 @@ fn read_helper(cli: &Cli) -> HelperProcess {
         [daemon] => helper::process(daemon.pid()),
         _ => HelperProcess::Unseen,
     }
+}
+
+/// Does this install redirect traffic into the proxy, rather than wait on its
+/// ports?
+///
+/// Read **only** when the helper is dead, which is the only state whose wording
+/// turns on it. `proxy.yaml` is nine kilobytes of YAML and this page's poll is
+/// on a two-second timer; parsing it every tick to answer a question nothing
+/// asks the rest of the time would be a real cost for no reading.
+///
+/// That it is read at the moment it is needed, rather than cached from
+/// start-up, is what keeps it honest: `proxy_mode` is a key the CLI invites the
+/// user to change by hand, and a panel describing the mode they used to be in
+/// would be worse than one that said nothing.
+fn read_redirected(helper: HelperProcess) -> bool {
+    helper == HelperProcess::Defunct
+        && Config::load().is_ok_and(|config| config.redirects_traffic())
 }
 
 /// Read the licence, keeping the one distinction that matters.

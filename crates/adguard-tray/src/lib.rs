@@ -76,6 +76,23 @@ pub enum Error {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct State {
     pub running: bool,
+    /// Running, and AdGuard's root helper has died under it, so the proxy is
+    /// serving nothing (`adguard_core::HelperProcess`).
+    ///
+    /// Its own field rather than a third value of [`Self::running`], because
+    /// the proxy really *is* running and every action that follows from that —
+    /// what the menu offers, what stopping means — is unchanged. What changes
+    /// is only what the tray may claim about it.
+    ///
+    /// **The tray is the whole of the UI in `--background`**, which is what the
+    /// autostart entry runs at login. Without this the one visible surface
+    /// would show the high-security icon and the word "running" for as long as
+    /// the session lasted, which is the failure this state exists to expose.
+    ///
+    /// Never set from a helper merely *unseen*: only a helper positively seen
+    /// to be dead reaches here, so an install whose process tree this
+    /// application does not recognise raises nothing.
+    pub bypassed: bool,
     /// One entry per [`Toggle::ALL`], in that order.
     pub toggles: Vec<Option<bool>>,
 }
@@ -83,6 +100,15 @@ pub struct State {
 impl State {
     fn toggle(&self, index: usize) -> Option<bool> {
         self.toggles.get(index).copied().flatten()
+    }
+
+    /// The three words the tray has room for.
+    fn description(&self) -> &'static str {
+        match (self.running, self.bypassed) {
+            (true, true) => "not filtering",
+            (true, false) => "running",
+            (false, _) => "stopped",
+        }
     }
 }
 
@@ -93,6 +119,11 @@ pub enum Command {
     ShowWindow,
     StartProxy,
     StopProxy,
+    /// The only thing measured to clear a bypass. Offered from here because in
+    /// `--background` there is no window to reach the Status page's button on,
+    /// and telling a user their protection has stopped without offering the fix
+    /// would be a notification rather than a control.
+    RestartProxy,
     SetToggle { toggle: Toggle, on: bool },
     /// Quit the application outright — the only way out once closing the window
     /// merely hides it.
@@ -165,22 +196,25 @@ impl KsniTray for Indicator {
         APP_ID.to_owned()
     }
 
+    /// The tooltip, and on most shells the accessible name — for a tray icon
+    /// with no room for a sentence, the whole of what it can say.
+    ///
+    /// "not filtering" rather than "running": a user who reads only this must
+    /// not come away reassured, and the word `running` is the reassurance.
     fn title(&self) -> String {
-        format!(
-            "AdGuard — {}",
-            if self.state.running {
-                "running"
-            } else {
-                "stopped"
-            }
-        )
+        format!("AdGuard — {}", self.state.description())
     }
 
+    /// A warning glyph rather than either shield.
+    ///
+    /// `security-high-symbolic` would be a lie and `security-low-symbolic` is
+    /// what a deliberate stop looks like — this is neither, and the icon is
+    /// most of what anyone actually reads off a tray.
     fn icon_name(&self) -> String {
-        if self.state.running {
-            "security-high-symbolic".to_owned()
-        } else {
-            "security-low-symbolic".to_owned()
+        match (self.state.running, self.state.bypassed) {
+            (true, true) => "dialog-warning-symbolic".to_owned(),
+            (true, false) => "security-high-symbolic".to_owned(),
+            (false, _) => "security-low-symbolic".to_owned(),
         }
     }
 
@@ -213,6 +247,21 @@ impl KsniTray for Indicator {
             .into(),
             MenuItem::Separator,
         ];
+
+        // Only in the state it cures. A restart is a second of no protection
+        // at all, which is not something to leave lying in the menu of an
+        // install that is working.
+        if self.state.running && self.state.bypassed {
+            items.push(
+                StandardItem {
+                    label: "Restart proxy".into(),
+                    activate: Box::new(|this: &mut Self| this.send(Command::RestartProxy)),
+                    ..Default::default()
+                }
+                .into(),
+            );
+            items.push(MenuItem::Separator);
+        }
 
         for (index, toggle) in Toggle::ALL.into_iter().enumerate() {
             let known = self.state.toggle(index);
@@ -330,7 +379,31 @@ mod tests {
     use super::*;
 
     fn state(running: bool, toggles: Vec<Option<bool>>) -> State {
-        State { running, toggles }
+        State { running, bypassed: false, toggles }
+    }
+
+    /// The tray's whole vocabulary, and the one word that must not appear in
+    /// the bypassed state.
+    #[test]
+    fn a_bypassed_proxy_never_describes_itself_as_running() {
+        let bypassed = State { running: true, bypassed: true, toggles: vec![] };
+        assert_eq!(bypassed.description(), "not filtering");
+
+        assert_eq!(state(true, vec![]).description(), "running");
+        assert_eq!(state(false, vec![]).description(), "stopped");
+        // A stopped proxy has no helper to have died, and must read as the
+        // ordinary stop it is however the flag arrives.
+        let odd = State { running: false, bypassed: true, toggles: vec![] };
+        assert_eq!(odd.description(), "stopped");
+    }
+
+    /// The dedupe in `set_state` must notice this too, or the tray would keep
+    /// the healthy icon for the rest of the session.
+    #[test]
+    fn a_bypass_is_a_change_of_state() {
+        let healthy = state(true, vec![Some(true)]);
+        let bypassed = State { bypassed: true, ..healthy.clone() };
+        assert_ne!(healthy, bypassed);
     }
 
     /// `toggles` is positional against `Toggle::ALL`, so a short or empty vector

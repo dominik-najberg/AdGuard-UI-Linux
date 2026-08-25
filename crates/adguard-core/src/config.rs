@@ -326,6 +326,32 @@ impl Config {
         self.str_at(key::PROXY_MODE)
     }
 
+    /// Does AdGuard pull traffic into itself, rather than wait on its ports?
+    ///
+    /// The two modes fail very differently when the root helper dies, which is
+    /// the only thing this is asked for. In `auto` the redirect stops and
+    /// **nothing** is filtered, silently — the browser carries on loading pages
+    /// and they simply arrive with their ads. In `manual`, which is the CLI's
+    /// default, the ports stay where the user pointed their applications and it
+    /// is the HTTP proxy alone that breaks, answering every request 502 while
+    /// the SOCKS5 proxy beside it serves normally (`crate::helper`, contract
+    /// §8). Loud, and not the same claim to make to a user at all.
+    ///
+    /// Named for what the mode *does* rather than for its spelling, because
+    /// that is the property every caller here actually depends on.
+    ///
+    /// Tested **for** `auto`, so an unreadable, misspelled or future mode
+    /// answers `false`. That is the quieter of the two wrong answers: it costs
+    /// the advice that pages already loaded may be cached unfiltered, where the
+    /// opposite would tell a SOCKS5 user that nothing is being filtered while
+    /// their traffic is filtered normally. Note this is the reverse fallback to
+    /// [`Self::dns_filtering_is_inert`], which warns on the unknown mode — there
+    /// the unheeded warning is the cheap mistake, here it is the false alarm.
+    pub fn redirects_traffic(&self) -> bool {
+        self.proxy_mode()
+            .is_some_and(|mode| mode.trim().eq_ignore_ascii_case("auto"))
+    }
+
     /// The name AdGuard gives the CA it signs filtered connections with, which
     /// is also the name of the file it writes (see
     /// [`crate::paths::certificate`]).
@@ -1189,6 +1215,35 @@ stealthmode:
 
     fn sample() -> Config {
         Config::parse(SAMPLE, Path::new("proxy.yaml")).expect("sample should parse")
+    }
+
+    /// Only `auto` redirects, and the sample is `manual`.
+    #[test]
+    fn the_sample_waits_on_its_ports_rather_than_redirecting() {
+        assert_eq!(sample().proxy_mode(), Some("manual"));
+        assert!(!sample().redirects_traffic());
+    }
+
+    /// Spelling and surrounding space are the CLI's, not ours — the same
+    /// case-insensitive comparison every other config value here gets.
+    #[test]
+    fn auto_is_recognised_however_it_is_spelled() {
+        for mode in ["auto", "'auto'", "AUTO", "Auto", "  auto  "] {
+            let text = format!("proxy_mode: {mode}\n");
+            let config = Config::parse(&text, Path::new("t.yaml")).expect("should parse");
+            assert!(config.redirects_traffic(), "{mode:?} should redirect");
+        }
+    }
+
+    /// The fallback that keeps a SOCKS5 user from being told nothing is
+    /// filtered. A mode we cannot read is not `auto`, and the narrower claim is
+    /// the one made about it.
+    #[test]
+    fn an_unknown_mode_is_not_treated_as_redirecting() {
+        for text in ["proxy_mode: manual\n", "proxy_mode: transparent\n", "proxy_mode:\n", "other: 1\n"] {
+            let config = Config::parse(text, Path::new("t.yaml")).expect("should parse");
+            assert!(!config.redirects_traffic(), "{text:?} should not redirect");
+        }
     }
 
     #[test]
