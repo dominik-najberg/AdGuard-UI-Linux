@@ -1054,7 +1054,19 @@ impl StatusPage {
         );
 
         self.manual_dns.set(status.manual_dns_proxy);
-        self.system_filtering.set(status.system_wide_filtering);
+        // Measured: with the redirect gone this setting reads on and does
+        // nothing, so a green "Enabled" beside a panel reporting a bypass is the
+        // one place two things on this page could be read as disagreeing.
+        //
+        // Narrowed to `auto` and to this row on purpose. It is the only setting
+        // here a dead helper has been measured to stop — the two DNS rows are
+        // left alone because nothing has measured what it does to them, and
+        // guessing at that is the mistake `Bypassed` was given a mode to avoid.
+        if matches!(&*self.runtime.borrow(), Runtime::Bypassed { redirected: true }) {
+            self.system_filtering.set_stopped(status.system_wide_filtering);
+        } else {
+            self.system_filtering.set(status.system_wide_filtering);
+        }
         self.system_dns.set(status.system_dns_filtering);
 
         if let Some(observer) = self.observer.borrow().as_ref() {
@@ -1944,20 +1956,45 @@ impl StateRow {
     /// and "Disabled" are both spelled out, so the row reads the same to someone
     /// who cannot tell the two greens apart.
     fn set(&self, on: bool) {
-        self.value.set_label(on_off(on));
+        self.render(on, true);
+    }
+
+    /// The same row, for a setting that reads on and is not doing anything.
+    ///
+    /// Only for something **measured** to have stopped it — see the call site.
+    /// The word "Enabled" stays, because it is what the config says and
+    /// reporting the config is this row's whole job; what is added is that it is
+    /// not currently in effect.
+    ///
+    /// Added in words rather than by going grey, and that is the rule above
+    /// rather than a preference: dimming alone would leave the fact carried by
+    /// colour and nothing else, so a reader who cannot tell the greens apart
+    /// would see "Enabled" and learn none of it. Colour still moves, and still
+    /// says the same thing the word does.
+    fn set_stopped(&self, on: bool) {
+        self.render(on, false);
+    }
+
+    fn render(&self, on: bool, in_effect: bool) {
+        self.value.set_label(state_word(on, in_effect));
         swap_class(
             &self.value,
             &["success", "dim-label"],
-            Some(if on { "success" } else { "dim-label" }),
+            Some(if on && in_effect { "success" } else { "dim-label" }),
         );
     }
 }
 
-fn on_off(value: bool) -> &'static str {
-    if value {
-        "Enabled"
-    } else {
-        "Disabled"
+/// What a state row says about a setting.
+///
+/// `in_effect` is only ever false for a setting that is on: a disabled setting
+/// is not doing anything either way, and "Disabled, not in effect" would be
+/// saying the same thing twice.
+fn state_word(on: bool, in_effect: bool) -> &'static str {
+    match (on, in_effect) {
+        (true, true) => "Enabled",
+        (true, false) => "Enabled, not in effect",
+        (false, _) => "Disabled",
     }
 }
 
@@ -2005,4 +2042,34 @@ fn row(title: &str, subtitle: &str) -> adw::ActionRow {
     row.set_title(title);
     row.set_subtitle(subtitle);
     row
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The rule `StateRow` is written to: the word carries the fact, so the row
+    /// still reads correctly with every style class stripped off it.
+    ///
+    /// A green "Enabled" beside a panel reporting a bypass is the contradiction
+    /// this exists to remove, and removing it by going grey alone would have put
+    /// the whole of the correction into a colour.
+    #[test]
+    fn a_setting_that_is_on_and_doing_nothing_says_both() {
+        assert_eq!(state_word(true, true), "Enabled");
+        assert_eq!(state_word(true, false), "Enabled, not in effect");
+
+        // Still "Enabled" — the row reports the config, and the config is on.
+        assert!(state_word(true, false).starts_with("Enabled"));
+        // And the addition is words, not punctuation or a colour.
+        assert_ne!(state_word(true, false), state_word(true, true));
+    }
+
+    /// "Disabled, not in effect" would be saying the same thing twice, so a
+    /// setting that is off reads the same either way.
+    #[test]
+    fn a_setting_that_is_off_reads_the_same_either_way() {
+        assert_eq!(state_word(false, true), "Disabled");
+        assert_eq!(state_word(false, false), "Disabled");
+    }
 }
