@@ -42,6 +42,37 @@ pub(crate) struct Stat {
     pub started: u64,
 }
 
+/// The moment the machine booted, in seconds since the epoch.
+///
+/// `btime` in `/proc/stat` — a whole number of seconds, and the only thing that
+/// turns [`Stat::started`] into a wall-clock time. The pair is what
+/// [`crate::orphan::Daemon::started_at`] needs so a log written in wall clock
+/// can be scoped to one proxy run.
+///
+/// `None` for a `/proc/stat` that cannot be read or does not carry the field,
+/// which means the same as everything else here: nothing is known.
+pub(crate) fn boot_time() -> Option<i64> {
+    fs::read_to_string("/proc/stat")
+        .ok()?
+        .lines()
+        .find_map(|line| line.strip_prefix("btime "))?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// Clock ticks per second — the unit [`Stat::started`] counts in.
+///
+/// 100 on every Linux this application targets, but read rather than assumed:
+/// it is a property of the kernel the binary is running on, not of the binary.
+/// A non-positive answer means `sysconf` could not tell us, and the caller
+/// treats that as unknown rather than dividing by it.
+pub(crate) fn ticks_per_second() -> i64 {
+    // SAFETY: `sysconf` reads a constant of the C library, takes one argument
+    // and touches nothing of ours. It is `unsafe` only because it is extern.
+    unsafe { libc::sysconf(libc::_SC_CLK_TCK) }
+}
+
 /// Read `/proc/<pid>/stat`.
 ///
 /// `None` for a pid that has gone, a `/proc` that cannot be read, and a line
@@ -156,6 +187,35 @@ mod tests {
     #[test]
     fn no_stat_for_a_pid_that_cannot_exist() {
         assert_eq!(stat(-1), None);
+    }
+
+    /// Boot time and the tick rate, which together are the only way a start
+    /// time in ticks becomes a moment a log can be compared against.
+    ///
+    /// Stated against this machine rather than against a fixture: both come
+    /// from the kernel, and a wrong answer for either would silently mis-scope
+    /// every access-log reading by hours.
+    #[test]
+    fn the_clock_this_machine_actually_keeps() {
+        let hz = ticks_per_second();
+        assert!(hz > 0, "sysconf reported {hz} ticks per second");
+
+        let boot = boot_time().expect("/proc/stat carries btime");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("the clock is past 1970")
+            .as_secs() as i64;
+        assert!(boot > 0 && boot <= now, "booted at {boot}, now {now}");
+
+        // This process started after the machine did, and not after now. A
+        // wide bound on purpose — it is the field-22 arithmetic being checked,
+        // not the scheduler.
+        let me = stat(std::process::id() as i32).expect("this process has a stat");
+        let started = boot + me.started as i64 / hz;
+        assert!(
+            (boot..=now + 1).contains(&started),
+            "this process started at {started}, outside boot {boot}..={now}",
+        );
     }
 
     #[test]

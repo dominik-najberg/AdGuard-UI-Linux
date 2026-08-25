@@ -66,7 +66,7 @@
 
 use std::fs;
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::proc;
 
@@ -108,6 +108,31 @@ pub struct Daemon {
 impl Daemon {
     pub fn pid(&self) -> i32 {
         self.pid
+    }
+
+    /// When this process started, as a moment rather than a tick count.
+    ///
+    /// [`Self::started`] is what the kernel keeps — ticks since boot, which is
+    /// the right unit for telling one process from a recycled pid and the wrong
+    /// one for everything else. [`crate::access`] needs the other: a log written
+    /// in wall clock has to be scoped to one proxy run, and a run boundary in
+    /// ticks-since-boot cannot be compared with a timestamp in it.
+    ///
+    /// Accurate to a second or two — `btime` is whole seconds and the tick
+    /// division truncates — which is four orders of magnitude finer than the
+    /// two-hour window the answer is used in.
+    ///
+    /// `None` when `/proc/stat` carries no `btime`, when `sysconf` will not say
+    /// how fast the clock ticks, or when the arithmetic would leave the epoch
+    /// behind. Every one of those means the same thing to the caller: the run
+    /// cannot be dated, so nothing is read against it.
+    pub fn started_at(&self) -> Option<SystemTime> {
+        let hz = proc::ticks_per_second();
+        if hz <= 0 {
+            return None;
+        }
+        let seconds = proc::boot_time()?.checked_add(self.started as i64 / hz)?;
+        Some(UNIX_EPOCH + Duration::from_secs(u64::try_from(seconds).ok()?))
     }
 
     /// Is this same process still running?
@@ -321,6 +346,29 @@ mod tests {
             started: real.wrapping_add(1)
         }
         .alive());
+    }
+
+    /// The start time as a moment, against the one process this suite can speak
+    /// for with certainty — itself.
+    ///
+    /// It must land between the machine's boot and now. The bound is wide on
+    /// purpose: what is being checked is that boot time, the tick rate and
+    /// field 22 are combined the right way round, and getting that wrong misses
+    /// by hours or by decades rather than by seconds.
+    #[test]
+    fn a_daemon_can_date_its_own_run() {
+        let me = std::process::id() as i32;
+        let stat = proc::stat(me).expect("stat");
+        let daemon = Daemon { pid: me, started: stat.started };
+
+        let started = daemon.started_at().expect("this machine can date a process");
+        let now = SystemTime::now();
+        assert!(started <= now, "{started:?} is in the future");
+        let uptime = now.duration_since(started).expect("started before now");
+        assert!(
+            uptime < Duration::from_secs(365 * 24 * 60 * 60),
+            "this test process has apparently been running for {uptime:?}",
+        );
     }
 
     /// The dangerous half, against a real process — found through `/proc` by
