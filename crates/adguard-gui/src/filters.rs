@@ -128,6 +128,40 @@ impl Section {
     }
 }
 
+/// The heading and body of the agreement dialog, for one set and one list.
+///
+/// A free function because it is the whole user-visible substance of the
+/// dialog and everything around it needs a display: this is what a test can
+/// read, and what it reads is that AdGuard's paragraph arrives whole.
+///
+/// **The HTTP page shows AdGuard's text and nothing else.** There the terms
+/// answer the question the switch asked — you are enabling an annoyance
+/// filter, and this is what AdGuard says about annoyance filters.
+///
+/// **The DNS page cannot**, because the group AdGuard gates there is *Security*
+/// and the terms are about cookie notices and pop-ups (contract §7). Shown
+/// bare over `Stalkerware Indicators List`, that paragraph is a non-sequitur,
+/// and a user who cannot see why it is there cannot meaningfully agree to it.
+/// One sentence of ours goes first, in our voice, and hands over to AdGuard's
+/// unchanged — the boundary is what makes prefacing a disclaimer different from
+/// editing one. It names no group: a group's name is localised out of the
+/// catalogue, so spelling it here would put an English word in a dialog over a
+/// page that had spelled it in Polish.
+fn consent_text(set: FilterSet, name: &str) -> (&'static str, String) {
+    match set {
+        FilterSet::Http => ("Enable annoyance filters?", ANNOYANCE_TERMS.to_owned()),
+        FilterSet::Dns => (
+            "Enable this filter list?",
+            format!(
+                "{name} is not an annoyance filter, and AdGuard asks about one anyway: it \
+                 will not switch on anything in this list's group without an agreement to \
+                 the terms it wrote for cookie notices and pop-ups. That gate is AdGuard's, \
+                 not this application's. Its wording, unchanged:\n\n{ANNOYANCE_TERMS}"
+            ),
+        ),
+    }
+}
+
 /// The text a query is matched against.
 ///
 /// The description is in as well as the name because that is where a list says
@@ -963,12 +997,15 @@ impl FiltersPage {
 
     /// Send one switch flip to the CLI, then confirm it against the database.
     ///
-    /// A list from the Annoyances group takes the long way round: AdGuard will
-    /// not switch one on without an agreement, so the agreement is asked for
+    /// A list from a gated group takes the long way round: AdGuard will not
+    /// switch one on without an agreement, so the agreement is asked for
     /// here, before anything is run. Asking *afterwards* was the tempting
     /// shape and is wrong — `filters add` subscribes to the list and only then
     /// refuses to enable it, so a declined dialog would leave behind a
     /// subscription the user never got.
+    ///
+    /// Two groups are gated and not one: the HTTP catalogue's Annoyances and
+    /// the DNS catalogue's Security. See [`Filter::needs_consent`].
     fn toggle(self: &Rc<Self>, filter_id: i64, on: bool) {
         let (action, name, needs_consent) = {
             let rows = self.rows.borrow();
@@ -983,14 +1020,14 @@ impl FiltersPage {
             (
                 action,
                 filter.display_name().to_owned(),
-                filter.needs_annoyance_consent(self.set, action),
+                filter.needs_consent(self.set, action),
             )
         };
 
         if needs_consent {
             let this = self.clone();
             glib::spawn_future_local(async move {
-                if this.confirm_annoyances().await {
+                if this.confirm_consent(&name).await {
                     this.apply(filter_id, on, action, name, Consent::Granted);
                 } else {
                     this.abandon(filter_id);
@@ -1004,17 +1041,29 @@ impl FiltersPage {
 
     /// Show AdGuard's annoyance-filter agreement and answer it for the CLI.
     ///
-    /// The body is [`ANNOYANCE_TERMS`] verbatim, because the point of the
+    /// The terms are [`ANNOYANCE_TERMS`] verbatim, because the point of the
     /// dialog is that the user agrees to the same thing the CLI is about to ask
     /// about — and what it says they are agreeing to is that they, not AdGuard,
     /// answer for breaking a website's terms of use. Summarising that would be
     /// this application deciding how much of a disclaimer someone needs to see.
     ///
+    /// **On the DNS page they describe nothing the user is doing**, and the
+    /// dialog says so before showing them. The gated group there is *Security*
+    /// — malware, phishing and scam lists — and AdGuard reads out its
+    /// annoyance-filter disclaimer over every one of them. Presented bare, that
+    /// text is a non-sequitur in front of an unrelated question, and the honest
+    /// reading of a non-sequitur is that the application has gone wrong. So a
+    /// sentence of ours frames it, marked as ours, ahead of AdGuard's, marked
+    /// as AdGuard's. The group is left unnamed rather than called "Security":
+    /// a group's name is localised out of the catalogue, and a heading spelled
+    /// one way on the page and another in a dialog reads as two different
+    /// things.
+    ///
     /// Cancel is the default and the escape route: closing the dialog with
     /// Escape must not read as consent.
-    async fn confirm_annoyances(&self) -> bool {
-        let dialog =
-            adw::AlertDialog::new(Some("Enable annoyance filters?"), Some(ANNOYANCE_TERMS));
+    async fn confirm_consent(&self, name: &str) -> bool {
+        let (heading, body) = consent_text(self.set, name);
+        let dialog = adw::AlertDialog::new(Some(heading), Some(&body));
         // Not markup: AdGuard's text is prose, and prose carries `&`. The same
         // rule every row, toast and dialog on this page follows.
         dialog.set_body_use_markup(false);
@@ -1390,4 +1439,46 @@ fn error_view(message: &str) -> adw::StatusPage {
         .title("Filters unavailable")
         .description(message)
         .build()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// AdGuard's paragraph reaches the screen whole, on both pages.
+    ///
+    /// The DNS body prefaces it and the HTTP body does not, and neither may
+    /// touch it: it is a statement about who answers for breaking a website's
+    /// terms of use, and this application does not get to decide how much of it
+    /// someone needs to read (contract §7).
+    #[test]
+    fn the_agreement_is_adguards_own_words_on_both_pages() {
+        assert_eq!(consent_text(FilterSet::Http, "AdGuard Popups filter").1, ANNOYANCE_TERMS);
+        assert!(consent_text(FilterSet::Dns, "Phishing Army").1.ends_with(ANNOYANCE_TERMS));
+    }
+
+    /// The DNS preface is ours, is marked as ours, and comes first — the point
+    /// of it is that the paragraph below reads as a non-sequitur without it.
+    #[test]
+    fn the_dns_body_says_whose_words_are_whose_before_showing_them() {
+        let (heading, body) = consent_text(FilterSet::Dns, "Phishing Army");
+        let preface = body.strip_suffix(ANNOYANCE_TERMS).expect("terms come last");
+
+        assert!(preface.contains("Phishing Army"), "the preface must name the list");
+        assert!(
+            preface.contains("not an annoyance filter"),
+            "the preface must say the terms are about something else"
+        );
+        assert!(preface.contains("AdGuard"), "the preface must attribute the terms");
+        assert!(!heading.contains("annoyance"), "the heading must not claim this is one");
+    }
+
+    /// Nothing here is markup, because none of it is ours to escape: a list's
+    /// title is AdGuard's text or the user's, and AdGuard's prose carries `&`.
+    /// The dialog sets `body_use_markup(false)` — this is the reminder of why.
+    #[test]
+    fn an_ampersand_in_a_list_name_survives_intact() {
+        let body = consent_text(FilterSet::Dns, "HaGeZi's OPPO & Realme Tracker Blocklist").1;
+        assert!(body.contains("OPPO & Realme"));
+    }
 }

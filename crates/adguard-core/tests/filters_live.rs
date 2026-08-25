@@ -132,6 +132,50 @@ fn custom_filters_group_exists() {
     );
 }
 
+/// The gated group is a real group in **both** catalogues, and has lists in it.
+///
+/// `FilterSet::consent_group` is a number this application asserts about a
+/// database it does not own, and getting it wrong is silent in both directions:
+/// too narrow and a whole group cannot be switched on (issue #13, which is
+/// exactly this test's absence), too wide and a disclaimer about violating
+/// websites' terms of use goes in front of lists that raise none.
+///
+/// Read-only, so it says nothing about whether the CLI still asks — only that
+/// the group the answer is aimed at exists. The prompt itself is measured by
+/// `filters_mutate`, which mutates and is `#[ignore]`d.
+#[test]
+fn the_gated_group_exists_in_both_catalogues() {
+    for (set, label) in [(FilterSet::Http, "agflm_standard"), (FilterSet::Dns, "agflm_dns")] {
+        let Some(catalogue) = open(set.db_path()) else {
+            continue;
+        };
+        let Some(id) = set.consent_group() else {
+            eprintln!("{label}: no gated group claimed");
+            continue;
+        };
+        let locale = Locale::english();
+
+        let groups = catalogue.groups(&locale).expect("should read filter_group");
+        let group = groups
+            .iter()
+            .find(|g| g.id == id)
+            .unwrap_or_else(|| panic!("{label}: no group {id}; groups were {groups:?}"));
+
+        let members = catalogue
+            .filters(&locale)
+            .expect("should read filter")
+            .iter()
+            .filter(|f| f.group_id == id)
+            .count();
+        assert!(members > 0, "{label}: group {id} ({}) has no lists", group.name);
+
+        // Printed rather than asserted: the two names differ — "Annoyances"
+        // and "Security" — and it is the *number* the CLI gates on, so a name
+        // this test insisted upon would be an assertion about the wrong thing.
+        eprintln!("{label}: gated group {id} is {:?}, {members} lists", group.name);
+    }
+}
+
 /// The user-rules pseudo-filter is reachable on its own, and is the documented
 /// exception to the enabled-implies-installed invariant.
 #[test]
