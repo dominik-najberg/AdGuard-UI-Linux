@@ -920,7 +920,7 @@ Two consequences for the UI, and the first is not about this row:
 
   What `activate` does against an **already licensed** install is deliberately **not measured**: the only install available to try it on is the author's own, and pointing an activation command at a working licence to see what happens is not a measurement worth its risk. The UI therefore offers activation only while `license` says the licence is not active, and never from a reading that failed for some other reason.
 - **`config set listen_address <non-loopback>`**, but only while `listen_auth` is not fully configured — it prompts for a username. This one is the nastiest of the three because it does not *look* interactive and it reports success anyway; see [§5](#listen_address-needs-authentication-fully-configured-first). Configure `listen_auth` completely and it needs no TTY at all.
-- **`filters add` / `filters enable`, for the Annoyances group only** — an agreement that will not take a default. This is the one prompt on the list that a closed stdin does not merely no-op past: it refuses the work outright, so the whole group is unreachable until something answers it. It has a subsection of its own below.
+- **`filters add` / `filters enable`, for group 4 of either catalogue** — an agreement that will not take a default. This is the one prompt on the list that a closed stdin does not merely no-op past: it refuses the work outright, so the whole group is unreachable until something answers it. It has a subsection of its own below.
 
 ### The wrapper closes stdin, so "no TTY" is the only path
 
@@ -944,7 +944,7 @@ Enable these filters? (yes/no):
 Annoyance filters won't be enabled due to user's choice
 ```
 
-Three separate traps, in the order they bite:
+Four separate traps, in the order they bite:
 
 1. **A closed stdin is a "no", and "no" means the work does not happen.** So `Stdio::null()` — correct everywhere else — makes the entire Annoyances group permanently unswitchable from this application. It was: the defect this section was written for is a user reporting that the five `AdGuard …` annoyance lists could not be enabled from the GUI at all, with the terminal as the only workaround.
 
@@ -954,11 +954,17 @@ Three separate traps, in the order they bite:
 
 3. **The gate is the group, not the name and not a range of ids.** Measured across the whole HTTP catalogue: all **eleven** members of group 4 are gated — 18–22 (`AdGuard Cookie Notices`, `Popups`, `Mobile App Banners`, `Other Annoyances`, `Widgets`), plus `Fanboy's Annoyances` (122), `Web Annoyances Ultralist` (201), `Adblock Warning Removal List` (207), `EasyList Cookie List` (241), `Dandelion Sprout's Annoyances List` (250) and `Stevo's AI Blocklist` (260). Meanwhile `CJX's Annoyances List` (220) has the word in its title, sits in *Language-specific*, and is **not** gated. A control from another group — `Phishing URL Blocklist` (255), Security — adds and enables in one step with no prompt at all.
 
-**Group 4 of `agflm_dns.db` is `Security`, not `Annoyances`.** The DNS catalogue's five groups are Custom filters, General, Other, Regional and Security; it has no Annoyances group and never raises the prompt. So the id must never be tested bare — `FilterSet::annoyances_group` returns it for HTTP and `None` for DNS, because a bare `group_id == 4` would put a dialog about violating websites' terms of use in front of the DNS malware lists.
+4. **The gate is the group *number*, and it is not the same category in the two databases.** `agflm_standard.db` group 4 is `Annoyances`; `agflm_dns.db` group 4 is `Security`. **Both are gated.** So `dns filters add 18` reads out a disclaimer about violating websites' terms of use before declining to enable `Phishing Army`, and `dns filters enable 8` prints the agreement, the refusal, and then a `Failed to update filters` line.
+
+   Measured 25 August 2026 by sweeping all 62 un-added lists of `agflm_dns.db` on v1.4.13, one `add` each with stdin closed and a `remove` behind it: **exactly the 17 members of group 4 are gated** — 8, 9, 10, 11, 12, 18, 30, 31, 42, 44, 50, 52, 54, 55, 56, 68, 71 — and the 45 lists of General, Other and Regional add and enable in one step with no prompt at all. The DNS catalogue has no Annoyances group; the number is gated regardless of what the number means.
+
+   **This paragraph used to say the opposite**, on the strength of the group names alone and with no `dns filters add` measured against a Security list: it recorded that the DNS catalogue *never raises the prompt*, and `FilterSet::annoyances_group` returned `None` for it, on the reasoning that a bare `group_id == 4` would put an annoyance dialog in front of the DNS malware lists. It does put one there — AdGuard's — and the DNS Security group was as unswitchable from this application as the Annoyances group had been, for the same reason and for a whole release ([issue #13](https://github.com/dominik-najberg/AdGuard-UI-Linux/issues/13)). The rule the correction leaves behind: **a group's name says what to tell the user, never what the binary will do.** `FilterSet::consent_group` now returns group 4 for both sets, and stays per-set and `Option`-shaped so that AdGuard fixing its half is a one-line change here.
 
 **What answers it.** `yes` followed by a newline, written to stdin, which `Cli::run_answering` does before closing the pipe behind it. The newline is the answer — an unterminated line leaves the CLI still waiting when the pipe closes. Closing immediately preserves the guarantee above: the first prompt gets the line, every later one meets EOF and takes its default, so nothing can wait for a second answer that is not coming. `y` was not measured and is not guessed at.
 
 **Who is allowed to say yes.** Not the wrapper. `Consent::Granted` is a value the caller passes, and §8's rule against answering for the user applies with particular force to a prompt whose whole content is a disclaimer about who is liable. The GUI shows AdGuard's text verbatim in an `AdwAlertDialog` — verbatim because a paraphrase would be this application deciding how much of someone else's disclaimer a user needs to see — and asks *before* running anything, since asking afterwards would mean a declined dialog leaving behind the subscription `add` had already made.
+
+**On the DNS page the verbatim text is about something else entirely**, and the dialog says so first: a sentence of ours, marked as ours, that the list is not an annoyance filter and AdGuard asks about one anyway, then AdGuard's wording unchanged. Shown bare over `Stalkerware Indicators List`, that disclaimer is a non-sequitur, and the honest reading of a non-sequitur in a dialog is that the application has gone wrong.
 
 ---
 

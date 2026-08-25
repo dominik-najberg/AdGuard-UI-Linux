@@ -13,6 +13,18 @@ This file is the one changelog.
 
 ## Unreleased
 
+### The DNS Security filters could not be switched on either
+
+[#13](https://github.com/dominik-najberg/AdGuard-UI-Linux/issues/13), and it is [the defect 1.2.0 fixed for the Annoyances group](#the-annoyances-group-could-not-be-switched-on-at-all), still open on the other page. Seventeen lists: `Phishing Army`, `Malicious URL Blocklist (URLHaus)`, `Stalkerware Indicators List`, `ShadowWhisperer's Malware List` and the rest of the DNS catalogue's **Security** group. The switch sprang back, a message appeared about an agreement to terms nothing had shown you, the list was quietly left subscribed and switched off, and the workaround was again to enable it in a terminal.
+
+**The last fix ruled the DNS page out on the strength of a name.** AdGuard gates a filter group behind an agreement typed at a prompt, and this application runs the CLI with stdin closed, which that prompt reads as *no*. The gated group is number 4 — and group 4 of the HTTP catalogue is *Annoyances* while group 4 of the DNS catalogue is *Security*, two categories with nothing in common. Testing the number bare would obviously put a disclaimer about violating websites' terms of use in front of the DNS malware lists, so the DNS half was exempted and left untested.
+
+It was already there. **The CLI gates on the number**, so `adguard-cli dns filters add 18` really does read out the annoyance-filter agreement before declining to enable `Phishing Army`. Measured this time rather than reasoned about: all 62 lists the reference machine had not already added were added once with stdin closed and removed again, and exactly the 17 members of group 4 refused. General, Other and Regional ask nothing.
+
+So the same dialog now appears on the DNS page, and it opens by explaining itself. On the Filters page AdGuard's wording matches the question — you are switching on an annoyance filter, and here is what AdGuard says about annoyance filters. On the DNS page it does not, and a disclaimer about cookie notices shown bare over `Stalkerware Indicators List` reads as a bug rather than as a question. The dialog therefore says in our own words that the list is not an annoyance filter and that AdGuard asks about one anyway, and only then shows AdGuard's text — unchanged, as on the other page, and marked as AdGuard's.
+
+**What the fix leaves behind is a rule about evidence.** A group's name is what to tell a user; it is never a measurement of what the binary does. The gate is now covered by a test that reads both catalogues and one that runs the real prompt against both, which is the part that was missing when a plausible reading of two names was allowed to stand in for trying it.
+
 ### The Status page notices a proxy that is running and no longer filtering
 
 **"Protection is on" was able to sit over a browser full of ads.** `adguard-cli status` reports what is configured and what is listening, and never whether traffic reaches it, so every reading this page had was consistent with nothing being filtered at all.

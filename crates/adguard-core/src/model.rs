@@ -1210,19 +1210,29 @@ impl FilterSet {
     /// The catalogue group this set will not switch on without an agreement
     /// typed at a prompt — see [`ANNOYANCE_TERMS`].
     ///
-    /// Per-set rather than a bare constant, because **the same number means
-    /// something else in the other database**. Measured on v1.4.13:
-    /// `agflm_standard.db` group 4 is *Annoyances*; `agflm_dns.db` group 4 is
-    /// *Security*. A plain `group_id == 4` test would put a dialog about
-    /// violating websites' terms in front of the DNS malware lists.
+    /// **Group 4 of both databases, and the two are not the same category.**
+    /// Measured on v1.4.13: `agflm_standard.db` group 4 is *Annoyances*, and
+    /// `agflm_dns.db` group 4 is *Security*. The CLI gates both, because what
+    /// it tests is the number — so `dns filters add 18` reads out the
+    /// annoyance-filter agreement over *Phishing Army*.
     ///
-    /// `None` for DNS because the DNS catalogue has no Annoyances group at all
-    /// — its five groups are Custom filters, General, Other, Regional and
-    /// Security — so `dns filters` never raises the prompt.
-    pub fn annoyances_group(self) -> Option<i64> {
+    /// This returned `None` for DNS until [issue #13], on the reasoning that
+    /// the DNS catalogue has no Annoyances group and so could raise no
+    /// annoyance prompt. The names said so; the binary disagreed, and the whole
+    /// DNS Security group — seventeen malware, phishing and scam lists — was
+    /// unswitchable from this application in exactly the way the Annoyances
+    /// group had been. Read the two databases' group *names* for what to tell
+    /// the user, never for what the CLI will do.
+    ///
+    /// Still per-set and still an `Option`: the DNS half is a defect in a
+    /// version, not a rule, and when AdGuard stops asking, this is the one
+    /// place that has to know.
+    ///
+    /// [issue #13]: https://github.com/dominik-najberg/AdGuard-UI-Linux/issues/13
+    pub fn consent_group(self) -> Option<i64> {
         match self {
-            Self::Http => Some(FilterGroup::ANNOYANCES_ID),
-            Self::Dns => None,
+            Self::Http => Some(FilterGroup::GATED_ID),
+            Self::Dns => Some(FilterGroup::GATED_ID),
         }
     }
 }
@@ -1427,12 +1437,16 @@ impl Filter {
     /// So neither the name nor a range of ids describes the population; the
     /// group does.
     ///
+    /// And the group is per-set but the *number* is not: the DNS catalogue's
+    /// group 4 is Security and is gated by the same prompt, which is what
+    /// [`FilterSet::consent_group`] carries and this asks it for.
+    ///
     /// Only for the actions that switch a list **on**. `disable` and `remove`
     /// were measured ungated, and asking someone to accept liability for
     /// turning something *off* would be nonsense in any case.
-    pub fn needs_annoyance_consent(&self, set: FilterSet, action: FilterAction) -> bool {
+    pub fn needs_consent(&self, set: FilterSet, action: FilterAction) -> bool {
         matches!(action, FilterAction::Add | FilterAction::Enable)
-            && set.annoyances_group() == Some(self.group_id)
+            && set.consent_group() == Some(self.group_id)
     }
 
     /// Whether this filter's trust can be changed, and therefore whether its
@@ -1497,13 +1511,15 @@ impl FilterGroup {
     /// `filter_group`.
     pub const CUSTOM_ID: i64 = i32::MIN as i64;
 
-    /// The "Annoyances" group of `agflm_standard.db`, whose eleven lists the
-    /// CLI will not enable without an agreement to [`ANNOYANCE_TERMS`].
+    /// The group the CLI will not enable without an agreement to
+    /// [`ANNOYANCE_TERMS`] — *Annoyances* and its eleven lists in
+    /// `agflm_standard.db`, *Security* and its seventeen in `agflm_dns.db`.
     ///
-    /// Reach it through [`FilterSet::annoyances_group`] and never directly:
-    /// group 4 of the DNS catalogue is *Security*, and this number on its own
-    /// does not say which database it belongs to.
-    pub const ANNOYANCES_ID: i64 = 4;
+    /// One number for two categories that have nothing to do with each other,
+    /// because the gate is the number: see [`FilterSet::consent_group`], which
+    /// is how to reach this and where the measurement is. Named for what it
+    /// does rather than for either category, since it cannot be named for both.
+    pub const GATED_ID: i64 = 4;
 
     pub fn is_custom(&self) -> bool {
         self.id == Self::CUSTOM_ID
@@ -1835,43 +1851,57 @@ mod tests {
         assert_eq!(user_rules.action_for(true), FilterAction::Enable);
     }
 
-    fn annoyance(installed: bool) -> Filter {
-        Filter { group_id: FilterGroup::ANNOYANCES_ID, ..filter(18, false, installed) }
+    fn gated(installed: bool) -> Filter {
+        Filter { group_id: FilterGroup::GATED_ID, ..filter(18, false, installed) }
     }
 
     /// Both ways of switching a list on raise the agreement — the report that
     /// found this only ever saw `enable`, because by then the list had already
     /// been added by the click before.
     #[test]
-    fn both_ways_of_switching_an_annoyance_list_on_need_consent() {
-        for installed in [true, false] {
-            let f = annoyance(installed);
-            let action = f.action_for(true);
-            assert!(
-                f.needs_annoyance_consent(FilterSet::Http, action),
-                "{action:?} on an annoyance list should ask first"
-            );
+    fn both_ways_of_switching_a_gated_list_on_need_consent() {
+        for set in [FilterSet::Http, FilterSet::Dns] {
+            for installed in [true, false] {
+                let f = gated(installed);
+                let action = f.action_for(true);
+                assert!(
+                    f.needs_consent(set, action),
+                    "{action:?} on a gated list should ask first on {set:?}"
+                );
+            }
         }
     }
 
     /// Nothing is gated on the way off, and asking someone to accept liability
     /// for *stopping* filtering would be nonsense.
     #[test]
-    fn switching_an_annoyance_list_off_asks_nothing() {
-        let f = annoyance(true);
-        assert!(!f.needs_annoyance_consent(FilterSet::Http, FilterAction::Disable));
-        assert!(!f.needs_annoyance_consent(FilterSet::Http, FilterAction::Remove));
+    fn switching_a_gated_list_off_asks_nothing() {
+        let f = gated(true);
+        for set in [FilterSet::Http, FilterSet::Dns] {
+            assert!(!f.needs_consent(set, FilterAction::Disable));
+            assert!(!f.needs_consent(set, FilterAction::Remove));
+        }
     }
 
-    /// The sharp edge: group 4 of `agflm_dns.db` is **Security**, not
-    /// Annoyances. A bare `group_id == 4` test would put a dialog about
-    /// violating websites' terms in front of the DNS malware lists — and the
-    /// DNS catalogue has no annoyance gate to answer for in the first place.
+    /// The sharp edge, and it cuts the other way from how this project first
+    /// read it: group 4 of `agflm_dns.db` is **Security** and not Annoyances,
+    /// and the CLI gates it anyway — measured across all seventeen of its lists
+    /// on v1.4.13. Exempting DNS on the strength of the group's *name* left
+    /// every malware, phishing and scam list unswitchable (issue #13).
     #[test]
-    fn group_four_of_the_dns_catalogue_is_not_annoyances() {
-        let security = annoyance(false);
-        assert!(!security.needs_annoyance_consent(FilterSet::Dns, FilterAction::Add));
-        assert_eq!(FilterSet::Dns.annoyances_group(), None);
+    fn the_dns_security_group_is_gated_too() {
+        let security = gated(false);
+        assert!(security.needs_consent(FilterSet::Dns, FilterAction::Add));
+        assert_eq!(FilterSet::Dns.consent_group(), Some(FilterGroup::GATED_ID));
+    }
+
+    /// Only that group, though. A DNS list from General is switched on with no
+    /// question asked, so the fix must not have turned into "ask about
+    /// everything on the DNS page".
+    #[test]
+    fn a_dns_list_outside_that_group_is_not_gated() {
+        let general = Filter { group_id: 1, ..filter(3, false, false) };
+        assert!(!general.needs_consent(FilterSet::Dns, FilterAction::Add));
     }
 
     /// *CJX's Annoyances List* is in "Language-specific" and is measured
@@ -1883,7 +1913,7 @@ mod tests {
             name: "CJX's Annoyances List".to_owned(),
             ..filter(220, false, false)
         };
-        assert!(!cjx.needs_annoyance_consent(FilterSet::Http, FilterAction::Add));
+        assert!(!cjx.needs_consent(FilterSet::Http, FilterAction::Add));
     }
 
     fn custom(id: i64) -> Filter {

@@ -110,12 +110,12 @@ fn enabling_an_uninstalled_filter_is_refused() {
     assert!(!state.enabled, "refusal still enabled the filter");
 }
 
-/// The annoyance gate, both ways round, against the real binary.
+/// The consent gate, both ways round, against the real binary — for both sets.
 ///
 /// **This one does touch a subscription**, unlike the user-rules test above,
-/// and there is no way around it: the gate is a property of the Annoyances
-/// group and the user-rules pseudo-filter is not in it. It picks a list from
-/// that group which the machine has **not** added, adds and removes it, and
+/// and there is no way around it: the gate is a property of a catalogue group
+/// and the user-rules pseudo-filter is in neither. It picks a list from the
+/// gated group which the machine has **not** added, adds and removes it, and
 /// skips entirely if every one of them is already installed — so it never
 /// disturbs a list the user chose to have. A failure mid-way leaves the list
 /// added and disabled, which `filters remove` undoes.
@@ -123,24 +123,36 @@ fn enabling_an_uninstalled_filter_is_refused() {
 /// What it pins is the pair of behaviours the fix rests on: withheld consent is
 /// reported as a *failure* even though `filters add` opened with its own
 /// success line, and granted consent actually gets the list switched on.
+///
+/// **Both sets, because assuming one of them was ungated is the whole of issue
+/// #13.** The HTTP half passed for a release while the DNS Security group could
+/// not be switched on at all, and nothing here was looking.
 #[test]
 #[ignore = "mutates the machine's AdGuard configuration"]
-fn the_annoyance_gate_refuses_without_consent_and_yields_with_it() {
+fn the_consent_gate_refuses_without_consent_and_yields_with_it() {
+    for set in [FilterSet::Http, FilterSet::Dns] {
+        eprintln!("--- {set:?} ---");
+        check_consent_gate(set);
+    }
+}
+
+fn check_consent_gate(set: FilterSet) {
     let Ok(cli) = Cli::discover() else {
         eprintln!("skipping: adguard-cli not installed");
         return;
     };
-    let Ok(catalogue) = Catalogue::open_set(SET) else {
+    let Ok(catalogue) = Catalogue::open_set(set) else {
         eprintln!("skipping: filter database not present");
         return;
     };
     let locale = adguard_core::Locale::english();
 
     let filters = catalogue.filters(&locale).expect("should read catalogue");
-    let Some(target) = filters.iter().find(|filter| {
-        !filter.installed && filter.needs_annoyance_consent(SET, FilterAction::Add)
-    }) else {
-        eprintln!("skipping: every annoyance list is already added on this machine");
+    let Some(target) = filters
+        .iter()
+        .find(|filter| !filter.installed && filter.needs_consent(set, FilterAction::Add))
+    else {
+        eprintln!("skipping: every gated list is already added on this machine");
         return;
     };
     let id = target.id;
@@ -156,7 +168,7 @@ fn the_annoyance_gate_refuses_without_consent_and_yields_with_it() {
     // Withheld: `add` prints `Filter [...] added` and then refuses to enable.
     // The success line must not carry the day.
     let err = cli
-        .filter_action(SET, FilterAction::Add, id, Consent::Withheld)
+        .filter_action(set, FilterAction::Add, id, Consent::Withheld)
         .expect_err("an unanswered agreement must be reported as failure");
     eprintln!("withheld consent refused with: {err}");
     let after = state("the withheld attempt");
@@ -165,13 +177,13 @@ fn the_annoyance_gate_refuses_without_consent_and_yields_with_it() {
     // Granted: whichever action the observed state now calls for.
     let action = target.clone().action_for(true);
     let action = if after.installed { FilterAction::Enable } else { action };
-    cli.filter_action(SET, action, id, Consent::Granted)
+    cli.filter_action(set, action, id, Consent::Granted)
         .unwrap_or_else(|err| panic!("{action:?} with consent granted failed: {err}"));
     assert!(state("consent granted").enabled, "consent granted but the list is still off");
     eprintln!("consent granted: enabled");
 
     // Put the machine back: `remove`, not `disable` — it was not added before.
-    cli.filter_action(SET, FilterAction::Remove, id, Consent::Withheld)
+    cli.filter_action(set, FilterAction::Remove, id, Consent::Withheld)
         .expect("removal should succeed");
     let restored = state("removal");
     assert!(!restored.installed, "test did not restore the original state");
