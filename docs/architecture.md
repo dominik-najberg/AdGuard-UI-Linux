@@ -112,9 +112,24 @@ That is not hypothetical. Contract §8 measures a root helper that dies mid-sess
 
 So the page carries a state for it, `Runtime::Bypassed`, and three rules hold it up:
 
-- **It fires on a contradiction, never on one fact.** `status` says running *and* the helper is positively seen to be dead. Either alone is ordinary — a healthy install has a running proxy, and an unrecognised process tree has no helper we can name. This is the same pairing §11's wedged-proxy recovery uses, inverted.
+- **It fires on a contradiction, never on one fact.** `status` says running *and* something else says nothing is getting through. Either alone is ordinary — a healthy install has a running proxy, and an unrecognised process tree has no helper we can name. This is the same pairing §11's wedged-proxy recovery uses, inverted.
 - **Only positive evidence counts.** A corpse in `/proc` is evidence; an absence is not, and `HelperProcess::Unseen` is deliberately not actionable. A false alarm here teaches the user to disregard the one indicator that will eventually be telling the truth, which is worse than missing a detection.
 - **It says which failure happened.** A dead helper stops the redirect in `auto` and breaks only the HTTP proxy in `manual`, where SOCKS5 keeps serving (contract §8). One wording for both would tell a SOCKS5 user nothing was filtered while their traffic was filtered normally.
+
+#### Two detectors, because one of them can only see one cause
+
+The helper check is **cause-specific**: it catches a dead `adguard_root_helper` and nothing else. Anything that stops traffic reaching the proxy by some other route looks, from the Status page, exactly like protection working.
+
+So a second detector sits beside it, in `access.rs`, and it is **cause-independent** — it observes whether filtering is *happening* rather than whether the machinery that should cause it still looks intact. AdGuard's own client issues roughly hourly requests through the proxy and logs them; when they stop succeeding, nothing is getting through. Contract §8 has the fourteen days it was measured against, including the finding that cost the obvious version of the rule: **every measured bypass began mid-run**, so *"nothing has succeeded this run"* catches none of them and *"nothing has succeeded since the last success"* catches all five.
+
+The two are not redundant and neither replaces the other:
+
+- **They differ in latency, so they are ordered rather than merged.** A corpse in `/proc` is visible the instant it appears; the log answers about two hours later, which is one to two ping intervals. When both are available the corpse wins, because it names the cause and has a measured cure. The log is what speaks for the bypasses that leave no corpse.
+- **They differ in what they may claim.** `Bypass::Helper` carries the proxy mode, because a dead helper was measured to do two different things in the two modes. `Bypass::Unreached` deliberately carries nothing: an unknown cause has not been measured doing anything mode-specific, and inventing a sentence for it would be the guess the mode was added to avoid.
+- **They fail differently, and both fail quiet.** The helper check acts only on a corpse it can see. The log check acts only on a line it can positively parse — sixteen fields, an eighth that is an HTTP status — so an `adguard-cli` upgrade that restyles the log takes the detector off rather than turning it on. That direction is not a preference: `access.log`'s format is not versioned and is not part of any contract, so a parser that stops recognising it *will* eventually be wrong, and it must be wrong towards silence.
+- **Neither may claim more than it measured, and the log measures less than it looks like it does.** A 502 says a request did not get through; it does not say where it stopped, and a healthy proxy answers the same way when its upstream is unreachable. The log check therefore also requires that *nobody else's* traffic is reaching the proxy — a bypass empties the proxy's log, a dead upstream keeps it filling (contract §8). That still cannot separate a bypass from a machine that has been off the network for hours, so `Bypass::Unreached`'s wording names both halves of what was seen, offers the offline reading, and makes the cache advice conditional. `Bypass::Helper` states its cause and its consequences flatly, because both were measured.
+
+**Cost keeps it off the fast path.** The log read is a few mebibytes and the signal it carries is hourly, so it runs on its own five-minute cadence rather than on the 2 s `status` poll — twelve times finer than the fastest the answer can move. Both checks share the one `/proc` walk that finds the daemon, and the cached verdict is dropped whenever this application acts on the proxy, so the restart that cures a bypass clears the panel on the next tick rather than five minutes later.
 
 The same fact reaches the tray, which is not a nicety: `--background` is what the autostart entry runs, and there the tray is the only surface there is. See §4.
 

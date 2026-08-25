@@ -13,6 +13,8 @@ const CERT_INSTALLER: &str = "install_cert.sh";
 const DATA_SUBDIR: &str = "adguard-cli";
 const CONFIG_FILE: &str = "proxy.yaml";
 const USERSCRIPTS_SUBDIR: &str = "userscripts";
+const LOGS_SUBDIR: &str = "logs";
+const ACCESS_LOG: &str = "access.log";
 
 fn home() -> Option<PathBuf> {
     env::var_os("HOME").map(PathBuf::from)
@@ -207,6 +209,23 @@ pub fn userscripts_dir() -> Option<PathBuf> {
 /// process's environment where its own data went.
 pub fn userscripts_dir_under(xdg_data_home: &Path) -> PathBuf {
     data_dir_under(xdg_data_home).join(USERSCRIPTS_SUBDIR)
+}
+
+/// AdGuard's access log — every request the proxy served, its own included.
+///
+/// **One directory further down than `proxy.yaml` says.** The key reads
+/// `access_log_file: 'access.log'`, and this project's own `adguard-cli.md`
+/// once glossed that as "relative to the data dir"; the file is really at
+/// `<data>/logs/access.log`, measured (contract §9). AdGuard resolves its
+/// relative paths against per-key base directories rather than against one
+/// rule, so the `logs/` here is measured and not inferred from a sibling key.
+///
+/// Returns the path whether or not anything is there. Read-only, and a tail at
+/// that — see [`crate::access`], which is the only thing in this crate that
+/// opens it. **AdGuard rotates this file itself at ~10 MiB** (contract §9), so
+/// nothing here may hold an fd across reads.
+pub fn access_log() -> Option<PathBuf> {
+    Some(data_dir()?.join(LOGS_SUBDIR).join(ACCESS_LOG))
 }
 
 /// SQLite catalogue of HTTP/HTTPS filters. Open read-only.

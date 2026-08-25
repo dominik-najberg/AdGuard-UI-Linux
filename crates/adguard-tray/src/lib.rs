@@ -89,9 +89,17 @@ pub struct State {
     /// would show the high-security icon and the word "running" for as long as
     /// the session lasted, which is the failure this state exists to expose.
     ///
-    /// Never set from a helper merely *unseen*: only a helper positively seen
-    /// to be dead reaches here, so an install whose process tree this
-    /// application does not recognise raises nothing.
+    /// **Two independent things set it, and the tray does not need to know
+    /// which.** A root helper positively seen to be dead, which is immediate;
+    /// or AdGuard's own requests through the proxy failing for hours, which is
+    /// cause-independent and hours late. Three words and an icon are all there
+    /// is room for here, and both facts come out the same on both — the
+    /// difference in wording belongs to the Status page, which has the room.
+    ///
+    /// Never set from an absence. Only a helper positively seen to be dead, or
+    /// a run positively seen to have got nothing through, reaches here — so an
+    /// install whose process tree this application does not recognise, or whose
+    /// log it can no longer parse, raises nothing.
     pub bypassed: bool,
     /// One entry per [`Toggle::ALL`], in that order.
     pub toggles: Vec<Option<bool>>,

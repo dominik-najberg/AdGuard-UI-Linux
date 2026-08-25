@@ -5,6 +5,7 @@
 //!
 //! See `docs/cli-contract.md` for the measured CLI behaviour this encodes.
 
+pub mod access;
 pub mod autostart;
 pub mod browser;
 pub mod cli;
@@ -23,6 +24,7 @@ pub mod userscripts;
 pub mod window_state;
 pub mod zip;
 
+pub use access::Filtering;
 pub use autostart::Autostart;
 pub use browser::BrowserIntegration;
 pub use cli::{Activation, Applied, Cli, Error};

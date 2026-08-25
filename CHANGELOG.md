@@ -25,6 +25,28 @@ So the same dialog now appears on the DNS page, and it opens by explaining itsel
 
 **What the fix leaves behind is a rule about evidence.** A group's name is what to tell a user; it is never a measurement of what the binary does. The gate is now covered by a test that reads both catalogues and one that runs the real prompt against both, which is the part that was missing when a plausible reading of two names was allowed to stand in for trying it.
 
+### And it notices one that has stopped filtering for any other reason
+
+[#14](https://github.com/dominik-najberg/AdGuard-UI-Linux/issues/14), a follow-up to the check below. That one watches AdGuard's root helper, so it catches a dead root helper and nothing else. Anything else that stops traffic reaching the proxy still looked, from the Status page, exactly like protection working.
+
+This one does not care what the cause is. AdGuard's own client sends a request through the proxy about once an hour and writes the result to its log, so whether filtering is *happening* can simply be observed. When those requests stop succeeding, nothing is getting through, whatever the reason.
+
+**The obvious version of that rule does not work, and finding out cost the interesting part of this change.** The issue proposed it as *nothing has succeeded since this proxy run started* — and, replayed against the fourteen days of logs it was drawn from, that catches **none of the five days that were spent unprotected**. Every one of those bypasses began part-way through a run that had been filtering happily for hours beforehand, so every run carries successes and the rule never fires. The run that produced the seventeen-hour failure on 25 August holds 190 of them.
+
+What separates the two states is the *trailing* requests — the ones after the last success. Grouped that way, the fourteen days fall apart cleanly: a run that was filtering never went beyond **two** failures or **an hour** without a success, and a run that was bypassed never came in under **nineteen** failures or **eighteen hours**. There are exactly five long spans and they land on exactly the five bad days. Replaying the finished rule every half hour across the whole fortnight reports a bypass 522 times, and **every one of them falls inside a span that really was unprotected**.
+
+It takes about two hours to notice, which is one to two of AdGuard's ping intervals, so it corroborates the root-helper check rather than racing it: a dead helper is still reported the instant it appears, and this speaks for the failures that leave no corpse behind. The panel says so in its own words — it names what was seen to fail rather than a mechanism it cannot claim to know.
+
+**A failed request does not say where it failed**, and the first version of this leaned on it as though it did. AdGuard's hourly check answers `502` when nothing is reaching the proxy — and it answers `502` when the proxy is perfectly healthy and the server it is checking, or your network, is not. Nothing on the log line separates the two: across ten log generations, every one of the 256 failures looks identical to the others.
+
+What separates them is the rest of the log. A bypass takes traffic *away* from the proxy, so the proxy's log falls silent — measured at between 0.1 and 5 entries an hour inside the five bad spans, against 1,036 an hour the rest of the time. A dead server leaves your traffic arriving and failing at the proxy, so its log keeps filling. So a warning now needs both: AdGuard's own checks failing **and** nothing else getting through either. Replaying the fortnight with that requirement changes nothing — the same five spans, the same 522 readings — and it means a filter server going down while you browse normally can no longer be reported as a bypass.
+
+One case is still indistinguishable, and the panel says so rather than pretending otherwise: **a machine that has been powered on and off the network for hours looks exactly the same from here.** So the wording names what was actually seen — the checks failing, and nothing else arriving — offers that reading in a closing sentence, and makes the cache advice conditional on pages still showing ads. The root-helper warning beside it keeps stating its cause flatly, because that one was measured.
+
+**It is built to go quiet rather than to cry wolf.** AdGuard's log format is undocumented and is not promised to anyone, so a future version will eventually write something this cannot read. A line is therefore used only when it is recognisable beyond doubt — sixteen fields, of which the eighth is an HTTP status code, which no other column on the line could be mistaken for — and anything else is treated as no evidence at all. A version that renames the client or moves a column switches the check off instead of setting it off, and a test that reads the real log is what will notice it has happened.
+
+The cost is a few megabytes read every five minutes, off the main thread, with no network, no privilege and no subprocess. What it learns is tied to the proxy run it learned it in, so **a restart from anywhere** — this app, a terminal, a service manager — expires it and the next reading goes back to the log immediately. A cured install cannot go on reporting a bypass over the very restart that fixed it.
+
 ### The Status page notices a proxy that is running and no longer filtering
 
 **"Protection is on" was able to sit over a browser full of ads.** `adguard-cli status` reports what is configured and what is listening, and never whether traffic reaches it, so every reading this page had was consistent with nothing being filtered at all.

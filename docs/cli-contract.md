@@ -1071,6 +1071,54 @@ Three states are distinguishable, which is what makes the signal usable rather t
 
 **Five of the twelve days were spent unprotected** — 14, 17, 19, 21 and 25 August. `Sequencer is not initialized` appears in `proxy.log` on fifteen separate days. This is frequent, not exotic.
 
+#### Scoping that to a proxy run — and what the day table hides
+
+The table above is per **day**, which is the wrong window and was known to be. The right one is a proxy run, because a restart is the cure: failures logged before one say nothing about the run that followed it. Reconstructing the runs from `start_command` in `app.log` and re-cutting the same fourteen days along them, **the obvious rule does not fire at all**:
+
+| Run | Started | Real traffic | internal 2xx | internal failures |
+| --- | --- | ---: | ---: | ---: |
+| R0 | (before 11.08) | 11,436 | 46 | 110 |
+| R1 | 15.08 12:41 | 3,305 | 27 | 1 |
+| R2 | 15.08 14:28 | 21,724 | 71 | 40 |
+| R3 | 18.08 06:51 | 14,589 | 60 | 58 |
+| R4 | 20.08 10:44 | 32,226 | 75 | 23 |
+| R5 | 23.08 22:56 | 5,133 | 113 | 8 |
+| R6 | 24.08 10:32 | 44,407 | 190 | 41 |
+
+**Every run carries successes**, including R6 — the run in which the helper died at 03:01 on 25.08 and nothing was filtered for seventeen hours. So *"nothing has succeeded this run"*, which the subsection above proposed and [issue #14](https://github.com/dominik-najberg/AdGuard-UI-Linux/issues/14) restated, is a rule that would have caught **none of the five unprotected days**. Every measured bypass began mid-run.
+
+**What separates the two states is the trailing entries — those after the last success.** Grouping every internal entry within a run into maximal spans of failure, bounded by a success or by the run's edge:
+
+| | Longest while filtering | Shortest while bypassed |
+| --- | --- | --- |
+| Consecutive failures | **2** | **19** |
+| Span of those failures | **60 minutes** | **18 hours** |
+
+There are exactly five long spans in fourteen days and they land on exactly the five days that were spent unprotected. The isolated one- and two-entry spans — the ones that made *"recent requests are failing"* look unusable — are two orders of magnitude smaller on both axes, so the discriminator survives in the form the day table states it (*the absence of successes, not the presence of failures*) with the window narrowed from the run to the tail of it.
+
+Replaying that rule at three failures over two hours, evaluated every half hour across the whole fourteen days: **522 of 718 readings report a bypass, and every one of them falls inside one of the five spans that were genuinely unprotected.** None falls outside them. On the 25.08 event the first alarm lands at 05:00, about two hours after the 03:01 failure — one to two ping intervals, which is why this corroborates the root-helper check rather than racing it.
+
+#### A 502 does not say where the request stopped
+
+The rule above rests on failures, and a failure is not self-explaining. AdGuard's internal request answers **502 when nothing is reaching the proxy, and 502 when the proxy is fine and `filters.adtidy.org` — or the network — is not.** Nothing on the line separates them: across all ten rotations, every one of the 256 internal 502s carries `-` where each of the 1,062 successes carries an upstream address, so a failure to connect and a refusal to try look identical.
+
+What separates them is the rest of the log, and it is the same coincidence the day table reports from the other end. The two states differ in what the *user's* traffic is doing: a bypass takes traffic away from the proxy, so the proxy's log empties, while a dead upstream leaves the traffic arriving and failing there, so the log keeps filling. Measured across the five bypassed spans against everything else:
+
+| | Duration | Other clients' entries | Rate |
+| --- | ---: | ---: | ---: |
+| bypassed 11.08 13:21 – 15.08 12:03 | 94.7 h | 7 | **0.1/h** |
+| bypassed 16.08 15:00 – 17.08 13:10 | 22.2 h | 12 | **0.5/h** |
+| bypassed 18.08 13:51 – 20.08 10:17 | 44.4 h | 37 | **0.8/h** |
+| bypassed 20.08 20:36 – 21.08 14:48 | 18.2 h | 8 | **0.4/h** |
+| bypassed 25.08 02:56 – 25.08 19:56 | 17.0 h | 87 | **5.1/h** |
+| everywhere else | 236.0 h | 244,518 | **1,036/h** |
+
+Four orders of magnitude. The busiest two hours inside a real bypass reach 43/h — `chronyd`, a little `chrome`, `slack`, the things that reach the proxy without needing the redirect — so a threshold of two entries a minute sits 2.8× above the worst measured bypass and 8.6× below ordinary traffic. Replaying the fortnight with that veto in place changes nothing: the same five spans, the same 522 readings.
+
+**It does not close the gap entirely.** A machine that is powered on and has been off the network for hours logs neither its own traffic nor a successful check, and reads exactly as a bypass does. Nothing in `access.log` can separate those two, which is why the state this feeds names the observation and offers that reading rather than asserting a bypass.
+
+**Two practical limits, both measured.** A full 10 MiB generation of `access.log` spans about twenty-five hours of ordinary traffic and about ten of the heaviest, so a reader wanting a two-hour window needs single-digit mebibytes of tail, not kilobytes. And **rotation can empty the window**: it happened while this was being written, leaving `access.log` covering three minutes. The generation before it has to be read too. Neither limit bites where it would matter most — rotation is driven by traffic volume and a bypass in `auto` mode produces none, so a bypass cannot roll its own evidence away.
+
 #### It is upstream's, it is fixed, and the fix is not on the release channel
 
 [`AdguardTeam/AdGuardCLI#136`](https://github.com/AdguardTeam/AdGuardCLI/issues/136) is the same failure reported on v1.4.11, with the same `[adguard_root_he] <defunct>` in the same `ps` output, closed *Resolution: Done* on 2026-08-01 with a fix bound for the nightly channel. Asked to narrow it down, AdGuard's engineer requested exactly one thing from the reporter: the "presence/absence of running `adguard_root_helper` process".
@@ -1208,6 +1256,8 @@ Caveats before building stats on this:
 - Detail depends on `log_level`; at `info` many app-log messages are elided to `...`.
 - No rotation policy is configured by us — but **AdGuard rotates these itself**, and a reader must survive it. Measured 2 August 2026: `~/.local/share/adguard-cli/logs/` held `proxy.log.1` at 10,485,626 B and `access.log.1`/`.2` at 10,485,776 / 10,485,648 B — a ~10 MiB threshold with at least two generations kept. It is the writing process's own roll, not `logrotate` and not cron: there is no `/etc/logrotate.d` entry and no cron entry, and the seam is continuous — `proxy.log.1` ends `30.07.2026 22:21:07.275314 WARN [2394586]` and `proxy.log` begins `30.07.2026 22:21:07.276439 WARN [2394586]`, 1.1 ms later under the same PID. **A tailer holding an fd loses the stream silently every ~10 MiB.**
 - There is **no push or event mechanism**. A live view must tail the file.
+
+**One thing does read this file, and it reads it defensively.** `access.rs` tails it to answer whether traffic is reaching the proxy at all — the measurement is in [§8](#scoping-that-to-a-proxy-run--and-what-the-day-table-hides). Because the format is undocumented, every guard there fails to *silence*: a line is read only when it has exactly sixteen whitespace-separated fields and its eighth parses as an HTTP status code, and no other column on the line does. A format that gains a column, renames the client or restyles the date therefore takes the check off rather than turning it on. `tests/access_live.rs` is what notices that has happened.
 
 `har_writer` (`enabled`, `location`) is the richer alternative for debugging but writes full HAR dumps — too heavy for an always-on *capture*, which `architecture.md` §7 distinguishes from a switch that ships `false`.
 
