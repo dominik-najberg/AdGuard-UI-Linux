@@ -11,7 +11,7 @@ This file is the one changelog.
 
 ---
 
-## Unreleased
+## 1.6.0 — 26 August 2026
 
 ### The DNS Security filters could not be switched on either
 

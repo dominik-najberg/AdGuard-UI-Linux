@@ -53,6 +53,18 @@
     application is its first release.
   -->
   <releases>
+    <release version="1.6.0" type="stable" date="2026-08-26">
+      <url type="details">https://github.com/dominik-najberg/AdGuard-UI-Linux/releases/tag/v1.6.0</url>
+      <description>
+        <p>The Status page notices two more ways protection can quietly stop, and a fix:</p>
+        <ul>
+          <li>A bypass that leaves AdGuard's own process running is now noticed by watching AdGuard's access log for its own hourly check to stop succeeding while nothing else gets through either, rather than only when AdGuard's root helper has visibly died.</li>
+          <li>A dead root helper is reported as a contradiction — "running" and "not filtering" at once — rather than read as protection working, with the tray icon and its menu saying the same thing when there is no window open to show it.</li>
+          <li>A setting that is switched on but doing nothing now reads "Enabled, not in effect" instead of a plain green "Enabled" that disagreed with the panel beside it.</li>
+          <li>The DNS page's Security group filters could not be switched on: AdGuard's consent prompt was answered no by a closed stdin and the list was left subscribed and disabled. The same agreement dialog already used on the Filters page now appears here too.</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.5.0" type="stable" date="2026-08-15">
       <url type="details">https://github.com/dominik-najberg/AdGuard-UI-Linux/releases/tag/v1.5.0</url>
       <description>
