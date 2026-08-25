@@ -68,6 +68,8 @@ use std::fs;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use crate::proc;
+
 /// How long a signalled daemon is given to go away before we report that it did
 /// not. Measured at under 0.5 s; this is the point past which something else is
 /// wrong and saying so beats waiting.
@@ -125,8 +127,8 @@ impl Daemon {
     /// make [`Self::terminate`] wait out its whole deadline and then report
     /// failure over a process that had done exactly what was asked.
     pub fn alive(&self) -> bool {
-        matches!(stat(self.pid), Some((state, started))
-            if state != ZOMBIE && started == self.started)
+        matches!(proc::stat(self.pid), Some(stat)
+            if stat.state != proc::ZOMBIE && stat.started == self.started)
     }
 
     /// Ask this process to exit, and wait to see whether it did.
@@ -182,10 +184,10 @@ impl Daemon {
         if !is_daemon(&fs::read(format!("/proc/{pid}/cmdline")).ok()?) {
             return None;
         }
-        let (state, started) = stat(pid)?;
+        let stat = proc::stat(pid)?;
         // A daemon that has already exited is not holding anything, and is not
         // something to go looking for a reason to signal.
-        (state != ZOMBIE).then_some(Self { pid, started })
+        (stat.state != proc::ZOMBIE).then_some(Self { pid, started: stat.started })
     }
 }
 
@@ -227,30 +229,6 @@ fn is_daemon(cmdline: &[u8]) -> bool {
     DAEMON_ARGS
         .iter()
         .all(|wanted| args.contains(&wanted.as_bytes()))
-}
-
-/// The `/proc/<pid>/stat` state character for a process that has exited and not
-/// yet been reaped.
-const ZOMBIE: char = 'Z';
-
-/// Fields 3 and 22 of `/proc/<pid>/stat` — the process's state, and its start
-/// time in clock ticks since boot.
-///
-/// Read together because both answers come from the one file and both are needed
-/// on every check; two reads would also let a process change state between them.
-///
-/// Field 2 is the executable name **in parentheses, unescaped**, so it may hold
-/// spaces and parentheses of its own and the file cannot simply be split on
-/// whitespace. Everything after the *last* `)` is field 3 onwards, which is the
-/// standard way through it — so the state is the first of those and the start
-/// time the twentieth.
-fn stat(pid: i32) -> Option<(char, u64)> {
-    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let after_comm = stat.rsplit_once(')')?.1;
-    let mut fields = after_comm.split_whitespace();
-    let state = fields.next()?.chars().next()?;
-    let started = fields.nth(18)?.parse().ok()?;
-    Some((state, started))
 }
 
 #[cfg(test)]
@@ -318,24 +296,6 @@ mod tests {
         );
     }
 
-    /// `stat` must answer for a real, live process — this one — and the answer
-    /// must be stable across reads. Guards the field-22 arithmetic, which is
-    /// silent when wrong: an off-by-one lands on a neighbouring counter that is
-    /// also a plausible-looking integer.
-    #[test]
-    fn reads_a_start_time_that_does_not_change() {
-        let me = std::process::id() as i32;
-        let (state, started) = stat(me).expect("this process has a stat");
-        assert_ne!(state, ZOMBIE, "the test process is running");
-        assert_eq!(stat(me).map(|(_, started)| started), Some(started));
-        assert!(started > 0, "a start time of 0 means the wrong field");
-    }
-
-    #[test]
-    fn no_stat_for_a_pid_that_cannot_exist() {
-        assert_eq!(stat(-1), None);
-    }
-
     /// A daemon standing for a process that is gone must never be signalled,
     /// and `alive` is the check that decides it. Pid 0 is not a process this
     /// call can name, so it stands in for the vanished one.
@@ -354,7 +314,7 @@ mod tests {
     #[test]
     fn a_recycled_pid_is_not_the_same_daemon() {
         let me = std::process::id() as i32;
-        let (_, real) = stat(me).expect("stat");
+        let real = proc::stat(me).expect("stat").started;
         assert!(Daemon { pid: me, started: real }.alive());
         assert!(!Daemon {
             pid: me,

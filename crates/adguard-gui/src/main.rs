@@ -414,8 +414,12 @@ fn connect_tray(
     view.status.connect_status({
         let tray = tray.clone();
         let state = state.clone();
-        move |status| {
-            state.borrow_mut().running = status.running;
+        move |status, bypassed| {
+            {
+                let mut state = state.borrow_mut();
+                state.running = status.running;
+                state.bypassed = bypassed;
+            }
             let snapshot = state.borrow().clone();
             tray.set_state(snapshot);
         }
@@ -467,6 +471,7 @@ fn connect_tray(
                     }
                     Command::StartProxy => status.start_proxy(),
                     Command::StopProxy => status.stop_proxy(),
+                    Command::RestartProxy => status.restart_proxy(),
                     Command::SetToggle { toggle, on } => protection.request(toggle, on),
                     Command::Quit => {
                         app.quit();

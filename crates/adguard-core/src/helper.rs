@@ -174,10 +174,259 @@ pub fn path() -> Option<PathBuf> {
     crate::paths::root_helper()
 }
 
+// ---- the helper as a running process ----
+
+/// The root helper's name as `/proc` spells it.
+///
+/// `adguard_root_helper` is nineteen characters and the kernel keeps fifteen,
+/// so this truncated form is what appears in `/proc/<pid>/stat` and in `ps`
+/// alike. Measured on v1.4.13 in **both** states — a working helper and a dead
+/// one read identically here, which is why [`process`] decides on the state and
+/// never on the name.
+///
+/// If AdGuard ever renames it, nothing matches, [`HelperProcess::Unseen`] comes
+/// back, and this application says nothing. That is the direction this is meant
+/// to fail in; see [`process`].
+const HELPER_COMM: &str = "adguard_root_he";
+
+/// What `/proc` says about the root helper running under one proxy daemon.
+///
+/// [`RootHelper`] above asks whether the helper was ever **set up**. This asks
+/// whether it is **still running**, and the two are not the same event: a
+/// helper can be perfectly installed, start with the daemon, and die hours
+/// later. Measured on 2026-08-25, that is exactly what happens.
+///
+/// # The state this exists for
+///
+/// `adguard-cli` reports a proxy that is running and filtering while its helper
+/// is a corpse and nothing is being filtered at all:
+///
+/// ```text
+/// $ ps -eo pid,ppid,user,stat,cmd
+///   13482    8245 potworny  Sl  …/adguard-cli start --no-fork --log-to-file
+///   13666   13482 root      Z   [adguard_root_he] <defunct>
+///
+/// $ adguard-cli status
+/// The AdGuard proxy server is running
+/// System-wide automatic filtering is enabled
+/// ```
+///
+/// The daemon's log names the moment it happened and then repeats the
+/// consequence for as long as the daemon lives:
+///
+/// ```text
+/// ERROR RootHelperClient on_packets_received: Failed to parse response
+/// INFO  RootHelperClient disconnect: Finished
+/// ERROR RootHelperClient send_command: Sequencer is not initialized
+/// WARN  AGStandaloneServerSocketFactory prepareFd: Failed to protect socket
+/// ```
+///
+/// `prepareFd: Failed to protect socket` is the same line this module's header
+/// records for a helper that was never set up — the same consequence reached by
+/// a different route, which is why both live here.
+///
+/// Nothing recovers on its own. A `restart` does, every time.
+///
+/// # This is upstream's bug, and upstream's own diagnostic
+///
+/// [`AdguardTeam/AdGuardCLI#136`] is the same failure on v1.4.11, closed
+/// *Resolution: Done* on 2026-08-01 with a fix bound for the nightly channel.
+/// Asked to narrow it down, AdGuard's engineer requested exactly one thing from
+/// the reporter: the "presence/absence of running `adguard_root_helper`
+/// process". This is that check. It is worth carrying until the fix reaches the
+/// release channel, which v1.4.13 — published three months earlier — predates.
+///
+/// [`AdguardTeam/AdGuardCLI#136`]: https://github.com/AdguardTeam/AdGuardCLI/issues/136
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HelperProcess {
+    /// A live helper, parented to the daemon asked about.
+    Running,
+    /// The helper exited and has not been reaped. **The only value here that is
+    /// evidence of anything**, and the shape every measured failure took.
+    Defunct,
+    /// No helper process is parented to that daemon at all.
+    ///
+    /// Deliberately not merged with [`Self::Defunct`]. An absence has too many
+    /// innocent readings — a daemon that has not spawned it yet, a `/proc` that
+    /// could not be walked, a future AdGuard that parents or names it
+    /// differently — and a caller must not turn any of them into a claim that
+    /// protection has stopped.
+    Unseen,
+}
+
+/// Find the root helper belonging to `daemon`, by pid.
+///
+/// # Why the answer is a state and not a `bool`
+///
+/// A false alarm here is worse than a missed detection. Telling a user their
+/// protection has stopped when it has not teaches them to disregard the one
+/// indicator that will eventually be telling the truth, and this check runs
+/// against a process tree AdGuard is free to rearrange in any release. So the
+/// verdict a caller may act on is [`HelperProcess::Defunct`] — a corpse we can
+/// positively see — and never the absence of a helper, which is
+/// [`HelperProcess::Unseen`] and means only that nothing is known.
+///
+/// That the corpse is reliably there is a property of the bug rather than
+/// luck: the daemon never reaps it, which is why it is a zombie and not simply
+/// gone.
+///
+/// # Why the name, and not the executable
+///
+/// `/proc/<pid>/exe` is the identification [`crate::orphan`] uses and it cannot
+/// be used here. The helper runs as **root**, so reading its link from this
+/// application's uid fails with `EACCES`, and a zombie has no such link at all
+/// — the two cases this function most needs to tell apart are precisely the two
+/// that route would refuse to read. Field 2 of `/proc/<pid>/stat` is readable
+/// for any process in either state, and pairing it with the parent's pid is
+/// what makes the match *this* daemon's helper rather than any process of that
+/// name.
+///
+/// # Cost
+///
+/// One `read_dir` of `/proc` and one small file per entry, no network and no
+/// privilege — the same walk [`crate::orphan::daemons`] already performs, and
+/// cheap enough for the Status page's two-second poll.
+pub fn process(daemon: i32) -> HelperProcess {
+    let Ok(entries) = fs::read_dir("/proc") else {
+        return HelperProcess::Unseen;
+    };
+
+    let mut found = HelperProcess::Unseen;
+    for entry in entries.flatten() {
+        let Some(pid) = entry.file_name().to_str().and_then(|name| name.parse().ok()) else {
+            continue;
+        };
+        let Some(stat) = crate::proc::stat(pid) else {
+            continue;
+        };
+        if stat.ppid != daemon || stat.comm != HELPER_COMM {
+            continue;
+        }
+        // One live helper settles it, whatever else is lying around. The daemon
+        // reaps nothing it spawns, so a helper that died and was replaced
+        // within a single run leaves its corpse beside the working one, and
+        // reading that corpse as the verdict would report a healthy install
+        // broken.
+        if stat.state != crate::proc::ZOMBIE {
+            return HelperProcess::Running;
+        }
+        found = HelperProcess::Defunct;
+    }
+    found
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    use std::time::{Duration, Instant};
+
+    /// How long a spawned stand-in is given to become the program it was asked
+    /// to be, or to finish dying. Measured in microseconds either way; this is
+    /// the point past which the machine has a different problem.
+    const WITHIN: Duration = Duration::from_secs(5);
+
+    /// Poll `/proc` until this process matches, or give up.
+    fn settle(pid: i32, matches: impl Fn(&crate::proc::Stat) -> bool) -> bool {
+        let deadline = Instant::now() + WITHIN;
+        while Instant::now() < deadline {
+            if crate::proc::stat(pid).as_ref().is_some_and(&matches) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        false
+    }
+
+    /// Both verdicts, against a real process, found by the same walk the
+    /// application uses.
+    ///
+    /// A copy of `/bin/sh` named `adguard_root_he` stands in for the helper:
+    /// what [`process`] matches on is field 2 of `/proc/<pid>/stat` plus the
+    /// parent's pid, and a renamed shell supplies exactly that shape without
+    /// needing root or anything AdGuard owns. The name is the truncated
+    /// spelling deliberately — a file called `adguard_root_helper` would read
+    /// back cut to fifteen characters anyway, and writing it out in full here
+    /// would hide the very truncation [`HELPER_COMM`] exists for.
+    ///
+    /// The script is a **compound** command for the reason `orphan`'s
+    /// equivalent documents: given a single simple one a shell execs it in
+    /// place, taking the name we went to the trouble of choosing with it.
+    #[test]
+    fn finds_a_live_helper_and_then_its_corpse() {
+        let dir = std::env::temp_dir().join(format!("adguard-ui-helper-{}", std::process::id()));
+        fs::create_dir_all(&dir).expect("temp dir");
+        let stand_in = dir.join(HELPER_COMM);
+        fs::copy("/bin/sh", &stand_in).expect("copy /bin/sh");
+
+        let mut child = std::process::Command::new(&stand_in)
+            .args(["-c", "while :; do sleep 1; done"])
+            .spawn()
+            .expect("spawn");
+        let pid = child.id() as i32;
+        let us = std::process::id() as i32;
+
+        assert!(
+            settle(pid, |stat| stat.comm == HELPER_COMM),
+            "pid {pid} never became {HELPER_COMM}",
+        );
+        assert_eq!(process(us), HelperProcess::Running);
+
+        // SAFETY: a positive pid signals exactly that process. It is this
+        // process's own child, spawned above and not yet reaped, so the pid
+        // cannot have been reused by anything else.
+        unsafe {
+            libc::kill(pid, libc::SIGTERM);
+        }
+        // Deliberately not reaped yet: a zombie is what the bug leaves behind,
+        // and it is the state this whole check turns on.
+        assert!(
+            settle(pid, |stat| stat.state == crate::proc::ZOMBIE),
+            "pid {pid} never became a zombie",
+        );
+        assert_eq!(process(us), HelperProcess::Defunct);
+
+        child.wait().expect("reap");
+        // And once reaped there is nothing to see, which must not read as the
+        // corpse it no longer is.
+        assert_eq!(process(us), HelperProcess::Unseen);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// What the walk costs, because it runs beside every `status` on the Status
+    /// page's two-second poll.
+    ///
+    /// An upper bound with a wide margin, as every timing assertion in this
+    /// project is: a loaded machine must not fail it, and the number it guards
+    /// against is far larger than the measurement. Run it with `--nocapture` to
+    /// see the real figure.
+    ///
+    /// Pid 1 rather than a real daemon, deliberately — the cost is the walk of
+    /// `/proc` and one small read per entry, which is paid in full whatever the
+    /// verdict turns out to be.
+    #[test]
+    fn the_walk_is_cheap_enough_for_the_poll() {
+        // Ten, so a single unlucky scheduling decision cannot decide it.
+        let started = Instant::now();
+        for _ in 0..10 {
+            let _ = process(1);
+        }
+        let each = started.elapsed() / 10;
+        eprintln!("helper::process: {each:?} per call");
+        assert!(each < Duration::from_millis(100), "{each:?}");
+    }
+
+    /// A daemon with no helper under it is never reported as broken.
+    ///
+    /// pid 1 has plenty of children on any running system and none of them is
+    /// AdGuard's helper, so this is the false-alarm guard stated against a
+    /// process tree that certainly exists.
+    #[test]
+    fn an_unrelated_parent_yields_no_verdict() {
+        assert_eq!(process(1), HelperProcess::Unseen);
+    }
 
     /// All eight combinations, without touching a filesystem. The suid-without-
     /// root cell exists only here, for the reason `properties` documents.

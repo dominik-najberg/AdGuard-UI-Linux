@@ -1020,6 +1020,57 @@ A request through the proxy now writes **nothing** to `proxy.log`.
 
 Two limits on the above, stated rather than glossed. The mechanism inside AdGuard is inferred from its own log lines — what is measured is that the failure and the fix track the suid bit exactly. And this is one machine and one version (helper and CLI dated 27 May 2026); it is enough to stop the app claiming the helper matters only for auto mode, which was measurably false, and not enough to claim every version behaves this way.
 
+### And it can die hours later, with the suid bit set — where a restart *is* the cure
+
+**The subsection above and this one share every symptom and differ in the only thing that matters.** There, the helper never starts, because the shipped binary has no suid bit; a `restart` was run as a control and did not help. Here the helper is correctly `-rwsr-xr-x root root`, starts with the daemon, works for hours, and *then* dies. The daemon carries on serving, and a `restart` fixes it every time.
+
+The two are worth telling apart because the log lines are identical, so `Sequencer is not initialized` on its own does not say which one you are looking at. **What separates them is whether a restart helps** — and, before that, whether the helper was running at all since the daemon started.
+
+Measured on this machine on **2026-08-25**, `proxy_mode: 'auto'`, v1.4.13. The daemon started at 10:32 the previous day and the helper with it. At 03:01:39 the IPC between them desynchronised and never recovered:
+
+```text
+03:01:39 ERROR RootHelperClient on_packets_received: Failed to parse response
+03:01:39 INFO  RootHelperClient disconnect: Finished
+03:01:39 ERROR RootHelperClient send_command: Response not found for request ID 15938 after predicate returned true
+03:01:39 ERROR RootHelperClient send_command: Sequencer is not initialized
+03:01:39 WARN  StandaloneProxyServer onUdpListenerNewConnection: Failed to protect socket
+```
+
+Every root-helper command after that line failed for the remaining seventeen hours of the run. `ps` showed the same corpse the subsection above describes, `[adguard_root_he] <defunct>`, parented to a healthy-looking daemon — and `adguard-cli status` went on reporting a running proxy with system-wide filtering enabled throughout.
+
+**In `auto` mode the consequence is silence, which is what makes it dangerous.** The redirect stops, so nothing is filtered and nothing fails either: pages load normally and simply arrive with their ads. Contrast the unmet-suid case above, where the HTTP proxy 502s every request and the user cannot browse at all. Same corpse, opposite user experience.
+
+#### The daemon's own requests are the tell
+
+`access.log` records AdGuard's roughly-hourly internal requests as `"internal_proxy_client"`. They go through its own HTTP proxy, so they fail exactly when socket protection does. Over twelve days on this machine, counting real traffic as every line that is *not* one of those:
+
+| Day | Real traffic | internal 200 | internal 502 |
+| --- | ---: | ---: | ---: |
+| Fri 14.08 | **0** | **0** | 24 |
+| Sat 15.08 | 13,856 | 64 | 4 |
+| Sun 16.08 | 11,161 | 34 | 17 |
+| Mon 17.08 | **12** | **0** | 17 |
+| Tue 18.08 | 14,587 | 60 | 23 |
+| Wed 19.08 | **2** | **0** | 16 |
+| Thu 20.08 | 32,220 | 73 | 18 |
+| Fri 21.08 | **5** | **0** | 14 |
+| Sat 22.08 | 0 | 0 | 0 |
+| Sun 23.08 | 2,689 | 32 | 0 |
+| Mon 24.08 | 40,780 | 232 | 0 |
+| Tue 25.08 | 8,058 | 41 | 27 |
+
+Zero internal 200s coincides with zero real traffic on every one of the twelve days, without exception. **The discriminator is the absence of successes, not the presence of failures** — 16.08 and 18.08 each carry a score of 502s alongside a fully filtered day, so "recent requests are failing" is not a usable rule and "nothing has succeeded this run" is.
+
+Three states are distinguishable, which is what makes the signal usable rather than merely suggestive: a powered-off machine logs no internal entries at all (22.08), a running and filtering one logs some 200s, and a bypassed one logs entries of which none is a 200. The requests are AdGuard's own, so none of this confounds with an idle user.
+
+**Five of the twelve days were spent unprotected** — 14, 17, 19, 21 and 25 August. `Sequencer is not initialized` appears in `proxy.log` on fifteen separate days. This is frequent, not exotic.
+
+#### It is upstream's, it is fixed, and the fix is not on the release channel
+
+[`AdguardTeam/AdGuardCLI#136`](https://github.com/AdguardTeam/AdGuardCLI/issues/136) is the same failure reported on v1.4.11, with the same `[adguard_root_he] <defunct>` in the same `ps` output, closed *Resolution: Done* on 2026-08-01 with a fix bound for the nightly channel. Asked to narrow it down, AdGuard's engineer requested exactly one thing from the reporter: the "presence/absence of running `adguard_root_helper` process".
+
+v1.4.13 was published **2026-05-28**, three months before that fix, and it is the newest build on the release channel. So an install tracking `update_channel: 'release'` still has this, which is what justifies the wrapper carrying a check for it at all. See `architecture.md` §3.
+
 ### `config set proxy_mode auto` does not check anything
 
 The measurement the auto-mode design actually rests on, and it is the opposite of what the three strings above suggest. With the helper in its shipped state — `owned_by_root=false, has_suid=false, is_executable=true` — the write **succeeds**:

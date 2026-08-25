@@ -64,8 +64,8 @@ use std::time::Duration;
 
 use adguard_core::config::key;
 use adguard_core::{
-    orphan, Activation, Autostart, Catalogue, Cli, Config, Daemon, FilterSet, License, ProxyStatus,
-    RootHelper, Toggle,
+    helper, orphan, Activation, Autostart, Catalogue, Cli, Config, Daemon, FilterSet, HelperProcess,
+    License, ProxyStatus, RootHelper, Toggle,
 };
 use adw::prelude::*;
 use gtk::glib;
@@ -144,6 +144,29 @@ enum Runtime {
     /// Before the first reading comes back.
     Unknown,
     Up,
+    /// Running, and not filtering anything.
+    ///
+    /// `status` reports what is **configured and listening**, never whether
+    /// traffic reaches it, so this state and [`Self::Up`] are the same reading
+    /// of the same command. What separates them is a second fact `status` does
+    /// not carry: AdGuard's root helper has died, and without it nothing is
+    /// redirected into the proxy at all. See [`adguard_core::HelperProcess`] for
+    /// the measurement and for why only a helper we can positively see to be
+    /// dead may land here.
+    ///
+    /// The distinction is worth a state of its own because the failure is
+    /// **silent and deceptive**: the panel would otherwise say "Protection is
+    /// on" over a browser full of ads, which is the one thing this page exists
+    /// not to do.
+    ///
+    /// `redirected` carries [`Config::redirects_traffic`], because a dead
+    /// helper does two different things and the panel must not describe the
+    /// wrong one. In `auto` mode the redirect stops and nothing is filtered at
+    /// all. In `manual` — the CLI's default — the HTTP proxy answers 502 while
+    /// the SOCKS5 proxy beside it serves normally, so a user reaching AdGuard
+    /// over SOCKS5 is still filtered and must not be told otherwise, nor sent
+    /// to clear a cache that was never filled unfiltered.
+    Bypassed { redirected: bool },
     Down,
     Unreadable { message: String },
 }
@@ -225,7 +248,7 @@ pub struct StatusPage {
     /// The tray renders the same runtime state this page does, and this is how
     /// it gets it — rather than polling `status` itself, which is what a second
     /// process had to do.
-    observer: RefCell<Option<Box<dyn Fn(&ProxyStatus)>>>,
+    observer: RefCell<Option<Box<dyn Fn(&ProxyStatus, bool)>>>,
 
     /// Notified when a figure or a row here is clicked to go somewhere else.
     ///
@@ -665,10 +688,16 @@ impl StatusPage {
             move || {
                 let status = read_status(&cli);
                 let licence = read_licence(&cli);
-                (status, licence)
+                // Not a third `adguard-cli`, so it races nothing the note above
+                // is about: a walk of `/proc` and no subprocess at all.
+                let helper = match &status {
+                    Ok(status) if status.running => read_helper(&cli),
+                    _ => HelperProcess::Unseen,
+                };
+                (status, licence, helper, read_redirected(helper))
             },
-            move |(status, licence)| {
-                this.settle_status(status);
+            move |(status, licence, helper, redirected)| {
+                this.settle_status(status, helper, redirected);
                 match licence {
                     Ok(licence) => this.licence_read(licence),
                     Err((unlicensed, message)) => this.licence_refused(unlicensed, message),
@@ -752,15 +781,31 @@ impl StatusPage {
         let cli = self.cli.clone();
         let this = self.clone();
         worker::run(
-            move || read_status(&cli),
-            move |result| this.settle_status(result),
+            move || {
+                let status = read_status(&cli);
+                // Only worth walking `/proc` for when `status` claims a proxy
+                // to walk it for. A stopped proxy has no helper to miss, and
+                // the walk would be a few hundred file reads every two seconds
+                // for an answer nothing would render.
+                let helper = match &status {
+                    Ok(status) if status.running => read_helper(&cli),
+                    _ => HelperProcess::Unseen,
+                };
+                (status, helper, read_redirected(helper))
+            },
+            move |(status, helper, redirected)| this.settle_status(status, helper, redirected),
         );
     }
 
     /// Render one `status` reading, and notice when it contradicts the licence.
-    fn settle_status(self: &Rc<Self>, result: Result<ProxyStatus, (bool, String)>) {
+    fn settle_status(
+        self: &Rc<Self>,
+        result: Result<ProxyStatus, (bool, String)>,
+        helper: HelperProcess,
+        redirected: bool,
+    ) {
         match result {
-            Ok(status) => self.apply(&status),
+            Ok(status) => self.apply(&status, helper, redirected),
             Err((unlicensed, message)) => {
                 // Kept in the panel rather than a toast: a failing `status`
                 // repeats every two seconds and would bury the UI in toasts.
@@ -787,7 +832,18 @@ impl StatusPage {
     }
 
     /// Report every `status` read to `observer` — the tray's source of state.
-    pub fn connect_status(&self, observer: impl Fn(&ProxyStatus) + 'static) {
+    ///
+    /// The second argument is whether the proxy is running and **bypassed**: a
+    /// root helper positively seen to be dead, so nothing reaches the filters.
+    /// It is passed separately because [`ProxyStatus`] cannot carry it —
+    /// `status` reports what is configured and listening and nothing else, and
+    /// that gap is the whole reason this page has a `Bypassed` state.
+    ///
+    /// Handing the tray only `ProxyStatus` was this check's blind spot: in
+    /// `--background`, which the autostart entry runs at login, the tray is the
+    /// only surface there is, and it would have gone on showing a healthy icon
+    /// for the whole session.
+    pub fn connect_status(&self, observer: impl Fn(&ProxyStatus, bool) + 'static) {
         self.observer.replace(Some(Box::new(observer)));
     }
 
@@ -828,6 +884,13 @@ impl StatusPage {
 
     pub fn stop_proxy(self: &Rc<Self>) {
         self.act(Action::Stop);
+    }
+
+    /// Restart the proxy, as the tray's "Restart proxy" item does — the item
+    /// that only appears while the helper is dead, because a restart is the
+    /// only thing measured to bring it back.
+    pub fn restart_proxy(self: &Rc<Self>) {
+        self.act(Action::Restart);
     }
 
     /// Clear a wedged leftover proxy process left behind by a previous session.
@@ -961,11 +1024,16 @@ impl StatusPage {
         }
     }
 
-    fn apply(&self, status: &ProxyStatus) {
-        self.set_runtime(if status.running {
-            Runtime::Up
-        } else {
-            Runtime::Down
+    fn apply(&self, status: &ProxyStatus, helper: HelperProcess, redirected: bool) {
+        // The contradiction, and only the contradiction: a proxy `status` calls
+        // running whose root helper we can positively see to be dead. Neither
+        // half means anything alone — a healthy install has a running proxy,
+        // and an unknown helper is the answer on any machine whose process tree
+        // this application does not recognise.
+        self.set_runtime(match (status.running, helper) {
+            (true, HelperProcess::Defunct) => Runtime::Bypassed { redirected },
+            (true, _) => Runtime::Up,
+            (false, _) => Runtime::Down,
         });
 
         set_endpoint(
@@ -986,11 +1054,23 @@ impl StatusPage {
         );
 
         self.manual_dns.set(status.manual_dns_proxy);
-        self.system_filtering.set(status.system_wide_filtering);
+        // Measured: with the redirect gone this setting reads on and does
+        // nothing, so a green "Enabled" beside a panel reporting a bypass is the
+        // one place two things on this page could be read as disagreeing.
+        //
+        // Narrowed to `auto` and to this row on purpose. It is the only setting
+        // here a dead helper has been measured to stop — the two DNS rows are
+        // left alone because nothing has measured what it does to them, and
+        // guessing at that is the mistake `Bypassed` was given a mode to avoid.
+        if matches!(&*self.runtime.borrow(), Runtime::Bypassed { redirected: true }) {
+            self.system_filtering.set_stopped(status.system_wide_filtering);
+        } else {
+            self.system_filtering.set(status.system_wide_filtering);
+        }
         self.system_dns.set(status.system_dns_filtering);
 
         if let Some(observer) = self.observer.borrow().as_ref() {
-            observer(status);
+            observer(status, matches!(&*self.runtime.borrow(), Runtime::Bypassed { .. }));
         }
     }
 
@@ -1005,7 +1085,11 @@ impl StatusPage {
     /// showing does not license an action.
     fn primary_action(&self) -> Option<Action> {
         match &*self.runtime.borrow() {
-            Runtime::Up => Some(Action::Stop),
+            // Stopping is what the button offers in both, because in both the
+            // proxy is up and stopping it is what that means. The *cure* for a
+            // bypass is the Restart beside it, which is why that button is
+            // shown in this state too.
+            Runtime::Up | Runtime::Bypassed { .. } => Some(Action::Stop),
             Runtime::Down => Some(Action::Start),
             // The button is insensitive in both, so this is belt-and-braces
             // rather than a reachable path — and it is the right answer if a
@@ -1059,6 +1143,44 @@ impl StatusPage {
                     .to_owned(),
                 Some(START_BUTTON),
             ),
+            // Not a shade of `Up`. The proxy really is running, so the panel
+            // must not say "off" either — what has stopped is the traffic
+            // reaching it, and the wording is the only thing that can carry
+            // that distinction.
+            //
+            // The cache sentence is not padding. Every page loaded while this
+            // was true was fetched unfiltered and cached that way, so a restart
+            // fixes the next request and leaves the ads already on disk —
+            // measured on 2026-08-25, where a restart alone left 9gag serving
+            // ads from Chrome's cache until it was cleared. A user told only to
+            // restart would reasonably conclude the restart had not worked.
+            Runtime::Bypassed { redirected } => (
+                "dialog-warning-symbolic",
+                Some(style::HERO_OFF),
+                Some("NOT FILTERING"),
+                Some(style::BADGE_OFF),
+                if *redirected {
+                    "Protection is not reaching your traffic"
+                } else {
+                    "The HTTP proxy has stopped working"
+                },
+                if *redirected {
+                    // `auto`: the redirect is gone, so everything reaches the
+                    // internet untouched and the cache fills with it.
+                    "The proxy is running, but AdGuard's root helper has stopped and \
+                     nothing is being filtered. Restart to recover — pages already \
+                     loaded may keep their ads until you clear the browser's cache."
+                } else {
+                    // `manual`: loud rather than silent, and only half the
+                    // endpoints. Measured (contract §8) — so no cache advice,
+                    // because nothing loaded unfiltered to be cached.
+                    "The proxy is running, but AdGuard's root helper has stopped and \
+                     requests through the HTTP proxy now fail. The SOCKS5 proxy is \
+                     unaffected. Restart to recover."
+                }
+                .to_owned(),
+                Some(STOP_BUTTON),
+            ),
             // The CLI's own sentence, verbatim: it names the reason — a lapsed
             // licence, a timeout — where a sentence of ours could only say that
             // something went wrong.
@@ -1083,6 +1205,9 @@ impl StatusPage {
                 Runtime::Unknown => Some("dim-label"),
                 Runtime::Up => Some("success"),
                 Runtime::Down => Some("warning"),
+                // Red rather than the amber a deliberate stop gets. This one is
+                // not a state the user chose.
+                Runtime::Bypassed { .. } => Some("error"),
                 Runtime::Unreadable { .. } => Some("error"),
             },
         );
@@ -1128,9 +1253,12 @@ impl StatusPage {
             None => self.primary.set_visible(false),
         }
 
-        self.restart
-            .set_visible(matches!(&*runtime, Runtime::Up));
-        self.restart.set_sensitive(matches!(&*runtime, Runtime::Up));
+        // Shown in `Bypassed` as well as `Up`, and for a better reason than
+        // symmetry: a restart is the *only* thing measured to clear a bypass,
+        // so the state that reports one has to offer it.
+        let restartable = matches!(&*runtime, Runtime::Up | Runtime::Bypassed { .. });
+        self.restart.set_visible(restartable);
+        self.restart.set_sensitive(restartable);
     }
 
     // ---- the three figures ----
@@ -1404,6 +1532,40 @@ impl StatusPage {
 /// this page — see [`StatusPage::settle_status`].
 fn read_status(cli: &Cli) -> Result<ProxyStatus, (bool, String)> {
     cli.status().map_err(classify)
+}
+
+/// What `/proc` says about the root helper of this install's proxy daemon.
+///
+/// Runs on the worker thread beside `status`, because it is a walk of `/proc`
+/// on a two-second timer and the main loop is drawing.
+///
+/// **Exactly one daemon, or no opinion.** `status` says something is running;
+/// with none found, or several, `/proc` cannot say which process it meant, and
+/// a helper verdict read off the wrong one would be a guess. That is the same
+/// pairing [`orphan`] documents for the mirror-image bug — the reading and the
+/// process tree have to agree before either is acted on.
+fn read_helper(cli: &Cli) -> HelperProcess {
+    match orphan::daemons(cli.binary()).as_slice() {
+        [daemon] => helper::process(daemon.pid()),
+        _ => HelperProcess::Unseen,
+    }
+}
+
+/// Does this install redirect traffic into the proxy, rather than wait on its
+/// ports?
+///
+/// Read **only** when the helper is dead, which is the only state whose wording
+/// turns on it. `proxy.yaml` is nine kilobytes of YAML and this page's poll is
+/// on a two-second timer; parsing it every tick to answer a question nothing
+/// asks the rest of the time would be a real cost for no reading.
+///
+/// That it is read at the moment it is needed, rather than cached from
+/// start-up, is what keeps it honest: `proxy_mode` is a key the CLI invites the
+/// user to change by hand, and a panel describing the mode they used to be in
+/// would be worse than one that said nothing.
+fn read_redirected(helper: HelperProcess) -> bool {
+    helper == HelperProcess::Defunct
+        && Config::load().is_ok_and(|config| config.redirects_traffic())
 }
 
 /// Read the licence, keeping the one distinction that matters.
@@ -1794,20 +1956,45 @@ impl StateRow {
     /// and "Disabled" are both spelled out, so the row reads the same to someone
     /// who cannot tell the two greens apart.
     fn set(&self, on: bool) {
-        self.value.set_label(on_off(on));
+        self.render(on, true);
+    }
+
+    /// The same row, for a setting that reads on and is not doing anything.
+    ///
+    /// Only for something **measured** to have stopped it — see the call site.
+    /// The word "Enabled" stays, because it is what the config says and
+    /// reporting the config is this row's whole job; what is added is that it is
+    /// not currently in effect.
+    ///
+    /// Added in words rather than by going grey, and that is the rule above
+    /// rather than a preference: dimming alone would leave the fact carried by
+    /// colour and nothing else, so a reader who cannot tell the greens apart
+    /// would see "Enabled" and learn none of it. Colour still moves, and still
+    /// says the same thing the word does.
+    fn set_stopped(&self, on: bool) {
+        self.render(on, false);
+    }
+
+    fn render(&self, on: bool, in_effect: bool) {
+        self.value.set_label(state_word(on, in_effect));
         swap_class(
             &self.value,
             &["success", "dim-label"],
-            Some(if on { "success" } else { "dim-label" }),
+            Some(if on && in_effect { "success" } else { "dim-label" }),
         );
     }
 }
 
-fn on_off(value: bool) -> &'static str {
-    if value {
-        "Enabled"
-    } else {
-        "Disabled"
+/// What a state row says about a setting.
+///
+/// `in_effect` is only ever false for a setting that is on: a disabled setting
+/// is not doing anything either way, and "Disabled, not in effect" would be
+/// saying the same thing twice.
+fn state_word(on: bool, in_effect: bool) -> &'static str {
+    match (on, in_effect) {
+        (true, true) => "Enabled",
+        (true, false) => "Enabled, not in effect",
+        (false, _) => "Disabled",
     }
 }
 
@@ -1855,4 +2042,34 @@ fn row(title: &str, subtitle: &str) -> adw::ActionRow {
     row.set_title(title);
     row.set_subtitle(subtitle);
     row
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The rule `StateRow` is written to: the word carries the fact, so the row
+    /// still reads correctly with every style class stripped off it.
+    ///
+    /// A green "Enabled" beside a panel reporting a bypass is the contradiction
+    /// this exists to remove, and removing it by going grey alone would have put
+    /// the whole of the correction into a colour.
+    #[test]
+    fn a_setting_that_is_on_and_doing_nothing_says_both() {
+        assert_eq!(state_word(true, true), "Enabled");
+        assert_eq!(state_word(true, false), "Enabled, not in effect");
+
+        // Still "Enabled" — the row reports the config, and the config is on.
+        assert!(state_word(true, false).starts_with("Enabled"));
+        // And the addition is words, not punctuation or a colour.
+        assert_ne!(state_word(true, false), state_word(true, true));
+    }
+
+    /// "Disabled, not in effect" would be saying the same thing twice, so a
+    /// setting that is off reads the same either way.
+    #[test]
+    fn a_setting_that_is_off_reads_the_same_either_way() {
+        assert_eq!(state_word(false, true), "Disabled");
+        assert_eq!(state_word(false, false), "Disabled");
+    }
 }
