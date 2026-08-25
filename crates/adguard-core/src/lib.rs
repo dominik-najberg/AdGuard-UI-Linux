@@ -15,6 +15,8 @@ pub mod locale;
 pub mod model;
 pub mod orphan;
 pub mod paths;
+// Private: a `/proc` parse two modules here share, and nothing outside needs.
+mod proc;
 pub mod release;
 pub mod trust;
 pub mod userscripts;
@@ -25,7 +27,7 @@ pub use autostart::Autostart;
 pub use browser::BrowserIntegration;
 pub use cli::{Activation, Applied, Cli, Error};
 pub use config::{AddressPlan, AuthState, Config, DnsListenPort, Watch};
-pub use helper::RootHelper;
+pub use helper::{HelperProcess, RootHelper};
 pub use orphan::Daemon;
 pub use release::{Release, Standing};
 pub use trust::CaTrust;

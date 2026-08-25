@@ -64,8 +64,8 @@ use std::time::Duration;
 
 use adguard_core::config::key;
 use adguard_core::{
-    orphan, Activation, Autostart, Catalogue, Cli, Config, Daemon, FilterSet, License, ProxyStatus,
-    RootHelper, Toggle,
+    helper, orphan, Activation, Autostart, Catalogue, Cli, Config, Daemon, FilterSet, HelperProcess,
+    License, ProxyStatus, RootHelper, Toggle,
 };
 use adw::prelude::*;
 use gtk::glib;
@@ -144,6 +144,21 @@ enum Runtime {
     /// Before the first reading comes back.
     Unknown,
     Up,
+    /// Running, and not filtering anything.
+    ///
+    /// `status` reports what is **configured and listening**, never whether
+    /// traffic reaches it, so this state and [`Self::Up`] are the same reading
+    /// of the same command. What separates them is a second fact `status` does
+    /// not carry: AdGuard's root helper has died, and without it nothing is
+    /// redirected into the proxy at all. See [`adguard_core::HelperProcess`] for
+    /// the measurement and for why only a helper we can positively see to be
+    /// dead may land here.
+    ///
+    /// The distinction is worth a state of its own because the failure is
+    /// **silent and deceptive**: the panel would otherwise say "Protection is
+    /// on" over a browser full of ads, which is the one thing this page exists
+    /// not to do.
+    Bypassed,
     Down,
     Unreadable { message: String },
 }
@@ -665,10 +680,16 @@ impl StatusPage {
             move || {
                 let status = read_status(&cli);
                 let licence = read_licence(&cli);
-                (status, licence)
+                // Not a third `adguard-cli`, so it races nothing the note above
+                // is about: a walk of `/proc` and no subprocess at all.
+                let helper = match &status {
+                    Ok(status) if status.running => read_helper(&cli),
+                    _ => HelperProcess::Unseen,
+                };
+                (status, licence, helper)
             },
-            move |(status, licence)| {
-                this.settle_status(status);
+            move |(status, licence, helper)| {
+                this.settle_status(status, helper);
                 match licence {
                     Ok(licence) => this.licence_read(licence),
                     Err((unlicensed, message)) => this.licence_refused(unlicensed, message),
@@ -752,15 +773,30 @@ impl StatusPage {
         let cli = self.cli.clone();
         let this = self.clone();
         worker::run(
-            move || read_status(&cli),
-            move |result| this.settle_status(result),
+            move || {
+                let status = read_status(&cli);
+                // Only worth walking `/proc` for when `status` claims a proxy
+                // to walk it for. A stopped proxy has no helper to miss, and
+                // the walk would be a few hundred file reads every two seconds
+                // for an answer nothing would render.
+                let helper = match &status {
+                    Ok(status) if status.running => read_helper(&cli),
+                    _ => HelperProcess::Unseen,
+                };
+                (status, helper)
+            },
+            move |(status, helper)| this.settle_status(status, helper),
         );
     }
 
     /// Render one `status` reading, and notice when it contradicts the licence.
-    fn settle_status(self: &Rc<Self>, result: Result<ProxyStatus, (bool, String)>) {
+    fn settle_status(
+        self: &Rc<Self>,
+        result: Result<ProxyStatus, (bool, String)>,
+        helper: HelperProcess,
+    ) {
         match result {
-            Ok(status) => self.apply(&status),
+            Ok(status) => self.apply(&status, helper),
             Err((unlicensed, message)) => {
                 // Kept in the panel rather than a toast: a failing `status`
                 // repeats every two seconds and would bury the UI in toasts.
@@ -961,11 +997,16 @@ impl StatusPage {
         }
     }
 
-    fn apply(&self, status: &ProxyStatus) {
-        self.set_runtime(if status.running {
-            Runtime::Up
-        } else {
-            Runtime::Down
+    fn apply(&self, status: &ProxyStatus, helper: HelperProcess) {
+        // The contradiction, and only the contradiction: a proxy `status` calls
+        // running whose root helper we can positively see to be dead. Neither
+        // half means anything alone — a healthy install has a running proxy,
+        // and an unknown helper is the answer on any machine whose process tree
+        // this application does not recognise.
+        self.set_runtime(match (status.running, helper) {
+            (true, HelperProcess::Defunct) => Runtime::Bypassed,
+            (true, _) => Runtime::Up,
+            (false, _) => Runtime::Down,
         });
 
         set_endpoint(
@@ -1005,7 +1046,11 @@ impl StatusPage {
     /// showing does not license an action.
     fn primary_action(&self) -> Option<Action> {
         match &*self.runtime.borrow() {
-            Runtime::Up => Some(Action::Stop),
+            // Stopping is what the button offers in both, because in both the
+            // proxy is up and stopping it is what that means. The *cure* for a
+            // bypass is the Restart beside it, which is why that button is
+            // shown in this state too.
+            Runtime::Up | Runtime::Bypassed => Some(Action::Stop),
             Runtime::Down => Some(Action::Start),
             // The button is insensitive in both, so this is belt-and-braces
             // rather than a reachable path — and it is the right answer if a
@@ -1059,6 +1104,29 @@ impl StatusPage {
                     .to_owned(),
                 Some(START_BUTTON),
             ),
+            // Not a shade of `Up`. The proxy really is running, so the panel
+            // must not say "off" either — what has stopped is the traffic
+            // reaching it, and the wording is the only thing that can carry
+            // that distinction.
+            //
+            // The cache sentence is not padding. Every page loaded while this
+            // was true was fetched unfiltered and cached that way, so a restart
+            // fixes the next request and leaves the ads already on disk —
+            // measured on 2026-08-25, where a restart alone left 9gag serving
+            // ads from Chrome's cache until it was cleared. A user told only to
+            // restart would reasonably conclude the restart had not worked.
+            Runtime::Bypassed => (
+                "dialog-warning-symbolic",
+                Some(style::HERO_OFF),
+                Some("NOT FILTERING"),
+                Some(style::BADGE_OFF),
+                "Protection is not reaching your traffic",
+                "The proxy is running, but AdGuard's root helper has stopped and nothing \
+                 is being filtered. Restart to recover — pages already loaded may keep \
+                 their ads until you clear the browser's cache."
+                    .to_owned(),
+                Some(STOP_BUTTON),
+            ),
             // The CLI's own sentence, verbatim: it names the reason — a lapsed
             // licence, a timeout — where a sentence of ours could only say that
             // something went wrong.
@@ -1083,6 +1151,9 @@ impl StatusPage {
                 Runtime::Unknown => Some("dim-label"),
                 Runtime::Up => Some("success"),
                 Runtime::Down => Some("warning"),
+                // Red rather than the amber a deliberate stop gets. This one is
+                // not a state the user chose.
+                Runtime::Bypassed => Some("error"),
                 Runtime::Unreadable { .. } => Some("error"),
             },
         );
@@ -1128,9 +1199,12 @@ impl StatusPage {
             None => self.primary.set_visible(false),
         }
 
-        self.restart
-            .set_visible(matches!(&*runtime, Runtime::Up));
-        self.restart.set_sensitive(matches!(&*runtime, Runtime::Up));
+        // Shown in `Bypassed` as well as `Up`, and for a better reason than
+        // symmetry: a restart is the *only* thing measured to clear a bypass,
+        // so the state that reports one has to offer it.
+        let restartable = matches!(&*runtime, Runtime::Up | Runtime::Bypassed);
+        self.restart.set_visible(restartable);
+        self.restart.set_sensitive(restartable);
     }
 
     // ---- the three figures ----
@@ -1404,6 +1478,23 @@ impl StatusPage {
 /// this page — see [`StatusPage::settle_status`].
 fn read_status(cli: &Cli) -> Result<ProxyStatus, (bool, String)> {
     cli.status().map_err(classify)
+}
+
+/// What `/proc` says about the root helper of this install's proxy daemon.
+///
+/// Runs on the worker thread beside `status`, because it is a walk of `/proc`
+/// on a two-second timer and the main loop is drawing.
+///
+/// **Exactly one daemon, or no opinion.** `status` says something is running;
+/// with none found, or several, `/proc` cannot say which process it meant, and
+/// a helper verdict read off the wrong one would be a guess. That is the same
+/// pairing [`orphan`] documents for the mirror-image bug — the reading and the
+/// process tree have to agree before either is acted on.
+fn read_helper(cli: &Cli) -> HelperProcess {
+    match orphan::daemons(cli.binary()).as_slice() {
+        [daemon] => helper::process(daemon.pid()),
+        _ => HelperProcess::Unseen,
+    }
 }
 
 /// Read the licence, keeping the one distinction that matters.
