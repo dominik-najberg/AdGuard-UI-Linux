@@ -1825,12 +1825,11 @@ fn strip_ansi(raw: &[u8]) -> String {
 /// You need to activate an AdGuard license to use this command
 /// ```
 ///
-/// Matched on two loose tokens rather than that sentence. An exact comparison
-/// would break on any rewording — including the British spelling this codebase
-/// uses in its own prose — and the failure mode of missing it is the bug being
-/// fixed here, back again. The tokens are specific enough that a genuinely
-/// malformed command line will not trip them: the CLI's usage errors name the
-/// option or the value, not activation.
+/// Match the two tokens in the first non-empty line, where the CLI puts the
+/// complaint. Searching the whole output also matches the usage listing's
+/// `activate` command, turning an unrelated error (or just help beginning with
+/// the binary path) into a false activation requirement. Keep the loose tokens
+/// within that sentence to tolerate rewording and the British spelling.
 ///
 /// # Only two of its twenty lines are worth showing
 ///
@@ -1848,13 +1847,11 @@ fn strip_ansi(raw: &[u8]) -> String {
 /// complaint is joined to the advice. Keeping the whole thing would technically
 /// be "the CLI's own wording" and would render as an unreadable blob.
 fn licence_complaint(stderr: &str) -> Option<String> {
-    let haystack = stderr.to_ascii_lowercase();
+    let complaint = first_line(stderr)?;
+    let haystack = complaint.to_ascii_lowercase();
     if !(haystack.contains("licen") && haystack.contains("activat")) {
         return None;
     }
-
-    let mut lines = stderr.lines().map(str::trim).filter(|line| !line.is_empty());
-    let complaint = lines.next()?;
 
     // The advice names the command to run. Recognised by its own two tokens
     // rather than its exact phrasing, for the same reason as above.
@@ -1868,7 +1865,7 @@ fn licence_complaint(stderr: &str) -> Option<String> {
         // carries no terminal punctuation and inventing some would be
         // editing its words rather than arranging them.
         Some(advice) if advice != complaint => format!("{complaint} — {advice}"),
-        _ => complaint.to_owned(),
+        _ => complaint,
     })
 }
 
@@ -2832,6 +2829,34 @@ mod tests {
             "the usage dump leaked into a row subtitle: {message}"
         );
         assert_eq!(message.lines().count(), 1, "must fit one subtitle: {message}");
+    }
+
+    #[test]
+    fn a_usage_listing_does_not_require_activation() {
+        // The screenshot's State row contained only the binary path: the help
+        // listing was classified as a licence refusal because of `activate`
+        // further down. Exercise both help alone and an unrelated error above
+        // it through the process wrapper, not just the message helper.
+        let usage = UNLICENSED_FULL
+            .strip_prefix(UNLICENSED)
+            .unwrap()
+            .split("You can activate")
+            .next()
+            .unwrap()
+            .trim();
+        for diagnostic in ["", "A subcommand is required\n", "Unknown option: --nope\n"] {
+            let stderr = format!("{diagnostic}{usage}");
+            let err = cli_for("/bin/sh")
+                .run_within(
+                    &["-c", "printf '%s\\n' \"$1\" >&2; exit 1", "sh", &stderr],
+                    Duration::from_secs(10),
+                )
+                .expect_err("exit 1 is a failure");
+            assert!(
+                matches!(err, Error::BadInvocation { .. }),
+                "help must not offer activation: {err:?}"
+            );
+        }
     }
 
     /// The match is on two loose tokens, so check it is neither too narrow to

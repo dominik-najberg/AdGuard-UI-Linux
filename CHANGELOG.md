@@ -11,6 +11,27 @@ This file is the one changelog.
 
 ---
 
+## 1.6.1 — 18 September 2026
+
+### Fix a misleading activation prompt
+
+The Status page could show **Activate…** and a program path as the licence state
+even when the licence was active. The error reader searched the CLI's entire
+help output for licence and activation wording, so the listed `activate`
+command could turn an unrelated failure into an activation requirement.
+
+Only the actual error message is checked now. An unrelated failed licence read
+is reported as an error without offering activation. Regression tests cover
+help output on its own and following an unrelated error.
+
+### Keep licence actions inside the card
+
+**Activate…** and **Finish activation** now sit on the right of the licence's
+State row, vertically centred beside its explanation, instead of floating below
+the card. Active licences continue to show neither button.
+
+---
+
 ## 1.6.0 — 26 August 2026
 
 ### The DNS Security filters could not be switched on either

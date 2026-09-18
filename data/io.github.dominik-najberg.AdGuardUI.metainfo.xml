@@ -53,6 +53,16 @@
     application is its first release.
   -->
   <releases>
+    <release version="1.6.1" type="stable" date="2026-09-18">
+      <url type="details">https://github.com/dominik-najberg/AdGuard-UI-Linux/releases/tag/v1.6.1</url>
+      <description>
+        <p>Fix the licence prompt and improve its layout on the Status page:</p>
+        <ul>
+          <li>CLI help output is no longer mistaken for a licence activation requirement after an unrelated error.</li>
+          <li>Activate and Finish activation buttons sit inside the licence State row instead of below the card.</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.6.0" type="stable" date="2026-08-26">
       <url type="details">https://github.com/dominik-najberg/AdGuard-UI-Linux/releases/tag/v1.6.0</url>
       <description>

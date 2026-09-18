@@ -503,20 +503,19 @@ impl StatusPage {
         let activate = gtk::Button::with_label("Activate…");
         activate.add_css_class("suggested-action");
         let finish = gtk::Button::with_label("Finish activation");
-        let licence_buttons = gtk::Box::builder()
-            .orientation(gtk::Orientation::Horizontal)
-            .spacing(12)
-            .halign(gtk::Align::Center)
-            .build();
+        finish.add_css_class("suggested-action");
+        // Keep each action inside the row whose state it changes. Only one is
+        // visible at a time, and centring vertically preserves a compact button
+        // when the explanatory subtitle wraps.
         for b in [&activate, &finish] {
             b.set_visible(false);
-            licence_buttons.append(b);
+            b.set_valign(gtk::Align::Center);
+            licence_state.add_suffix(b);
         }
 
         for r in [&licence_state, &licence_owner, &licence_key, &licence_link] {
             licence_group.add(r);
         }
-        licence_group.add(&licence_buttons);
 
         // ---- the application, which is not the protection ----
         //
