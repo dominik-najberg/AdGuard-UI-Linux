@@ -408,7 +408,7 @@ impl SetupAssistant {
     /// pointed at a state this app has just created.
     fn show_restored(self: &Rc<Self>) {
         let status = adw::StatusPage::builder()
-            .icon_name("emblem-ok-symbolic")
+            .icon_name("object-select-symbolic")
             .title("Settings restored")
             .description(
                 "Your settings are back. Two things a backup cannot carry, both of which \
@@ -776,7 +776,7 @@ impl SetupAssistant {
 
         let status = adw::StatusPage::builder()
             .icon_name(if all_landed {
-                "emblem-ok-symbolic"
+                "object-select-symbolic"
             } else {
                 "dialog-warning-symbolic"
             })
