@@ -11,7 +11,7 @@ This file is the one changelog.
 
 ---
 
-## Unreleased
+## 1.7.0 — 30 September 2026
 
 ### An Activity page
 
