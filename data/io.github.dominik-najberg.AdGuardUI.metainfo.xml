@@ -53,6 +53,18 @@
     application is its first release.
   -->
   <releases>
+    <release version="1.7.0" type="stable" date="2026-09-30">
+      <url type="details">https://github.com/dominik-najberg/AdGuard-UI-Linux/releases/tag/v1.7.0</url>
+      <description>
+        <p>Two new pages, for what AdGuard is doing and for why something is wrong:</p>
+        <ul>
+          <li>Activity shows requests, blocked and modified counts and traffic for today, 7 days or 30 days, with a chart and the most blocked sites, most requested sites, top rules and apps. Only counts are kept, on this computer.</li>
+          <li>Diagnostics lists every check the application makes, one line each, says how to fix each problem and links to the page with the fix, and copies a report safe to post publicly.</li>
+          <li>The certificate stores Firefox and Chrome keep of their own are checked too, and the Protection page shows AdGuard's own command for any browser that does not trust the certificate.</li>
+          <li>Folders other apps create for browsers that are not installed are no longer counted as browsers.</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.6.1" type="stable" date="2026-09-18">
       <url type="details">https://github.com/dominik-najberg/AdGuard-UI-Linux/releases/tag/v1.6.1</url>
       <description>

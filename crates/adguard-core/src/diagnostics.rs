@@ -44,12 +44,14 @@
 //!
 //! [issue #21]: https://github.com/dominik-najberg/AdGuard-UI-Linux/issues/21
 
+use std::borrow::Cow;
 use std::io;
 use std::path::PathBuf;
 use std::time::SystemTime;
 
 use crate::browser::{self, BrowserIntegration};
 use crate::config::key;
+use crate::nss::{BrowserStores, Store, StoreState};
 use crate::{
     access, helper, orphan, CaTrust, Cli, Config, Error, Filtering, HelperProcess, ProxyStatus,
     RootHelper,
@@ -122,7 +124,9 @@ pub struct Remedy {
 /// One line of the report.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Finding {
-    pub label: &'static str,
+    /// Fixed for every line but the browser stores', whose number depends on
+    /// the machine — one per Firefox profile.
+    pub label: Cow<'static, str>,
     pub value: String,
     pub level: Level,
     /// Set on every [`Level::Problem`] this application knows a fix for.
@@ -130,9 +134,9 @@ pub struct Finding {
 }
 
 impl Finding {
-    fn new(label: &'static str, value: impl Into<String>, level: Level) -> Self {
+    fn new(label: impl Into<Cow<'static, str>>, value: impl Into<String>, level: Level) -> Self {
         Self {
-            label,
+            label: label.into(),
             value: value.into(),
             level,
             remedy: None,
@@ -151,8 +155,8 @@ impl Finding {
 pub struct Section {
     pub title: &'static str,
     /// A sentence saying what this section can and cannot see, where that is
-    /// not obvious from the title. The certificate section needs one: it checks
-    /// the system trust store and cannot see the stores Firefox and Chrome keep.
+    /// not obvious from the title. The certificate section needs one: it says
+    /// which trust stores were looked in, and which were not.
     pub note: Option<&'static str>,
     pub findings: Vec<Finding>,
 }
@@ -199,6 +203,9 @@ pub struct Inputs {
     pub daemons: Daemons,
     pub helper: Option<Result<RootHelper, String>>,
     pub ca: Option<CaTrust>,
+    /// The browsers' own certificate stores. `None` when there was nothing to
+    /// look for — no certificate, or no home directory.
+    pub stores: Option<BrowserStores>,
     pub browsers: Option<BrowserIntegration>,
 }
 
@@ -242,6 +249,9 @@ impl Inputs {
             licence,
             daemons: daemons(cli),
             helper: RootHelper::detect().map(|found| found.map_err(|err: io::Error| err.to_string())),
+            stores: crate::paths::certificate(certificate_name)
+                .as_deref()
+                .and_then(BrowserStores::detect),
             ca: CaTrust::detect(certificate_name),
             browsers: BrowserIntegration::detect(),
             config,
@@ -597,14 +607,64 @@ fn https_section(inputs: &Inputs, config: Option<&Config>) -> Section {
         }
     }
 
+    if let Some(stores) = &inputs.stores {
+        let failing = if enabled == Some(false) {
+            Level::Fact
+        } else {
+            Level::Problem
+        };
+        if stores.stores.is_empty() {
+            findings.push(Finding::new(
+                "Browser stores",
+                "None found where AdGuard's installer looks",
+                Level::Fact,
+            ));
+        }
+        for store in &stores.stores {
+            findings.push(store_finding(store, failing));
+        }
+    }
+
     Section {
         title: "HTTPS filtering",
         note: Some(
-            "Checks the system trust store. Firefox and Chrome keep certificate stores of their \
-             own, which this does not see.",
+            "Checks the system trust store, and the stores Firefox profiles and Chromium-based \
+             browsers keep of their own — the places AdGuard's installer writes to. Flatpak \
+             browsers are not checked.",
         ),
         findings,
     }
+}
+
+/// One browser store as a line, under a name that carries no profile name —
+/// see [`Store::anonymous_name`].
+///
+/// `failing` is the level a store that lacks the CA gets: a problem while
+/// HTTPS filtering is on, and a plain reading while it is off, as for the
+/// system store above.
+fn store_finding(store: &Store, failing: Level) -> Finding {
+    let label = store.anonymous_name();
+    let finding = match &store.state {
+        StoreState::Trusted => return Finding::new(label, "Trusted", Level::Healthy),
+        StoreState::Unreadable(why) => {
+            return Finding::new(label, format!("Could not be read: {why}"), Level::Unknown)
+        }
+        StoreState::Missing => Finding::new(label, "Does not have the certificate", failing),
+        StoreState::Untrusted => Finding::new(
+            label,
+            "Has the certificate, but does not trust it to identify websites",
+            failing,
+        ),
+    };
+    if failing != Level::Problem {
+        return finding;
+    }
+    let hint = if store.profile_flag().is_some() {
+        NAMED_PROFILE
+    } else {
+        INSTALL_IN_BROWSERS
+    };
+    finding.fixed(hint, Some(FixedOn::Protection))
 }
 
 fn browser_section(inputs: &Inputs) -> Section {
@@ -731,6 +791,15 @@ const INTEGRATE: &str =
     "Protection shows AdGuard's own command that installs the integration for every browser it \
      finds.";
 
+/// A browser store the installer reaches on its own.
+const INSTALL_IN_BROWSERS: &str =
+    "Protection shows AdGuard's own installer command, which adds it to this store.";
+
+/// A Firefox profile the installer only reaches when it is named.
+const NAMED_PROFILE: &str =
+    "AdGuard's installer only reaches Firefox's default profile by itself. Protection shows its \
+     command with this profile named.";
+
 /// What fixes the certificate, by which step it has not reached.
 ///
 /// In [`CaTrust::unmet`]'s order, and matching the command the Protection page
@@ -832,6 +901,7 @@ mod tests {
             },
             helper: None,
             ca: None,
+            stores: None,
             browsers: None,
         }
     }
@@ -938,6 +1008,52 @@ mod tests {
         assert_eq!(found.remedy, None);
     }
 
+    /// One line per browser store, under a name that leaves the profile's
+    /// own name out, and a fix that names `-f` only where it is needed.
+    #[test]
+    fn browser_stores_are_reported_one_line_each_without_profile_names() {
+        use crate::nss::Profile;
+
+        let store = |profile: Option<Profile>, state| Store {
+            browser: if profile.is_some() { "Firefox" } else { "Chromium-based browsers" },
+            profile,
+            database: PathBuf::from("/home/someone/.pki/nssdb/cert9.db"),
+            state,
+        };
+        let profile = |number, default| Profile {
+            name: String::from("Jan Kowalski"),
+            number,
+            default,
+            dir: PathBuf::from("/home/someone/.mozilla/firefox/abcd.Jan Kowalski"),
+        };
+        let mut inputs = healthy();
+        inputs.stores = Some(BrowserStores {
+            stores: vec![
+                store(Some(profile(1, true)), StoreState::Trusted),
+                store(Some(profile(2, false)), StoreState::Missing),
+                store(None, StoreState::Untrusted),
+            ],
+        });
+        let report = Report::build(&inputs);
+
+        let default = finding(&report, "HTTPS filtering", "Firefox profile 1 (default)");
+        assert_eq!(default.level, Level::Healthy);
+        let other = finding(&report, "HTTPS filtering", "Firefox profile 2");
+        assert_eq!(other.level, Level::Problem);
+        assert_eq!(other.remedy.map(|r| r.hint), Some(NAMED_PROFILE));
+        let chromium = finding(&report, "HTTPS filtering", "Chromium-based browsers");
+        assert_eq!(chromium.level, Level::Problem);
+        assert_eq!(chromium.remedy.map(|r| r.hint), Some(INSTALL_IN_BROWSERS));
+        assert!(!report.text("t").contains("Kowalski"));
+
+        // Off, the same readings are facts, and nothing offers a fix.
+        inputs.config = Ok(config("https_filtering:\n  enabled: false\n"));
+        let report = Report::build(&inputs);
+        let other = finding(&report, "HTTPS filtering", "Firefox profile 2");
+        assert_eq!(other.level, Level::Fact);
+        assert_eq!(other.remedy, None);
+    }
+
     #[test]
     fn inert_dns_filtering_is_flagged() {
         let mut inputs = healthy();
@@ -982,7 +1098,7 @@ mod tests {
         assert!(text.starts_with("AdGuard UI 1.6.1 — diagnostics\n"));
         assert!(text.contains("  [ok]   State: Running\n"), "{text}");
         assert!(text.contains("         Mode: auto\n"), "{text}");
-        assert!(text.contains("Firefox and Chrome keep certificate stores"), "{text}");
+        assert!(text.contains("Flatpak browsers are not checked"), "{text}");
     }
 
     /// The report is written for a public tracker.
@@ -1038,6 +1154,7 @@ mod tests {
             },
             helper: Some(RootHelper::inspect("/bin/sh").map_err(|err| err.to_string())),
             ca: Some(CaTrust::inspect("/nonexistent/AdGuard CLI CA.pem", None, None)),
+            stores: None,
             browsers: Some(BrowserIntegration::detect_under(&home, None)),
         };
         let report = Report::build(&inputs);

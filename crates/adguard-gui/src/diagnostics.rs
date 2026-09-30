@@ -220,7 +220,7 @@ fn finding_row(
     // Before the strings, which are consumed as they are set: CLI messages and
     // paths can contain `&`, and markup is on by default.
     row.set_use_markup(false);
-    row.set_title(finding.label);
+    row.set_title(&finding.label);
     let value = diagnostics::redact_home(&finding.value, home);
 
     match finding.remedy {
