@@ -69,6 +69,8 @@ While the tray is present, closing the window only hides it and *Quit* in the tr
 
 **Status** — runtime state, start/stop/restart, the proxy endpoints, and the licence. Polled every 2 seconds while the window is up, every 10 when only the tray is showing.
 
+**Activity** — what AdGuard has done with this computer's traffic: requests, how many were blocked or modified, and how much data moved, for today, the last 7 days or the last 30. A chart per hour or per day, and the sites blocked most, the sites requested most, the rules that matched most and the apps behind the traffic. It is counted from AdGuard's own access log, in the background while AdGuard UI runs, because AdGuard deletes that log after a few days. **Only counts are kept**, on this computer and readable only by you: never the address of a page, what was searched, or when in a day a site was visited. Counts older than 90 days are deleted, and **Clear History** deletes the rest.
+
 **Protection** — the six protection modules, each one switch over one key in `proxy.yaml`, and the anonymous-statistics consent. That last row is the one setting here the application will not describe: nothing in AdGuard's configuration comments, its help output or its binary says what the key sends, so the row says *that* rather than inventing an answer.
 
 ![The Protection page](docs/screenshots/protection.png)

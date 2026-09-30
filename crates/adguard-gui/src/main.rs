@@ -6,6 +6,7 @@
 //! measured CLI behaviour the wrapper encodes.
 
 mod about;
+mod activity;
 mod advanced;
 mod autostart;
 mod backup;
@@ -502,11 +503,21 @@ fn missing_cli_view(message: &str) -> adw::ToolbarView {
 }
 
 /// Sidebar entries, in order. The id doubles as the stack child name.
-const PAGES: [Page; 9] = [
+const PAGES: [Page; 10] = [
     Page {
         id: "status",
         title: "Status",
         icon: "network-transmit-receive-symbolic",
+    },
+    // Directly under Status, and the only other page about what AdGuard is
+    // doing rather than how it is set up: Status says whether it is filtering,
+    // this says what the filtering came to (#21).
+    Page {
+        id: "activity",
+        title: "Activity",
+        // A clock, for a history. Adwaita 50 ships no chart or monitor icon:
+        // `utilities-system-monitor-symbolic` rendered as a blank square here.
+        icon: "document-open-recent-symbolic",
     },
     Page {
         id: "protection",
@@ -680,17 +691,20 @@ fn main_view(cli: &Cli) -> MainView {
     let about = about::AboutPage::new(cli.clone(), toasts.clone());
     // Every check above, one line each, read when the page is opened (#21).
     let diagnostics = diagnostics::DiagnosticsPage::new(cli.clone(), toasts.clone());
+    // Counts from AdGuard's access log, kept by `adguard_core::activity` (#21).
+    let activity = activity::ActivityPage::new(toasts.clone());
 
     let stack = gtk::Stack::new();
     stack.add_named(status.widget(), Some(PAGES[0].id));
-    stack.add_named(protection.widget(), Some(PAGES[1].id));
-    stack.add_named(&filters.widget(), Some(PAGES[2].id));
-    stack.add_named(&dns.widget(), Some(PAGES[3].id));
-    stack.add_named(stealth.widget(), Some(PAGES[4].id));
-    stack.add_named(advanced.widget(), Some(PAGES[5].id));
-    stack.add_named(extensions.widget(), Some(PAGES[6].id));
-    stack.add_named(diagnostics.widget(), Some(PAGES[7].id));
-    stack.add_named(about.widget(), Some(PAGES[8].id));
+    stack.add_named(activity.widget(), Some(PAGES[1].id));
+    stack.add_named(protection.widget(), Some(PAGES[2].id));
+    stack.add_named(&filters.widget(), Some(PAGES[3].id));
+    stack.add_named(&dns.widget(), Some(PAGES[4].id));
+    stack.add_named(stealth.widget(), Some(PAGES[5].id));
+    stack.add_named(advanced.widget(), Some(PAGES[6].id));
+    stack.add_named(extensions.widget(), Some(PAGES[7].id));
+    stack.add_named(diagnostics.widget(), Some(PAGES[8].id));
+    stack.add_named(about.widget(), Some(PAGES[9].id));
     toasts.set_child(Some(&stack));
 
     // `check-update` rewrites the filter databases, and **nothing watches
@@ -762,6 +776,7 @@ fn main_view(cli: &Cli) -> MainView {
         let extensions = extensions.clone();
         let about = about.clone();
         let diagnostics = diagnostics.clone();
+        let activity = activity.clone();
         move |_| match stack.visible_child_name().as_deref() {
             Some("protection") => protection.reload(),
             Some("filters") => filters.reload(),
@@ -780,6 +795,8 @@ fn main_view(cli: &Cli) -> MainView {
             // Three CLI calls and a log read — which is why this page has no
             // poll, and why it is only ever read on request.
             Some("diagnostics") => diagnostics.reload(),
+            // Reads whatever AdGuard has logged since, then the counts.
+            Some("activity") => activity.reload(),
             _ => status.reload(),
         }
     });
@@ -807,6 +824,7 @@ fn main_view(cli: &Cli) -> MainView {
         let split = split.clone();
         let status = status.clone();
         let diagnostics = diagnostics.clone();
+        let activity = activity.clone();
         move |_, row| {
             let Some(row) = row else { return };
             let page = &PAGES[row.index().max(0) as usize];
@@ -824,6 +842,11 @@ fn main_view(cli: &Cli) -> MainView {
             // is asking. See `diagnostics.rs` for why there is no poll.
             if page.id == "diagnostics" {
                 diagnostics.reload();
+            }
+            // Arriving is also when the counts are brought up to the minute,
+            // rather than to the last background read.
+            if page.id == "activity" {
+                activity.reload();
             }
             // On a narrow window the sidebar and content are separate views;
             // choosing a page should move to it.
@@ -909,6 +932,11 @@ fn main_view(cli: &Cli) -> MainView {
     sidebar_view.add_top_bar(&adw::HeaderBar::new());
     sidebar_view.set_content(Some(&sidebar));
     split.set_sidebar(Some(&adw::NavigationPage::new(&sidebar_view, "AdGuard UI")));
+
+    // Here rather than in the page because it has to run with no window at
+    // all: under `--background` this is the only thing counting, and AdGuard
+    // deletes what is not counted within a few days (`activity.rs`).
+    activity::keep_up();
 
     // After the pages are built, so priming the snapshot cannot race the first
     // render, and so a repaint always has rows to patch rather than a spinner.
@@ -1204,8 +1232,9 @@ mod tests {
     /// file hard-codes beyond Status.
     #[test]
     fn diagnostics_is_where_the_stack_puts_it() {
-        assert_eq!(PAGES[7].id, "diagnostics");
-        assert_eq!(PAGES[8].id, "about");
+        assert_eq!(PAGES[1].id, "activity");
+        assert_eq!(PAGES[8].id, "diagnostics");
+        assert_eq!(PAGES[9].id, "about");
     }
 
     /// Each id names exactly one page. They are stack child names, sidebar

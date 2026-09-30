@@ -13,6 +13,12 @@ This file is the one changelog.
 
 ## Unreleased
 
+### An Activity page
+
+The first item of [#21](https://github.com/dominik-najberg/AdGuard-UI-Linux/issues/21). A new page under Status shows what AdGuard has done with this computer's traffic: how many requests there were, how many were blocked or modified, and how much data moved, for today, the last 7 days or the last 30. A chart shows them by hour or by day. Below it are the most blocked sites, the most requested sites, the rules that matched most (with the filter list each came from) and the apps behind the traffic.
+
+AdGuard keeps its own log for only a few days, so AdGuard UI counts it as it goes: at launch and every ten minutes after, in the background too. **Only counts are kept**, in `~/.local/state/adguard-ui/activity.sqlite`, readable only by you. It never stores the address of a page, what was searched, or when in a day a site was visited. Counts older than 90 days are deleted, and **Clear History…** deletes the rest. If a future AdGuard CLI writes its log in a shape this version does not recognise, the page says so rather than showing wrong figures.
+
 ### A Diagnostics page
 
 The second item of [#21](https://github.com/dominik-najberg/AdGuard-UI-Linux/issues/21). A new page between Extensions and About lists every check this application already makes, one row each, marked as passing, failing or unknown: the CLI's version and licence state, the proxy's state, mode, endpoints and process, whether the root helper is alive and AdGuard's own requests are getting through, the helper's setup, the certificate, each browser's integration, and DNS.

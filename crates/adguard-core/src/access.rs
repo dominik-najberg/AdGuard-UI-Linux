@@ -370,7 +370,7 @@ fn internal_entry(line: &str) -> Option<(i64, u16)> {
 /// conversion has to go through the machine's own timezone rules — which is
 /// what [`local`] is for. The microseconds are dropped: whole seconds are four
 /// orders of magnitude finer than the two-hour window they are compared in.
-fn epoch(date: &str, clock: &str) -> Option<i64> {
+pub(crate) fn epoch(date: &str, clock: &str) -> Option<i64> {
     let mut parts = date.split('.');
     let day = parts.next()?.parse().ok()?;
     let month = parts.next()?.parse().ok()?;
