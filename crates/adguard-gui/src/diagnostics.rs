@@ -57,6 +57,12 @@ const WHAT_THE_COPY_HOLDS: &str =
     "Copied as plain text for a bug report. Your home folder is shortened to ~, and the \
      report never includes your licence key, e-mail, network addresses or browsing.";
 
+/// The save button's tooltip. The same text as the copy, so the same promise.
+const WHAT_THE_FILE_HOLDS: &str =
+    "Saved as a plain text file for a bug report — the same text Copy report puts on the \
+     clipboard. Your home folder is shortened to ~, and the file never includes your licence \
+     key, e-mail, network addresses or browsing.";
+
 pub struct DiagnosticsPage {
     cli: Cli,
     toasts: adw::ToastOverlay,
@@ -64,6 +70,9 @@ pub struct DiagnosticsPage {
     /// The first group: what the page is, when it was read, and the copy button.
     summary: adw::PreferencesGroup,
     copy: gtk::Button,
+    /// Writes the same text to a file, for a tracker that takes attachments or
+    /// a report too long to paste. Sensitive exactly when `copy` is.
+    save: gtk::Button,
     /// One group per report section. Rebuilt whole on every reading: the set of
     /// lines depends on the machine — one per browser found, per-run lines only
     /// with exactly one daemon — so there is nothing stable to patch.
@@ -89,10 +98,19 @@ impl DiagnosticsPage {
             .sensitive(false)
             .tooltip_text(WHAT_THE_COPY_HOLDS)
             .build();
+        let save = gtk::Button::builder()
+            .label("Save…")
+            .valign(gtk::Align::Center)
+            .sensitive(false)
+            .tooltip_text(WHAT_THE_FILE_HOLDS)
+            .build();
+        let buttons = gtk::Box::builder().spacing(6).valign(gtk::Align::Center).build();
+        buttons.append(&save);
+        buttons.append(&copy);
         let summary = adw::PreferencesGroup::builder()
             .title("Diagnostics")
             .description(WHAT_IT_IS)
-            .header_suffix(&copy)
+            .header_suffix(&buttons)
             .build();
         page.add(&summary);
 
@@ -102,6 +120,7 @@ impl DiagnosticsPage {
             page,
             summary,
             copy,
+            save,
             sections: RefCell::new(Vec::new()),
             text: RefCell::new(None),
             busy: Cell::new(false),
@@ -117,6 +136,17 @@ impl DiagnosticsPage {
                 if let Some(text) = text {
                     button.clipboard().set_text(&text);
                     this.toasts.add_toast(toast("Report copied"));
+                }
+            }
+        });
+
+        this.save.connect_clicked({
+            let this = Rc::downgrade(&this);
+            move |button| {
+                let Some(this) = this.upgrade() else { return };
+                let text = this.text.borrow().clone();
+                if let Some(text) = text {
+                    save_report(button, &this.toasts, text);
                 }
             }
         });
@@ -140,6 +170,7 @@ impl DiagnosticsPage {
             return;
         }
         self.copy.set_sensitive(false);
+        self.save.set_sensitive(false);
         self.summary.set_description(Some("Reading…"));
 
         let cli = self.cli.clone();
@@ -175,7 +206,45 @@ impl DiagnosticsPage {
         );
         self.text.replace(Some(text));
         self.copy.set_sensitive(true);
+        self.save.set_sensitive(true);
         self.summary.set_description(Some(&summary(report.problems().count())));
+    }
+}
+
+/// Ask where to put the report, then write it there.
+///
+/// The text is the one already on screen and on the copy button, taken when
+/// the reading was, so the file and the clipboard can never differ. Written on
+/// the main thread: it is a few kilobytes, and a worker would only add a way
+/// for the toast to arrive after the user has moved on.
+fn save_report(button: &gtk::Button, toasts: &adw::ToastOverlay, text: String) {
+    let dialog = gtk::FileDialog::builder()
+        .title("Save diagnostics report")
+        .initial_name(report_file_name(glib::DateTime::now_local().ok().as_ref()))
+        .build();
+    let toasts = toasts.clone();
+    let window = button.root().and_then(|root| root.downcast::<gtk::Window>().ok());
+    dialog.save(window.as_ref(), gtk::gio::Cancellable::NONE, move |result| {
+        let Ok(file) = result else {
+            return; // Cancelled.
+        };
+        let Some(path) = file.path() else {
+            toasts.add_toast(toast("That file is not on this machine"));
+            return;
+        };
+        match std::fs::write(&path, text.as_bytes()) {
+            Ok(()) => toasts.add_toast(toast(&format!("Saved to {}", path.display()))),
+            Err(err) => toasts.add_toast(toast(&format!("Could not save the report: {err}"))),
+        }
+    });
+}
+
+/// The name the save dialog suggests: dated to the minute, so two reports taken
+/// before and after a fix sit side by side instead of one replacing the other.
+fn report_file_name(now: Option<&glib::DateTime>) -> String {
+    match now.and_then(|now| now.format("%Y-%m-%d-%H%M").ok()) {
+        Some(stamp) => format!("adguard-ui-diagnostics-{stamp}.txt"),
+        None => "adguard-ui-diagnostics.txt".to_owned(),
     }
 }
 
@@ -319,6 +388,14 @@ mod tests {
     fn the_copy_disclosure_names_what_is_left_out() {
         for left_out in ["licence key", "e-mail", "browsing", "~"] {
             assert!(WHAT_THE_COPY_HOLDS.contains(left_out), "{left_out}");
+            assert!(WHAT_THE_FILE_HOLDS.contains(left_out), "{left_out}");
         }
+    }
+
+    #[test]
+    fn the_suggested_file_name_is_dated_to_the_minute() {
+        let at = glib::DateTime::from_local(2026, 9, 30, 14, 5, 0.0).unwrap();
+        assert_eq!(report_file_name(Some(&at)), "adguard-ui-diagnostics-2026-09-30-1405.txt");
+        assert_eq!(report_file_name(None), "adguard-ui-diagnostics.txt");
     }
 }
