@@ -11,6 +11,18 @@ This file is the one changelog.
 
 ---
 
+## Unreleased
+
+### A Diagnostics page
+
+The second item of [#21](https://github.com/dominik-najberg/AdGuard-UI-Linux/issues/21). A new page between Extensions and About lists every check this application already makes, one row each, marked as passing, failing or unknown: the CLI's version and licence state, the proxy's state, mode, endpoints and process, whether the root helper is alive and AdGuard's own requests are getting through, the helper's setup, the certificate, each browser's integration, and DNS.
+
+**Copy report** puts the same lines on the clipboard as plain text for a bug report. It shortens your home folder to `~` and never includes your licence key, e-mail, network addresses or anything from your browsing.
+
+The page is read when you open it and when you press refresh, and it changes nothing.
+
+---
+
 ## 1.6.1 — 18 September 2026
 
 ### Fix a misleading activation prompt

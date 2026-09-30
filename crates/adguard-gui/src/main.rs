@@ -11,6 +11,7 @@ mod autostart;
 mod backup;
 mod browser_integration;
 mod certificate;
+mod diagnostics;
 mod dns;
 mod extensions;
 mod filter_settings;
@@ -501,7 +502,7 @@ fn missing_cli_view(message: &str) -> adw::ToolbarView {
 }
 
 /// Sidebar entries, in order. The id doubles as the stack child name.
-const PAGES: [Page; 8] = [
+const PAGES: [Page; 9] = [
     Page {
         id: "status",
         title: "Status",
@@ -540,6 +541,15 @@ const PAGES: [Page; 8] = [
         id: "extensions",
         title: "Extensions",
         icon: "application-x-addon-symbolic",
+    },
+    // With About, below every page that answers a question about protection:
+    // it is about the installation rather than about a setting (#21). Above
+    // About rather than below, because #4 asked for About last and a page of
+    // readings is closer to the settings above it than a version number is.
+    Page {
+        id: "diagnostics",
+        title: "Diagnostics",
+        icon: "applications-engineering-symbolic",
     },
     // Last, as #4 asked. It is the only page that is about the installation
     // rather than about what the installation is doing, so it sorts below every
@@ -664,6 +674,8 @@ fn main_view(cli: &Cli) -> MainView {
     // The two version numbers, and the one control that reaches AdGuard's
     // servers because the user asked it to (#4).
     let about = about::AboutPage::new(cli.clone(), toasts.clone());
+    // Every check above, one line each, read when the page is opened (#21).
+    let diagnostics = diagnostics::DiagnosticsPage::new(cli.clone(), toasts.clone());
 
     let stack = gtk::Stack::new();
     stack.add_named(status.widget(), Some(PAGES[0].id));
@@ -673,7 +685,8 @@ fn main_view(cli: &Cli) -> MainView {
     stack.add_named(stealth.widget(), Some(PAGES[4].id));
     stack.add_named(advanced.widget(), Some(PAGES[5].id));
     stack.add_named(extensions.widget(), Some(PAGES[6].id));
-    stack.add_named(about.widget(), Some(PAGES[7].id));
+    stack.add_named(diagnostics.widget(), Some(PAGES[7].id));
+    stack.add_named(about.widget(), Some(PAGES[8].id));
     toasts.set_child(Some(&stack));
 
     // `check-update` rewrites the filter databases, and **nothing watches
@@ -744,6 +757,7 @@ fn main_view(cli: &Cli) -> MainView {
         let dns = dns.clone();
         let extensions = extensions.clone();
         let about = about.clone();
+        let diagnostics = diagnostics.clone();
         move |_| match stack.visible_child_name().as_deref() {
             Some("protection") => protection.reload(),
             Some("filters") => filters.reload(),
@@ -759,6 +773,9 @@ fn main_view(cli: &Cli) -> MainView {
             // cheap re-read, and here that would make it a network fetch with
             // side effects on the user's filters.
             Some("about") => about.reload(),
+            // Three CLI calls and a log read — which is why this page has no
+            // poll, and why it is only ever read on request.
+            Some("diagnostics") => diagnostics.reload(),
             _ => status.reload(),
         }
     });
@@ -785,6 +802,7 @@ fn main_view(cli: &Cli) -> MainView {
         let stack = stack.clone();
         let split = split.clone();
         let status = status.clone();
+        let diagnostics = diagnostics.clone();
         move |_, row| {
             let Some(row) = row else { return };
             let page = &PAGES[row.index().max(0) as usize];
@@ -797,6 +815,11 @@ fn main_view(cli: &Cli) -> MainView {
             // rather than from `adguard-cli`, so this cannot race the 2 s poll.
             if page.id == PAGES[0].id {
                 status.refresh_stats();
+            }
+            // The only time this page reads anything unasked: arriving on it
+            // is asking. See `diagnostics.rs` for why there is no poll.
+            if page.id == "diagnostics" {
+                diagnostics.reload();
             }
             // On a narrow window the sidebar and content are separate views;
             // choosing a page should move to it.
@@ -1140,22 +1163,35 @@ mod tests {
         assert_eq!(PAGES.last().expect("PAGES is never empty").id, "about");
     }
 
-    /// Extensions sits directly above About.
+    /// Extensions sits directly above the pages about the installation —
+    /// Diagnostics, then About.
     ///
-    /// Both halves matter and neither is arbitrary. It is above About because
-    /// About is the only page about the *installation*, and this one is about
-    /// what AdGuard is doing. It is below the settings pages because it lists
-    /// things the user installed rather than settings AdGuard ships — the same
-    /// reason it is not beside Filters, which is a catalogue AdGuard supplies.
+    /// Both halves matter and neither is arbitrary. It is above those two
+    /// because they are about the *installation*, and this one is about what
+    /// AdGuard is doing. It is below the settings pages because it lists things
+    /// the user installed rather than settings AdGuard ships — the same reason
+    /// it is not beside Filters, which is a catalogue AdGuard supplies.
     ///
-    /// Pinned because the ordering is the whole of the page's placement
+    /// Pinned because the ordering is the whole of each page's placement
     /// decision, and nothing else in the tree would notice it changing.
     #[test]
-    fn extensions_sits_above_about() {
+    fn extensions_sits_above_the_installation_pages() {
         let position = |id| PAGES.iter().position(|page| page.id == id);
         let extensions = position("extensions").expect("Extensions is in the sidebar");
+        let diagnostics = position("diagnostics").expect("Diagnostics is in the sidebar");
         let about = position("about").expect("About is in the sidebar");
-        assert_eq!(extensions + 1, about, "Extensions belongs directly above About");
+        assert_eq!(extensions + 1, diagnostics, "Diagnostics belongs directly below Extensions");
+        assert_eq!(diagnostics + 1, about, "Diagnostics belongs directly above About");
+    }
+
+    /// The stack is filled positionally from `PAGES`, so a page added to the
+    /// array and not to the stack — or the other way round — would shift every
+    /// page after it onto the wrong sidebar row. Pinned at the one index this
+    /// file hard-codes beyond Status.
+    #[test]
+    fn diagnostics_is_where_the_stack_puts_it() {
+        assert_eq!(PAGES[7].id, "diagnostics");
+        assert_eq!(PAGES[8].id, "about");
     }
 
     /// Each id names exactly one page. They are stack child names, sidebar
