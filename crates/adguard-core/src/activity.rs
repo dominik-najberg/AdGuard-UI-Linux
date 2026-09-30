@@ -68,12 +68,23 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 
-/// How many days of counts are kept. Older rows are dropped on every ingest.
+/// How many days of counts are kept until the user chooses otherwise. Older
+/// rows are dropped on every ingest.
 ///
 /// Ninety because the counts are small: measured on the reference machine at
 /// about 700 host rows and 25 rule rows a day, so a quarter of a year is a few
 /// megabytes. The longest range the page offers is thirty days.
-pub const RETENTION_DAYS: i64 = 90;
+pub const DEFAULT_RETENTION_DAYS: i64 = 90;
+
+/// The retentions the page offers, shortest first.
+///
+/// A short list rather than a number field: each is a promise the page states
+/// in words, and "counts older than 1 year are deleted" reads as a decision
+/// where "older than 211 days" reads as a typo. Seven is the floor because a
+/// shorter one would empty the week range the page opens beside; a year is the
+/// ceiling because the file grows by a few megabytes a quarter and nothing on
+/// the page reaches back further than thirty days.
+pub const RETENTION_CHOICES: [i64; 4] = [7, 30, DEFAULT_RETENTION_DAYS, 365];
 
 /// The database, beside the window state under `$XDG_STATE_HOME/adguard-ui`.
 ///
@@ -84,7 +95,13 @@ const FILE: &str = "activity.sqlite";
 
 /// Bumped when the tables change shape. A database from a newer build is
 /// refused rather than written into ([`Error::Newer`]).
-const SCHEMA: i64 = 1;
+///
+/// 2 adds `settings`, which holds the retention. A version-1 file is upgraded
+/// in place by creating it; nothing already in the file changes.
+const SCHEMA: i64 = 2;
+
+/// The `settings` key the retention is stored under, in days.
+const RETENTION_KEY: &str = "retention_days";
 
 /// How many rotated generations to look for. Ten are measured (contract §9);
 /// the margin costs a failed `open` each.
@@ -119,6 +136,9 @@ pub enum Error {
 
     #[error("no home directory to keep the activity database in")]
     NoHome,
+
+    #[error("{0} days is not a retention this version offers")]
+    Retention(i64),
 }
 
 /// What became of a request, from field 10.
@@ -294,6 +314,8 @@ pub struct Summary {
     /// The earliest hour anything was counted in, kept or not pruned yet.
     /// `None` when nothing has been.
     pub recorded_since: Option<i64>,
+    /// How many days of counts are kept — [`Store::retention`].
+    pub retention_days: i64,
 }
 
 /// What one [`Store::ingest`] did.
@@ -378,7 +400,9 @@ impl Store {
              CREATE TABLE IF NOT EXISTS cursor (
                  id INTEGER PRIMARY KEY CHECK (id = 0),
                  inode INTEGER NOT NULL, head INTEGER NOT NULL,
-                 offset INTEGER NOT NULL, last INTEGER NOT NULL);",
+                 offset INTEGER NOT NULL, last INTEGER NOT NULL);
+             CREATE TABLE IF NOT EXISTS settings (
+                 key TEXT PRIMARY KEY, value INTEGER NOT NULL) WITHOUT ROWID;",
         )?;
         conn.pragma_update(None, "user_version", SCHEMA)?;
         Ok(Self { conn })
@@ -459,7 +483,7 @@ impl Store {
         }
 
         tally.write(&tx)?;
-        prune(&tx, now)?;
+        prune(&tx, now, retention(&tx)?)?;
         if let Some(next) = next {
             next.save(&tx)?;
         }
@@ -482,6 +506,39 @@ impl Store {
         // `secure_delete` has already overwritten the rows; this gives the
         // pages back, so the file shrinks to what is left.
         self.conn.execute_batch("VACUUM;")?;
+        Ok(())
+    }
+
+    /// How many whole local days of counts are kept: the user's choice, or
+    /// [`DEFAULT_RETENTION_DAYS`] until they make one.
+    pub fn retention(&self) -> Result<i64, Error> {
+        retention(&self.conn)
+    }
+
+    /// Keep `days` of counts from now on, and drop what is already older.
+    ///
+    /// Only [`RETENTION_CHOICES`] are accepted, so a value typed into the
+    /// database by hand or written by a later version cannot make this one
+    /// keep nothing, or keep forever. The prune happens here rather than at the
+    /// next ingest because the page has just told the user it has: a shortened
+    /// retention that left the old counts until the next ten-minute read would
+    /// be a promise kept late.
+    pub fn set_retention(&mut self, days: i64) -> Result<(), Error> {
+        self.set_retention_at(days, now())
+    }
+
+    fn set_retention_at(&mut self, days: i64, now: i64) -> Result<(), Error> {
+        if !RETENTION_CHOICES.contains(&days) {
+            return Err(Error::Retention(days));
+        }
+        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+            params![RETENTION_KEY, days],
+        )?;
+        prune(&tx, now, days)?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -616,6 +673,7 @@ impl Store {
             rules,
             clients,
             recorded_since,
+            retention_days: self.retention()?,
         })
     }
 }
@@ -979,9 +1037,24 @@ impl Tally {
     }
 }
 
-/// Drop everything older than [`RETENTION_DAYS`] whole local days.
-fn prune(tx: &Transaction, now: i64) -> Result<(), Error> {
-    let Some(cutoff) = midnight(now, RETENTION_DAYS - 1) else {
+/// The stored retention, or the default. A stored value that is not one of
+/// [`RETENTION_CHOICES`] reads as the default rather than being obeyed.
+fn retention(conn: &Connection) -> Result<i64, Error> {
+    let stored: Option<i64> = conn
+        .query_row(
+            "SELECT value FROM settings WHERE key = ?1",
+            params![RETENTION_KEY],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(stored
+        .filter(|days| RETENTION_CHOICES.contains(days))
+        .unwrap_or(DEFAULT_RETENTION_DAYS))
+}
+
+/// Drop everything older than `days` whole local days.
+fn prune(tx: &Transaction, now: i64, days: i64) -> Result<(), Error> {
+    let Some(cutoff) = midnight(now, days - 1) else {
         return Ok(());
     };
     tx.execute("DELETE FROM hourly WHERE hour < ?1", params![cutoff])?;
@@ -1402,10 +1475,80 @@ mod tests {
         scratch.write("access.log", &[passed("10:00:00", "chrome", "https://example.com/")]);
         let mut store = scratch.store();
         store.ingest_at(&scratch.live(), noon()).unwrap();
-        let later = noon() + (RETENTION_DAYS + 1) * 86_400;
+        let later = noon() + (DEFAULT_RETENTION_DAYS + 1) * 86_400;
         store.ingest_at(&scratch.live(), later).unwrap();
         assert_eq!(total(&store), 0);
         assert_eq!(store.summary_at(Span::Today, later).unwrap().recorded_since, None);
+    }
+
+    #[test]
+    fn the_retention_defaults_and_can_be_chosen() {
+        let scratch = Scratch::new("retention-choice");
+        let mut store = scratch.store();
+        assert_eq!(store.retention().unwrap(), DEFAULT_RETENTION_DAYS);
+        store.set_retention_at(365, noon()).unwrap();
+        assert_eq!(store.retention().unwrap(), 365);
+        // And it outlives the connection.
+        drop(store);
+        assert_eq!(scratch.store().retention().unwrap(), 365);
+    }
+
+    #[test]
+    fn a_retention_not_on_offer_is_refused_and_not_obeyed() {
+        let scratch = Scratch::new("retention-refused");
+        let mut store = scratch.store();
+        for days in [0, -1, 1, 8, 36_500] {
+            assert!(matches!(store.set_retention_at(days, noon()), Err(Error::Retention(_))));
+        }
+        assert_eq!(store.retention().unwrap(), DEFAULT_RETENTION_DAYS);
+        // One written behind its back reads as the default.
+        store
+            .conn
+            .execute("INSERT OR REPLACE INTO settings VALUES ('retention_days', 0)", [])
+            .unwrap();
+        assert_eq!(store.retention().unwrap(), DEFAULT_RETENTION_DAYS);
+    }
+
+    #[test]
+    fn shortening_the_retention_drops_older_counts_at_once() {
+        let scratch = Scratch::new("retention-short");
+        scratch.write("access.log", &[passed("10:00:00", "chrome", "https://example.com/")]);
+        let mut store = scratch.store();
+        store.ingest_at(&scratch.live(), noon()).unwrap();
+        // Ten days on, the default keeps it...
+        let later = noon() + 10 * 86_400;
+        assert_eq!(total(&store), 1);
+        // ...and a week does not, without waiting for the next ingest.
+        store.set_retention_at(7, later).unwrap();
+        assert_eq!(total(&store), 0);
+    }
+
+    #[test]
+    fn a_longer_retention_keeps_what_the_default_would_drop() {
+        let scratch = Scratch::new("retention-long");
+        scratch.write("access.log", &[passed("10:00:00", "chrome", "https://example.com/")]);
+        let mut store = scratch.store();
+        store.set_retention_at(365, noon()).unwrap();
+        store.ingest_at(&scratch.live(), noon()).unwrap();
+        let later = noon() + (DEFAULT_RETENTION_DAYS + 1) * 86_400;
+        store.ingest_at(&scratch.live(), later).unwrap();
+        assert_eq!(total(&store), 1);
+    }
+
+    #[test]
+    fn a_version_one_file_is_upgraded_in_place() {
+        let scratch = Scratch::new("schema-one");
+        let path = scratch.0.join("state/activity.sqlite");
+        scratch.write("access.log", &[passed("10:00:00", "chrome", "https://example.com/")]);
+        let mut store = Store::open(&path).unwrap();
+        store.ingest_at(&scratch.live(), noon()).unwrap();
+        // Back to what 1.7.0's first build wrote: no settings table, version 1.
+        store.conn.execute_batch("DROP TABLE settings; PRAGMA user_version = 1;").unwrap();
+        drop(store);
+
+        let store = Store::open(&path).unwrap();
+        assert_eq!(total(&store), 1);
+        assert_eq!(store.retention().unwrap(), DEFAULT_RETENTION_DAYS);
     }
 
     #[test]

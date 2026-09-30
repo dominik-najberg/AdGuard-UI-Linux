@@ -111,6 +111,14 @@ pub struct ActivityPage {
     /// The four top lists. Rebuilt whole on every reading.
     lists: RefCell<Vec<adw::PreferencesGroup>>,
     privacy: adw::PreferencesGroup,
+    /// How long counts are kept, one of `activity::RETENTION_CHOICES`.
+    retention: adw::ComboRow,
+    /// The retention the store last reported. What the row is put back to when
+    /// a shortening is cancelled or fails, and what the description states.
+    kept_days: Cell<i64>,
+    /// Set while the row is moved by code rather than by the user, so its
+    /// notify handler does not take a reading for a choice.
+    quiet: Cell<bool>,
     busy: Cell<bool>,
     /// A reading was asked for while one was running; run it when that ends,
     /// so a range picked mid-read is not lost.
@@ -245,6 +253,14 @@ impl ActivityPage {
             .title("History")
             .header_suffix(&clear)
             .build();
+        let choices: Vec<String> =
+            activity::RETENTION_CHOICES.iter().map(|&days| retention_label(days)).collect();
+        let retention = adw::ComboRow::builder()
+            .title("Keep counts for")
+            .model(&gtk::StringList::new(&choices.iter().map(String::as_str).collect::<Vec<_>>()))
+            .selected(retention_index(activity::DEFAULT_RETENTION_DAYS))
+            .build();
+        privacy.add(&retention);
         page.add(&privacy);
 
         let this = Rc::new(Self {
@@ -261,6 +277,9 @@ impl ActivityPage {
             unread,
             lists: RefCell::new(Vec::new()),
             privacy,
+            retention,
+            kept_days: Cell::new(activity::DEFAULT_RETENTION_DAYS),
+            quiet: Cell::new(false),
             busy: Cell::new(false),
             again: Cell::new(false),
         });
@@ -282,6 +301,19 @@ impl ActivityPage {
             move |_| {
                 let Some(this) = this.upgrade() else { return };
                 glib::spawn_future_local(async move { this.clear().await });
+            }
+        });
+        this.retention.connect_selected_notify({
+            let this = Rc::downgrade(&this);
+            move |row| {
+                let Some(this) = this.upgrade() else { return };
+                if this.quiet.get() {
+                    return;
+                }
+                let Some(&days) = activity::RETENTION_CHOICES.get(row.selected() as usize) else {
+                    return;
+                };
+                glib::spawn_future_local(async move { this.choose_retention(days).await });
             }
         });
         this.describe_privacy();
@@ -322,6 +354,7 @@ impl ActivityPage {
         let summary = &loaded.summary;
         let totals = &summary.totals;
         let total = totals.total();
+        self.show_retention(summary.retention_days);
 
         self.figures[0].set_label(&grouped(total));
         self.figures[1].set_label(&match total {
@@ -434,9 +467,67 @@ impl ActivityPage {
             .map(|path| crate::abbreviate(&path))
             .unwrap_or_else(|| "your state folder".to_owned());
         self.privacy.set_description(Some(&format!(
-            "{WHAT_IS_KEPT} Stored in {path}; counts older than {} days are deleted.",
-            activity::RETENTION_DAYS
+            "{WHAT_IS_KEPT} Stored in {path}; counts older than {} are deleted.",
+            retention_label(self.kept_days.get())
         )));
+    }
+
+    /// Put the row and the description in step with what the store keeps,
+    /// without the row taking it for a choice.
+    fn show_retention(&self, days: i64) {
+        self.kept_days.set(days);
+        self.quiet.set(true);
+        self.retention.set_selected(retention_index(days));
+        self.quiet.set(false);
+        self.describe_privacy();
+    }
+
+    /// The user picked a retention. A longer one is simply stored; a shorter
+    /// one deletes counts, so it is confirmed first — the same care as Clear,
+    /// because it is the same act on part of the history.
+    async fn choose_retention(self: Rc<Self>, days: i64) {
+        let current = self.kept_days.get();
+        if days == current {
+            return;
+        }
+        if days < current {
+            let dialog = adw::AlertDialog::new(
+                Some("Keep less history?"),
+                Some(&format!(
+                    "Counts older than {} will be deleted from this computer now. AdGuard's \
+                     own log is not touched.",
+                    retention_label(days)
+                )),
+            );
+            dialog.add_response("cancel", "Cancel");
+            dialog.add_response("delete", "Delete Older Counts");
+            dialog.set_response_appearance("delete", adw::ResponseAppearance::Destructive);
+            dialog.set_default_response(Some("cancel"));
+            dialog.set_close_response("cancel");
+            if dialog.choose_future(Some(&self.page)).await != "delete" {
+                self.show_retention(current);
+                return;
+            }
+        }
+
+        let this = self.clone();
+        worker::run(
+            move || {
+                Store::locate()
+                    .and_then(|mut store| store.set_retention(days))
+                    .map_err(|err| err.to_string())
+            },
+            move |result: Result<(), String>| {
+                match result {
+                    Ok(()) => this.show_retention(days),
+                    Err(err) => {
+                        this.show_retention(current);
+                        this.toasts.add_toast(toast(&format!("Could not change it: {err}")));
+                    }
+                }
+                this.reload();
+            },
+        );
     }
 
     async fn clear(self: Rc<Self>) {
@@ -662,6 +753,22 @@ fn when(start: i64, span: Span) -> String {
         .map_or_else(|| start.to_string(), |text| text.to_string())
 }
 
+/// A retention as the row and the description say it.
+fn retention_label(days: i64) -> String {
+    match days {
+        365 => "1 year".to_owned(),
+        1 => "1 day".to_owned(),
+        days => format!("{days} days"),
+    }
+}
+
+/// A retention's position in the row. Anything the store reports is one of the
+/// choices — it refuses others — so the fallback is the default's position.
+fn retention_index(days: i64) -> u32 {
+    let position = |days| activity::RETENTION_CHOICES.iter().position(|&choice| choice == days);
+    position(days).or_else(|| position(activity::DEFAULT_RETENTION_DAYS)).unwrap_or(0) as u32
+}
+
 /// `236433` as `236,433`.
 fn grouped(value: u64) -> String {
     let digits = value.to_string();
@@ -686,6 +793,20 @@ mod tests {
         assert_eq!(grouped(1_000), "1,000");
         assert_eq!(grouped(236_433), "236,433");
         assert_eq!(grouped(1_234_567), "1,234,567");
+    }
+
+    #[test]
+    fn every_retention_has_a_row_and_a_name() {
+        for (index, &days) in activity::RETENTION_CHOICES.iter().enumerate() {
+            assert_eq!(retention_index(days), index as u32);
+        }
+        assert_eq!(retention_label(365), "1 year");
+        assert_eq!(retention_label(90), "90 days");
+        assert_eq!(
+            retention_index(12),
+            retention_index(activity::DEFAULT_RETENTION_DAYS),
+            "an unknown value falls back to the default's row"
+        );
     }
 
     /// The disclosure beside the Clear button names what is never kept, and
