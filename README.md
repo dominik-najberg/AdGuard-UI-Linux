@@ -24,7 +24,7 @@ AdGuard CLI is a third-party install under `$HOME`, so no package can declare a 
 Every release carries a `.deb` and a tarball for `~/.local`, built in a clean `ubuntu:26.04` container and listed with their checksums in `SHA256SUMS`:
 
 ```bash
-sudo apt-get install ./adguard-ui_1.6.1_amd64.deb
+sudo apt-get install ./adguard-ui_1.7.0_amd64.deb
 ```
 
 [**Releases**](https://github.com/dominik-najberg/AdGuard-UI-Linux/releases) · [`CHANGELOG.md`](CHANGELOG.md). `apt-get install ./file.deb` rather than `dpkg -i`, because apt resolves the dependencies the package declares; the path has to start with `./` or apt looks the name up in the archive instead. The tarball is the unprivileged route: extract it and run its `install.sh`, which writes under `~/.local` and never asks for a password.
@@ -71,6 +71,8 @@ While the tray is present, closing the window only hides it and *Quit* in the tr
 
 **Activity** — what AdGuard has done with this computer's traffic: requests, how many were blocked or modified, and how much data moved, for today, the last 7 days or the last 30. A chart per hour or per day, and the sites blocked most, the sites requested most, the rules that matched most and the apps behind the traffic. It is counted from AdGuard's own access log, in the background while AdGuard UI runs, because AdGuard deletes that log after a few days. **Only counts are kept**, on this computer and readable only by you: never the address of a page, what was searched, or when in a day a site was visited. Counts older than 90 days are deleted, and **Clear History** deletes the rest.
 
+![The Activity page over seven days, showing sample data rather than this machine's browsing](docs/screenshots/activity.png)
+
 **Protection** — the six protection modules, each one switch over one key in `proxy.yaml`, and the anonymous-statistics consent. That last row is the one setting here the application will not describe: nothing in AdGuard's configuration comments, its help output or its binary says what the key sends, so the row says *that* rather than inventing an answer.
 
 ![The Protection page](docs/screenshots/protection.png)
@@ -114,6 +116,8 @@ Three groups at the foot of that page do more than set a key:
 **One kind of row cannot be used, and says so.** AdGuard identifies a userscript by matching your text against every installed script's name and id, and offers no way to be more exact — so if one script's id appears inside another's, the shorter one cannot be switched or removed at all, from here or from a terminal. That row still shows the script and its true state, and carries a warning icon and a sentence naming the collision, with its controls inert rather than offered and then failing. Reinstalling, which is how a userscript is updated, also switches a disabled one back on with no way to prevent it; the confirmation says so when it applies. Both are AdGuard's behaviour rather than this application's, and the page says which. Nothing here reads or runs a userscript's code — *Edit* and *Storage*, which the Windows app offers, are deliberately absent.
 
 **Diagnostics** — every check this application makes, one line each: the CLI and its licence state, the proxy and its process, whether AdGuard's root helper is alive and its own requests are getting through, the certificate, each browser's integration, and DNS. Where the Status page gives one answer, this page shows what it was weighed from. It is read when you open it rather than on a timer. **Copy report** puts the same lines on the clipboard for a bug report. Your home folder is shortened to `~`, and the report never contains your licence key, e-mail, network addresses or anything from your browsing. The page changes nothing itself. Each problem says what fixes it, and clicking it takes you to the page that has the fix.
+
+![The Diagnostics page](docs/screenshots/diagnostics.png)
 
 **About** — the two version numbers this application had never shown anywhere: its own, and the AdGuard CLI's, with the path the CLI was found at. Below them, one button that updates AdGuard's filter lists, DNS filter lists, userscripts, Safe Browsing data and certificate revocation data, and asks whether a newer AdGuard CLI has been released.
 
