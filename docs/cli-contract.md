@@ -1296,6 +1296,10 @@ Measured 30 September 2026 against `adguard-cli` 1.4.13 at `log_level: 'info'`, 
 
 A line is read only when sixteen fields come before the rule, field 16 is `--`, field 3 is quoted, field 10 is one of the six measured actions, field 14 is a number followed by `b` and field 15 a number followed by `ms`. It also needs an `ID=<n>` in field 12 exactly when there is rule text after the marker. Rule text is taken as everything after the marker, so a rule that contains spaces stays whole. A line that fails any of these checks is **counted as unread** and shown on the page as a warning that the figures may be low. That is the same fail-to-silence direction as `access.rs`, made visible.
 
+### Two more readers, and neither keeps anything
+
+`requests.rs` reads the same files in place for the Activity page's search, the website check and the Diagnostics QUIC line, with `activity.rs`'s parse. It keeps fields 4, 6 and 8 as well, the protocol, the address and the status, but only to show them. Nothing it reads is written anywhere. **Measured 30 September 2026 in a release build, against 245,678 lines:** a search that matches nothing reads every line in 168 ms, the QUIC count takes 80 ms and one site's pass 161 ms. The QUIC count on that log was 5,390 `IQUIC` lines, 2,399 of them with `-` for the action, so the even split measured above held. `tests/requests_live.rs` repeats the three passes and prints counts only.
+
 **Measured 30 September 2026 against the same ten generations:** 236,433 lines read and 0 unread, in 154 ms (release build). A 176 KiB database holds the three and a half days. `tests/activity_live.rs` repeats the read against whatever the machine's log holds and fails on a single unread line, which makes it the canary for the open questions above: a CLI upgrade that moves a column shows up there first.
 
 ### Where a relative path resolves — measured, and the answer is "it depends on the key"

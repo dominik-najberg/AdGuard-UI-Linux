@@ -28,10 +28,32 @@
 //! A store with no `cert9.db` is left out, as the script leaves it out: a
 //! profile that has never been opened has nothing to report yet.
 //!
-//! Not covered, and said so rather than guessed at: Flatpak browsers, which
-//! the script does not know about either, and distributions that make NSS read
-//! the system store through p11-kit, where a store reported here as missing
-//! may not matter.
+//! # And where it does not, but browsers keep stores anyway
+//!
+//! The script's list is not every place a browser keeps a store, so since
+//! the last item of [issue #21] this also reads the ones it misses, marked
+//! [`Store::scanned`] `false` so the command and the wording can tell them
+//! apart:
+//!
+//! - **Firefox's XDG layout**, `~/.config/mozilla/firefox`, where newer
+//!   Firefox releases put new profiles instead of `~/.mozilla`.
+//! - **Flatpak Firefox**, under `~/.var/app/org.mozilla.firefox`, in both of
+//!   the layouts above.
+//! - **Flatpak Chrome, Brave, Edge, Vivaldi and ungoogled Chromium**, each in
+//!   `~/.var/app/<id>/.pki/nssdb`. Their Flathub manifests persist `.pki` into
+//!   the app's own directory rather than sharing the user's home, read 30
+//!   September 2026. Flatpak Chromium is not among them: its manifest grants
+//!   the whole home directory, so it uses `~/.pki/nssdb` like a native one.
+//!
+//! None of these were measured on the reference machine, which has no Flatpak
+//! and no XDG Firefox; the paths are the manifests' and Firefox's own. A
+//! Firefox profile in a place the script does not scan is still reachable by
+//! naming it with `-f`, so it stays inside the command. A Flatpak Chromium
+//! store is not reachable by the script at all, and only [`add`] fixes it.
+//!
+//! Not covered, and said so rather than guessed at: distributions that make
+//! NSS read the system store through p11-kit, where a store reported here as
+//! missing may not matter.
 //!
 //! # What is read, measured
 //!
@@ -62,8 +84,21 @@
 //! by nickname would call either store fine whichever one it found first. The
 //! comparison is on the DER bytes, as [`crate::trust`]'s is on the PEM body.
 //!
-//! Nothing here writes, spawns or escalates. The databases are opened
+//! Reading writes, spawns and escalates nothing. The databases are opened
 //! read-only, and a browser that holds one open is not disturbed by it.
+//!
+//! # Writing: [`add`], the installer's own step and nothing more
+//!
+//! The one write is the line AdGuard's installer runs for each browser store,
+//! `certutil -A -n <name> -t "TC,C,T" -i <pem> -d sql:<store>`, with the
+//! `certutil` AdGuard ships beside it. It changes the user's own files, needs
+//! no privilege, and is what the command on the Protection page would do to
+//! the same store — so it can be a button where the system half, which needs
+//! `sudo`, stays a command (`architecture.md` §6). NSS keeps these databases
+//! consistent under concurrent writers, which is how the installer can run
+//! while a browser is open. The store is read again afterwards, and [`add`]
+//! reports success only when that reading says trusted: a `certutil` that exits
+//! 0 is not taken as evidence, as no command's exit status is here.
 //!
 //! [issue #21]: https://github.com/dominik-najberg/AdGuard-UI-Linux/issues/21
 
@@ -96,16 +131,37 @@ const SELECT: &str = "
     WHERE c.a0 = ?2 AND c.a11 = ?1
 ";
 
-/// The Chromium stores, in the installer's order: display name, and the store
-/// directory relative to `$HOME`.
-const CHROMIUM: [(&str, &str); 2] = [
-    ("Chromium-based browsers", ".pki/nssdb"),
-    ("Chromium (snap)", "snap/chromium/current/.pki/nssdb"),
+/// The Chromium stores: display name, the store directory relative to
+/// `$HOME`, and whether the installer writes there. Its own two first, in its
+/// order; then the Flatpak ones — see the module docs.
+const CHROMIUM: [(&str, &str, bool); 7] = [
+    ("Chromium-based browsers", ".pki/nssdb", true),
+    ("Chromium (snap)", "snap/chromium/current/.pki/nssdb", true),
+    ("Chrome (Flatpak)", ".var/app/com.google.Chrome/.pki/nssdb", false),
+    ("Brave (Flatpak)", ".var/app/com.brave.Browser/.pki/nssdb", false),
+    ("Edge (Flatpak)", ".var/app/com.microsoft.Edge/.pki/nssdb", false),
+    ("Vivaldi (Flatpak)", ".var/app/com.vivaldi.Vivaldi/.pki/nssdb", false),
+    (
+        "Ungoogled Chromium (Flatpak)",
+        ".var/app/io.github.ungoogled_software.ungoogled_chromium/.pki/nssdb",
+        false,
+    ),
 ];
 
 /// Firefox's profile root outside a snap, relative to `$HOME`. The snap roots
 /// are found by [`firefox_roots`], as the installer's glob finds them.
 const FIREFOX: &str = ".mozilla/firefox";
+
+/// Firefox's roots the installer does not scan, relative to `$HOME`, with the
+/// name each is shown under.
+const FIREFOX_UNSCANNED: [(&str, &str); 3] = [
+    ("Firefox", ".config/mozilla/firefox"),
+    ("Firefox (Flatpak)", ".var/app/org.mozilla.firefox/.mozilla/firefox"),
+    ("Firefox (Flatpak)", ".var/app/org.mozilla.firefox/config/mozilla/firefox"),
+];
+
+/// The trust the installer gives: a CA for websites, e-mail and code.
+const INSTALLER_TRUST: &str = "TC,C,T";
 
 /// What one store says about the CA.
 ///
@@ -145,9 +201,12 @@ pub struct Profile {
 /// One store found on this machine.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Store {
-    /// `Firefox`, `Firefox (snap)`, `Chromium-based browsers` or
-    /// `Chromium (snap)`.
+    /// `Firefox`, `Firefox (snap)`, `Chromium-based browsers`,
+    /// `Chromium (snap)`, or a `(Flatpak)` name from the module docs.
     pub browser: &'static str,
+    /// In a place AdGuard's installer looks by itself. `false` for the XDG
+    /// Firefox root and every Flatpak store.
+    pub scanned: bool,
     /// The profile, for a Firefox store. The Chromium stores are one per
     /// user, whatever profiles the browser itself has.
     pub profile: Option<Profile>,
@@ -182,12 +241,24 @@ impl Store {
     }
 
     /// The directory to hand the installer's `-f`, for a profile its ordinary
-    /// run passes over. `None` for every store that run already reaches.
+    /// run passes over — any profile but the default one, and every profile
+    /// under a root the installer does not scan. `None` for a Chromium store.
     pub fn profile_flag(&self) -> Option<&Path> {
         self.profile
             .as_ref()
-            .filter(|profile| !profile.default)
+            .filter(|profile| !(profile.default && self.scanned))
             .map(|profile| profile.dir.as_path())
+    }
+
+    /// Whether AdGuard's installer can reach this store at all, by itself or
+    /// through `-f`. Only a Flatpak Chromium store is out of its reach.
+    pub fn installer_reaches(&self) -> bool {
+        self.scanned || self.profile.is_some()
+    }
+
+    /// The store directory, as `certutil -d sql:` takes it.
+    pub fn dir(&self) -> &Path {
+        self.database.parent().unwrap_or(&self.database)
     }
 }
 
@@ -225,7 +296,7 @@ impl BrowserStores {
     pub fn inspect(home: &Path, der: &[u8]) -> Self {
         let mut stores = Vec::new();
 
-        for (browser, root) in firefox_roots(home) {
+        for (browser, root, scanned) in firefox_roots(home) {
             let Ok(ini) = fs::read_to_string(root.join("profiles.ini")) else {
                 continue;
             };
@@ -241,6 +312,7 @@ impl BrowserStores {
                 }
                 stores.push(Store {
                     browser,
+                    scanned,
                     profile: Some(Profile {
                         name: listed.name,
                         number: index + 1,
@@ -253,11 +325,12 @@ impl BrowserStores {
             }
         }
 
-        for (browser, dir) in CHROMIUM {
+        for (browser, dir, scanned) in CHROMIUM {
             let database = home.join(dir).join(DATABASE);
             if database.is_file() {
                 stores.push(Store {
                     browser,
+                    scanned,
                     profile: None,
                     state: read_state(&database, der),
                     database,
@@ -279,12 +352,13 @@ impl BrowserStores {
     }
 }
 
-/// Firefox's profile roots under `home`, with the name each is shown under:
-/// the ordinary one, then every snap whose name starts `firefox`, sorted —
-/// which is what the installer's `"$HOME"/snap/firefox*/common/.mozilla/firefox`
-/// expands to.
-fn firefox_roots(home: &Path) -> Vec<(&'static str, PathBuf)> {
-    let mut roots = vec![("Firefox", home.join(FIREFOX))];
+/// Firefox's profile roots under `home`, with the name each is shown under
+/// and whether the installer scans it: the ordinary one, then every snap whose
+/// name starts `firefox`, sorted — which is what the installer's
+/// `"$HOME"/snap/firefox*/common/.mozilla/firefox` expands to — then the ones
+/// it does not know.
+fn firefox_roots(home: &Path) -> Vec<(&'static str, PathBuf, bool)> {
+    let mut roots = vec![("Firefox", home.join(FIREFOX), true)];
 
     let mut snaps: Vec<PathBuf> = fs::read_dir(home.join("snap"))
         .into_iter()
@@ -294,10 +368,75 @@ fn firefox_roots(home: &Path) -> Vec<(&'static str, PathBuf)> {
         .map(|entry| entry.path().join("common/.mozilla/firefox"))
         .collect();
     snaps.sort();
-    roots.extend(snaps.into_iter().map(|root| ("Firefox (snap)", root)));
+    roots.extend(snaps.into_iter().map(|root| ("Firefox (snap)", root, true)));
+    roots.extend(FIREFOX_UNSCANNED.iter().map(|(name, dir)| (*name, home.join(dir), false)));
 
-    roots.retain(|(_, root)| root.is_dir());
+    roots.retain(|(_, root, _)| root.is_dir());
     roots
+}
+
+/// `certutil` for [`add`]: the copy AdGuard ships beside its CLI, which is the
+/// version its installer was written against, or the system's when AdGuard's
+/// is missing. `$ADGUARD_CERTUTIL` overrides both.
+pub fn certutil() -> Option<PathBuf> {
+    if let Some(explicit) = std::env::var_os("ADGUARD_CERTUTIL") {
+        return Some(PathBuf::from(explicit)).filter(|path| path.is_file());
+    }
+    let beside = crate::paths::cert_installer()
+        .and_then(|installer| Some(installer.parent()?.join("certutil")))
+        .filter(|path| path.is_file());
+    beside.or_else(|| {
+        std::env::split_paths(&std::env::var_os("PATH")?)
+            .map(|dir| dir.join("certutil"))
+            .find(|path| path.is_file())
+    })
+}
+
+/// Add AdGuard's CA to one store, trusted as the installer trusts it, and
+/// check that it took.
+///
+/// `certificate` is the `.pem` [`crate::CaTrust::certificate`] names. Its file
+/// name without the extension is the nickname, as the installer derives it.
+/// Stdin is closed: `certutil` asks for a password only for a store that has
+/// one, and a prompt nobody can answer is a failure to report, not a hang.
+pub fn add(store: &Store, certutil: &Path, certificate: &Path) -> Result<(), String> {
+    let der = crate::trust::der(certificate)
+        .ok_or_else(|| format!("{} holds no certificate", certificate.display()))?;
+    let nickname = certificate
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_else(|| crate::trust::DEFAULT_CERTIFICATE_NAME.to_owned());
+    let mut target = std::ffi::OsString::from("sql:");
+    target.push(store.dir());
+
+    let output = std::process::Command::new(certutil)
+        .arg("-A")
+        .arg("-n")
+        .arg(&nickname)
+        .arg("-t")
+        .arg(INSTALLER_TRUST)
+        .arg("-i")
+        .arg(certificate)
+        .arg("-d")
+        .arg(&target)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|err| format!("could not run {}: {err}", certutil.display()))?;
+    if !output.status.success() {
+        let said = String::from_utf8_lossy(&output.stderr);
+        let said = said.trim();
+        return Err(if said.is_empty() {
+            format!("certutil failed ({})", output.status)
+        } else {
+            said.lines().last().unwrap_or(said).to_owned()
+        });
+    }
+    match read_state(&store.database, &der) {
+        StoreState::Trusted => Ok(()),
+        other => Err(format!(
+            "certutil reported success, but the store still reads as {other:?}"
+        )),
+    }
 }
 
 /// One `[ProfileN]` section of `profiles.ini`.
@@ -630,6 +769,105 @@ mod tests {
         assert_eq!(check.stores[0].database, elsewhere.join(DATABASE));
         assert_eq!(check.stores[1].browser, "Chromium (snap)");
         assert_eq!(check.stores[1].state, StoreState::Missing);
+    }
+
+    /// The stores the installer does not know: a Flatpak Chrome store it cannot
+    /// reach at all, and Flatpak and XDG Firefox profiles it reaches only when
+    /// named — even the default one.
+    #[test]
+    fn flatpak_and_xdg_stores_are_found_and_marked_unscanned() {
+        let home = Sandbox::new("flatpak");
+        store(&home.path().join(".var/app/com.google.Chrome/.pki/nssdb"), &[]);
+        let root = home.path().join(".var/app/org.mozilla.firefox/.mozilla/firefox");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("profiles.ini"),
+            "[Profile0]\nName=default\nIsRelative=1\nPath=f.default\nDefault=1\n",
+        )
+        .unwrap();
+        store(&root.join("f.default"), &[]);
+        let xdg = home.path().join(".config/mozilla/firefox");
+        fs::create_dir_all(&xdg).unwrap();
+        fs::write(
+            xdg.join("profiles.ini"),
+            "[Profile0]\nName=new\nIsRelative=1\nPath=n.default\nDefault=1\n",
+        )
+        .unwrap();
+        store(&xdg.join("n.default"), &[Entry::Trusted(OURS)]);
+
+        let check = BrowserStores::inspect(home.path(), OURS);
+        let names: Vec<String> = check.stores.iter().map(Store::name).collect();
+        assert_eq!(
+            names,
+            [
+                "Firefox profile “new”",
+                "Firefox (Flatpak) profile “default”",
+                "Chrome (Flatpak)",
+            ]
+        );
+        assert!(check.stores.iter().all(|store| !store.scanned));
+
+        let flatpak_firefox = &check.stores[1];
+        assert_eq!(flatpak_firefox.profile_flag(), Some(root.join("f.default").as_path()));
+        assert!(flatpak_firefox.installer_reaches());
+
+        let chrome = &check.stores[2];
+        assert_eq!(chrome.profile_flag(), None);
+        assert!(!chrome.installer_reaches());
+        assert_eq!(check.unmet().len(), 2);
+    }
+
+    /// [`add`] with the real `certutil`, against a store made for the purpose
+    /// in a temporary directory — never a browser's. Uses this machine's CA,
+    /// which is public; skips when either is missing.
+    #[test]
+    fn add_makes_a_store_trust_the_certificate() {
+        let (Some(certutil), Some(certificate)) = (
+            certutil(),
+            crate::paths::certificate(crate::trust::DEFAULT_CERTIFICATE_NAME)
+                .filter(|path| path.is_file()),
+        ) else {
+            eprintln!("skipping: no certutil or no certificate on this machine");
+            return;
+        };
+        let home = Sandbox::new("add");
+        let dir = home.path().join(".var/app/com.brave.Browser/.pki/nssdb");
+        fs::create_dir_all(&dir).unwrap();
+        let made = std::process::Command::new(&certutil)
+            .args(["-N", "--empty-password", "-d"])
+            .arg(format!("sql:{}", dir.display()))
+            .status()
+            .unwrap();
+        assert!(made.success());
+
+        let der = crate::trust::der(&certificate).unwrap();
+        let before = BrowserStores::inspect(home.path(), &der);
+        assert_eq!(before.unmet().len(), 1, "{before:?}");
+        assert_eq!(before.stores[0].browser, "Brave (Flatpak)");
+
+        add(&before.stores[0], &certutil, &certificate).expect("add");
+        let after = BrowserStores::inspect(home.path(), &der);
+        assert_eq!(after.stores[0].state, StoreState::Trusted);
+
+        // And a second time changes nothing and still succeeds.
+        add(&after.stores[0], &certutil, &certificate).expect("add again");
+    }
+
+    /// A `certutil` that exits 0 and does nothing is not believed.
+    #[test]
+    fn add_checks_the_store_rather_than_the_exit_status() {
+        let Some(certificate) = crate::paths::certificate(crate::trust::DEFAULT_CERTIFICATE_NAME)
+            .filter(|path| path.is_file())
+        else {
+            eprintln!("skipping: no certificate on this machine");
+            return;
+        };
+        let home = Sandbox::new("liar");
+        store(&home.path().join(".pki/nssdb"), &[]);
+        let der = crate::trust::der(&certificate).unwrap();
+        let check = BrowserStores::inspect(home.path(), &der);
+        let err = add(&check.stores[0], Path::new("/bin/true"), &certificate).unwrap_err();
+        assert!(err.contains("still reads as Missing"), "{err}");
     }
 
     /// The installer's reading of `profiles.ini`, including what it ignores:

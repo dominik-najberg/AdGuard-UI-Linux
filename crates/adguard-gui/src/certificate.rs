@@ -17,21 +17,28 @@
 //! to Firefox and Chrome, and two groups offering one command would read as two
 //! things to do.
 //!
-//! **Nothing in this file runs anything.** There is a copy button and no other
-//! affordance, exactly as with the `sudo` command on the Advanced page.
+//! **The one thing this file runs is AdGuard's own browser step**, since the
+//! last item of [issue #21]: *Add to Browsers* runs `certutil -A` against each
+//! browser store that lacks the certificate, exactly as `install_cert.sh` does
+//! for each store it finds (`adguard_core::nss::add`). It touches only the
+//! user's own files and needs no password, so it can be a button. The system
+//! store's half needs `sudo` and stays a command with a copy button, exactly as
+//! with the `sudo` command on the Advanced page.
+//!
+//! [issue #21]: https://github.com/dominik-najberg/AdGuard-UI-Linux/issues/21
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use adguard_core::nss::{BrowserStores, Store, StoreState};
+use adguard_core::nss::{self, BrowserStores, Store, StoreState};
 use adguard_core::trust::{self, CaTrust};
 use adw::prelude::*;
 use gtk4 as gtk;
 use libadwaita as adw;
 
 use crate::root_helper::join_with_and;
-use crate::{abbreviate, toast};
+use crate::{abbreviate, toast, worker};
 
 /// A group of up to three rows: what the system store says, what the browsers'
 /// own stores say, and what to run about it.
@@ -45,7 +52,17 @@ pub struct CertificateView {
     status: adw::ActionRow,
     /// The browsers whose own stores lack the certificate. Hidden when none do.
     browsers: adw::ActionRow,
+    /// On the browsers row: adds the certificate to every store that lacks it.
+    /// Shown only with a `certutil` to run.
+    add: gtk::Button,
     command: adw::ActionRow,
+    /// What the last paint was given, so the view can paint itself again once
+    /// the button's work is done.
+    last: RefCell<Option<(Option<bool>, String)>>,
+    /// The stores the button would change, and the certificate, as last read.
+    pending: RefCell<Option<(Vec<Store>, PathBuf)>>,
+    /// The button's work is running.
+    adding: Cell<bool>,
     /// The last reading rendered, so a re-check that found nothing new does not
     /// rebuild rows under the user's pointer.
     painted: RefCell<Option<String>>,
@@ -79,6 +96,16 @@ impl CertificateView {
         // room than the other rows, which carry one fact each.
         browsers.set_subtitle_lines(8);
         browsers.add_prefix(&gtk::Image::from_icon_name("dialog-warning-symbolic"));
+        let add = gtk::Button::builder()
+            .label("Add to Browsers")
+            .valign(gtk::Align::Center)
+            .tooltip_text(
+                "Add AdGuard's certificate to these browsers' own stores, as AdGuard's installer \
+                 does. No password is needed: only your own files change.",
+            )
+            .build();
+        add.add_css_class("suggested-action");
+        browsers.add_suffix(&add);
         group.add(&browsers);
 
         let command = adw::ActionRow::new();
@@ -114,16 +141,84 @@ impl CertificateView {
         command.add_suffix(&copy);
         group.add(&command);
 
-        Rc::new(Self {
+        let this = Rc::new(Self {
             group,
             status,
             browsers,
+            add,
             command,
+            last: RefCell::new(None),
+            pending: RefCell::new(None),
+            adding: Cell::new(false),
             painted: RefCell::new(None),
             installer: std::env::var_os("ADGUARD_CERT_INSTALLER")
                 .map(PathBuf::from)
                 .or_else(adguard_core::paths::cert_installer),
-        })
+        });
+        this.add.connect_clicked({
+            // Weak, for the reason the copy button's closure is.
+            let this = Rc::downgrade(&this);
+            let toasts = toasts.downgrade();
+            move |_| {
+                if let (Some(this), Some(toasts)) = (this.upgrade(), toasts.upgrade()) {
+                    this.add_to_browsers(&toasts);
+                }
+            }
+        });
+        this
+    }
+
+    /// Run the installer's browser step on every store that lacks the
+    /// certificate, then read everything again.
+    ///
+    /// Act, re-read, reconcile: `nss::add` already checks each store it wrote,
+    /// and the repaint afterwards reads them all a second time, so the rows say
+    /// what the stores hold rather than what was attempted.
+    fn add_to_browsers(self: &Rc<Self>, toasts: &adw::ToastOverlay) {
+        let Some((stores, certificate)) = self.pending.borrow().clone() else {
+            return;
+        };
+        let Some(certutil) = nss::certutil() else {
+            toasts.add_toast(toast("certutil could not be found"));
+            return;
+        };
+        if self.adding.replace(true) {
+            return;
+        }
+        self.add.set_sensitive(false);
+        self.add.set_label("Adding…");
+
+        let this = self.clone();
+        let toasts = toasts.clone();
+        worker::run(
+            move || {
+                stores
+                    .iter()
+                    .map(|store| (store.name(), nss::add(store, &certutil, &certificate)))
+                    .collect::<Vec<_>>()
+            },
+            move |results: Vec<(String, Result<(), String>)>| {
+                this.adding.set(false);
+                this.add.set_sensitive(true);
+                this.add.set_label("Add to Browsers");
+                let failed: Vec<_> = results.iter().filter(|(_, result)| result.is_err()).collect();
+                let message = match (failed.first(), results.len()) {
+                    (None, 1) => "Added to 1 browser store. An open browser may need restarting"
+                        .to_owned(),
+                    (None, n) => {
+                        format!("Added to {n} browser stores. An open browser may need restarting")
+                    }
+                    (Some((name, Err(why))), _) => format!("Could not add it to {name}: {why}"),
+                    (Some(_), _) => unreachable!("only failures are collected"),
+                };
+                toasts.add_toast(toast(&message));
+                this.painted.replace(None);
+                let last = this.last.borrow().clone();
+                if let Some((filtering, name)) = last {
+                    this.paint(filtering, &name);
+                }
+            },
+        );
     }
 
     pub fn widget(&self) -> &adw::PreferencesGroup {
@@ -149,6 +244,7 @@ impl CertificateView {
     /// is: the user's way out is a command they run elsewhere, so a cache would
     /// be stale at exactly the moment that matters.
     pub fn paint(&self, filtering: Option<bool>, certificate_name: &str) {
+        self.last.replace(Some((filtering, certificate_name.to_owned())));
         let check = (filtering != Some(false))
             .then(|| CaTrust::detect(certificate_name))
             .flatten();
@@ -168,7 +264,8 @@ impl CertificateView {
         // being true. Snapshotting the check alone would have made the guard
         // suppress precisely the repaint worth making.
         let remedy = check.as_ref().and_then(|trust| self.remedy(trust, &unmet));
-        let snapshot = format!("{check:?} {stores:?} {remedy:?}");
+        let certutil = nss::certutil();
+        let snapshot = format!("{check:?} {stores:?} {remedy:?} {certutil:?}");
         if self.painted.borrow().as_deref() == Some(snapshot.as_str()) {
             return;
         }
@@ -195,12 +292,22 @@ impl CertificateView {
         if let Some(stores) = &stores {
             self.browsers.set_subtitle(&explain_stores(stores, trust.is_trusted()));
         }
+        let button = !unmet.is_empty() && certutil.is_some();
+        self.add.set_visible(button);
+        self.pending.replace(button.then(|| {
+            (unmet.iter().map(|store| (*store).clone()).collect(), trust.certificate.clone())
+        }));
 
         match remedy {
             Some(remedy) => {
-                self.command.set_visible(true);
+                self.command.set_visible(!remedy.command.is_empty());
                 self.command.set_subtitle(&remedy.command);
-                self.group.set_description(Some(&remedy.description));
+                let mut description = remedy.description;
+                if button {
+                    description.push(' ');
+                    description.push_str(BUTTON);
+                }
+                self.group.set_description(Some(&description));
             }
             // No command to show. The state is still worth showing — it is the
             // reason HTTPS pages will fail — but the two reasons are not the
@@ -364,8 +471,20 @@ fn remedy(installer: Option<&Path>, trust: &CaTrust, unmet: &[&Store]) -> Option
         // finds the certificate installed, says so, and goes on to the
         // browsers — but only if a store it reaches by itself is waiting.
         _ => {
-            if unmet.iter().any(|store| store.profile_flag().is_none()) {
+            if unmet
+                .iter()
+                .any(|store| store.profile_flag().is_none() && store.installer_reaches())
+            {
                 steps.push(install.clone());
+            }
+            if unmet.iter().all(|store| !store.installer_reaches()) {
+                // Only Flatpak Chromium stores are waiting, and the installer
+                // cannot reach any of them: there is no command to show, and
+                // the button is the whole remedy.
+                return Some(Remedy {
+                    command: String::new(),
+                    description: FLATPAK_ONLY.to_owned(),
+                });
             }
             BROWSERS
         }
@@ -382,6 +501,11 @@ fn remedy(installer: Option<&Path>, trust: &CaTrust, unmet: &[&Store]) -> Option
         }
         description.push(' ');
         description.push_str(PROFILES);
+    }
+
+    if unmet.iter().any(|store| !store.installer_reaches()) {
+        description.push(' ');
+        description.push_str(FLATPAK);
     }
 
     Some(Remedy {
@@ -527,6 +651,22 @@ const REBUILD_AND_BROWSERS: &str = "The certificate is already in the system's c
                                     adds the certificate to the browsers. This application never \
                                     runs it for you.";
 
+/// Appended when the button is shown: what it does, in the terms the command's
+/// sentence has just used.
+const BUTTON: &str = "Or press Add to Browsers, which runs the installer's own step for each \
+                      browser here: no password, and only your own files change.";
+
+/// Appended when a Flatpak Chromium store is waiting, which the installer's
+/// command cannot reach.
+const FLATPAK: &str = "AdGuard's installer does not know about Flatpak browsers, so only Add to \
+                       Browsers reaches those.";
+
+/// Only Flatpak Chromium stores are waiting, and the system is done.
+const FLATPAK_ONLY: &str = "Filtered connections are signed by a certificate every browser has to \
+                            trust, and Flatpak browsers keep their own list. AdGuard's own \
+                            installer does not know about them, so there is no command for this; \
+                            Add to Browsers adds it.";
+
 /// Appended when a Firefox profile other than the default one needs it.
 const PROFILES: &str = "AdGuard's installer finds only the profile Firefox starts by default, so \
                         it is run once more for each other profile, named with its -f option.";
@@ -582,6 +722,7 @@ mod tests {
     fn chromium(state: StoreState) -> Store {
         Store {
             browser: "Chromium-based browsers",
+            scanned: true,
             profile: None,
             database: PathBuf::from("/h/.pki/nssdb/cert9.db"),
             state,
@@ -591,6 +732,7 @@ mod tests {
     fn firefox(name: &str, default: bool, state: StoreState) -> Store {
         Store {
             browser: "Firefox",
+            scanned: true,
             profile: Some(Profile {
                 name: name.to_owned(),
                 number: 1,
@@ -671,6 +813,24 @@ mod tests {
 
         let alone = remedy(Some(&installer), &trust(true, false), &[]).unwrap();
         assert_eq!(alone.command, trust::refresh_command());
+    }
+
+    /// A Flatpak Chromium store is out of the installer's reach: alone, there is
+    /// no command; beside a store it reaches, the command stays and says so.
+    #[test]
+    fn a_flatpak_store_has_no_command_of_its_own() {
+        let installer = installer();
+        let mut flatpak = chromium(StoreState::Missing);
+        flatpak.browser = "Chrome (Flatpak)";
+        flatpak.scanned = false;
+        let alone = remedy(Some(&installer), &trust(true, true), &[&flatpak]).unwrap();
+        assert!(alone.command.is_empty(), "{alone:?}");
+        assert_eq!(alone.description, FLATPAK_ONLY);
+
+        let native = chromium(StoreState::Missing);
+        let both = remedy(Some(&installer), &trust(true, true), &[&flatpak, &native]).unwrap();
+        assert!(both.command.contains("install_cert.sh"), "{both:?}");
+        assert!(both.description.ends_with(FLATPAK), "{both:?}");
     }
 
     /// Nothing to do, nothing named.

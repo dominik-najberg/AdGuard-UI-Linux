@@ -19,6 +19,7 @@ mod filter_settings;
 mod filters;
 mod geometry;
 mod protection;
+mod requests;
 mod root_helper;
 mod setup;
 mod status;
@@ -611,6 +612,9 @@ pub enum Destination {
     /// desktop entry, not `proxy.yaml`, so there is no key to name it by and
     /// `AdvancedPage::reveal` could not find it.
     Autostart,
+    /// The Activity page. Only the website check on Diagnostics leads here,
+    /// and it asks the page to search for the site as well.
+    Activity,
 }
 
 impl Destination {
@@ -622,6 +626,7 @@ impl Destination {
             Self::WebFilters => "filters",
             Self::DnsFilters | Self::DnsProxy => "dns",
             Self::Advanced(_) | Self::Autostart => "advanced",
+            Self::Activity => "activity",
         }
     }
 
@@ -915,7 +920,7 @@ fn main_view(cli: &Cli) -> MainView {
                 }
                 // The whole page is the answer: the six modules are all of it,
                 // and on Status the actions are at the top.
-                Destination::Protection | Destination::Status => {}
+                Destination::Protection | Destination::Status | Destination::Activity => {}
             }
         }
     });
@@ -926,7 +931,21 @@ fn main_view(cli: &Cli) -> MainView {
         let navigate = navigate.clone();
         move |destination| navigate(destination)
     });
-    diagnostics.connect_navigate(move |destination| navigate(destination));
+    diagnostics.connect_navigate({
+        let navigate = navigate.clone();
+        move |destination| navigate(destination)
+    });
+    // The website check's link to a site's requests: the Activity page, with
+    // the site already searched for.
+    diagnostics.connect_search({
+        let activity = Rc::downgrade(&activity);
+        move |host| {
+            navigate(Destination::Activity);
+            if let Some(activity) = activity.upgrade() {
+                activity.search_for(host);
+            }
+        }
+    });
 
     let sidebar_view = adw::ToolbarView::new();
     sidebar_view.add_top_bar(&adw::HeaderBar::new());
@@ -1178,6 +1197,7 @@ mod tests {
             Destination::DnsProxy,
             Destination::Advanced(adguard_core::config::key::PROXY_MODE),
             Destination::Autostart,
+            Destination::Activity,
         ] {
             assert!(
                 destination.page_index().is_some(),

@@ -22,6 +22,8 @@ pub mod paths;
 // Private: a `/proc` parse two modules here share, and nothing outside needs.
 mod proc;
 pub mod release;
+pub mod requests;
+pub mod site;
 pub mod trust;
 pub mod userscripts;
 pub mod window_state;
