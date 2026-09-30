@@ -1563,6 +1563,14 @@ So the installer writes only where it already sees a browser, and says the same 
 
 **The consequence is an ordering trap with no diagnostic anywhere.** Install a browser *after* running the command and it gets no manifest; the command has already reported success, the CLI will never mention it again, and the extension blames `adguard-cli`. Nothing in AdGuard's tooling closes that loop, which is why the app's check is re-read on window focus rather than performed once (`architecture.md` §6).
 
+### A browser's directory does not mean the browser is there
+
+Measured 30 September 2026 on the reference machine, which has only Google Chrome. `.config/chromium`, `.config/microsoft-edge`, `.config/BraveSoftware/Brave-Browser` and `.config/vivaldi` all existed, and each held **one entry, `NativeMessagingHosts`**. In it were manifests from 1Password, Claude Code and Codex beside AdGuard's own. Every application that ships a native-messaging host writes into every browser on its list, and creates the directory to do it. AdGuard's installer takes that directory as a browser and writes there too, which is harmless. This application read it the same way and reported four integrated browsers the user does not have.
+
+So `browser::installed` now refuses a marker directory whose **only** entry is `NativeMessagingHosts`. Anything else in it counts, including nothing at all, which is the shape the sandbox recipes use and which no manifest writer produces.
+
+**Firefox installed as a snap is invisible to all six paths.** Its profile lives under `~/snap/firefox/common/.mozilla/firefox`, and neither AdGuard's installer nor this check looks there. Whether AdGuard's extension in a snap Firefox can reach a native host at all, and where it would read the manifest from, is **not measured**. So nothing reports it rather than guessing.
+
 ### What we do with it
 
 Read the manifests; never speak the protocol. `adguard_cli_nm` is a stdio native-messaging host whose manifests name the extension IDs permitted to reach it, so the browser vouches for the caller — impersonating one of those extensions is both fragile and rude ([§1](#1-rejected-integration-points)).
