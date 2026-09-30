@@ -1257,7 +1257,7 @@ Caveats before building stats on this:
 - No rotation policy is configured by us — but **AdGuard rotates these itself**, and a reader must survive it. Measured 2 August 2026: `~/.local/share/adguard-cli/logs/` held `proxy.log.1` at 10,485,626 B and `access.log.1`/`.2` at 10,485,776 / 10,485,648 B — a ~10 MiB threshold with at least two generations kept. It is the writing process's own roll, not `logrotate` and not cron: there is no `/etc/logrotate.d` entry and no cron entry, and the seam is continuous — `proxy.log.1` ends `30.07.2026 22:21:07.275314 WARN [2394586]` and `proxy.log` begins `30.07.2026 22:21:07.276439 WARN [2394586]`, 1.1 ms later under the same PID. **A tailer holding an fd loses the stream silently every ~10 MiB.**
 - There is **no push or event mechanism**. A live view must tail the file.
 
-**One thing does read this file, and it reads it defensively.** `access.rs` tails it to answer whether traffic is reaching the proxy at all — the measurement is in [§8](#scoping-that-to-a-proxy-run--and-what-the-day-table-hides). Because the format is undocumented, every guard there fails to *silence*: a line is read only when it has exactly sixteen whitespace-separated fields and its eighth parses as an HTTP status code, and no other column on the line does. A format that gains a column, renames the client or restyles the date therefore takes the check off rather than turning it on. `tests/access_live.rs` is what notices that has happened.
+**Two things read this file, and both read it defensively.** The second is `activity.rs`, which counts every line for the Activity page and is described below the measurement it was built on. The first: `access.rs` tails it to answer whether traffic is reaching the proxy at all — the measurement is in [§8](#scoping-that-to-a-proxy-run--and-what-the-day-table-hides). Because the format is undocumented, every guard there fails to *silence*: a line is read only when it has exactly sixteen whitespace-separated fields and its eighth parses as an HTTP status code, and no other column on the line does. A format that gains a column, renames the client or restyles the date therefore takes the check off rather than turning it on. `tests/access_live.rs` is what notices that has happened.
 
 `har_writer` (`enabled`, `location`) is the richer alternative for debugging but writes full HAR dumps — too heavy for an always-on *capture*, which `architecture.md` §7 distinguishes from a switch that ships `false`.
 
@@ -1289,6 +1289,14 @@ Measured 30 September 2026 against `adguard-cli` 1.4.13 at `log_level: 'info'`, 
 **Two privacy facts the milestone inherits.** The rule text in field 17 routinely contains the domain it matched, so a "top rules" view is a browsing record too, not only the host column. And field 3 names every program on the machine that used the network.
 
 **Still open, and each one is the owner's to authorise:** what `log_level` `debug` or `trace` adds or removes; whether 1.4.13's shape survives a CLI upgrade; and what field 11 counts.
+
+### What the Activity page takes from a line
+
+`activity.rs` reads fields 1–3, 6, 10, 12, 14 and 17, and stores less than it reads. Field 6 keeps only its host: the scheme, any user information, the port, the path and the query are dropped at parse time. Fields 7 (referrer) and 13 (upstream) are checked for position only and are never stored. The decision behind that is `architecture.md` §7's.
+
+A line is read only when sixteen fields come before the rule, field 16 is `--`, field 3 is quoted, field 10 is one of the six measured actions, field 14 is a number followed by `b` and field 15 a number followed by `ms`. It also needs an `ID=<n>` in field 12 exactly when there is rule text after the marker. Rule text is taken as everything after the marker, so a rule that contains spaces stays whole. A line that fails any of these checks is **counted as unread** and shown on the page as a warning that the figures may be low. That is the same fail-to-silence direction as `access.rs`, made visible.
+
+**Measured 30 September 2026 against the same ten generations:** 236,433 lines read and 0 unread, in 154 ms (release build). A 176 KiB database holds the three and a half days. `tests/activity_live.rs` repeats the read against whatever the machine's log holds and fails on a single unread line, which makes it the canary for the open questions above: a CLI upgrade that moves a column shows up there first.
 
 ### Where a relative path resolves — measured, and the answer is "it depends on the key"
 

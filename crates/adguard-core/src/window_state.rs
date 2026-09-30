@@ -120,7 +120,7 @@ const LIMIT: u64 = 64 * 1024;
 /// reverse-DNS id appears in [`crate::autostart::ENTRY`] only because a desktop
 /// entry's *filename* has to match it or GNOME stops grouping the window with
 /// its launcher.
-const SUBDIR: &str = "adguard-ui";
+pub(crate) const SUBDIR: &str = "adguard-ui";
 
 /// The file itself. Suffixed, so a second thing worth remembering can sit
 /// beside it later without this one needing a rename first.
@@ -374,7 +374,7 @@ fn worth_reading(meta: &fs::Metadata) -> bool {
 }
 
 /// `$XDG_STATE_HOME`, or `~/.local/state`.
-fn state_home() -> Option<PathBuf> {
+pub(crate) fn state_home() -> Option<PathBuf> {
     state_home_from(
         std::env::var_os("XDG_STATE_HOME"),
         std::env::var_os("HOME"),

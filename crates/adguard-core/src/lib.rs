@@ -6,6 +6,7 @@
 //! See `docs/cli-contract.md` for the measured CLI behaviour this encodes.
 
 pub mod access;
+pub mod activity;
 pub mod autostart;
 pub mod browser;
 pub mod cli;
