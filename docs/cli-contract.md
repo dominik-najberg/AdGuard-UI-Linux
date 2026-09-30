@@ -1261,6 +1261,35 @@ Caveats before building stats on this:
 
 `har_writer` (`enabled`, `location`) is the richer alternative for debugging but writes full HAR dumps — too heavy for an always-on *capture*, which `architecture.md` §7 distinguishes from a switch that ships `false`.
 
+### What a line carries — the read-only half of the stats spike
+
+Measured 30 September 2026 against `adguard-cli` 1.4.13 at `log_level: 'info'`, by reading the live log and every rotated generation on the reference machine. Nothing was written, and no proxy was restarted. **This is the half of the spike `v2-plan.md` §3.5 asked for that needs no permission.** The other half needs `log_level` changed on a real install and a second CLI version, and is not taken.
+
+**The rotation keeps ten generations, not two.** `access.log` plus `access.log.1` through `.9`, each rolled at ~10 MiB. When read, the live file and its nine predecessors held **233,066 lines** covering 27 to 30 September, about three and a half days. At heavier browsing a generation lasts two hours. So the log is a sliding window of a few days whose length depends on traffic, never a history. Anything that wants longer has to copy lines out, and that copy is the browsing record the stats milestone has to decide whether to keep.
+
+**Two line shapes, sixteen and seventeen fields**, across all ten generations: 189,313 of the first and 44,753 of the second, and nothing else. What the columns hold, by position, with the fields in `access.rs`'s own numbering:
+
+| Field | Holds | Observed values |
+| --- | --- | --- |
+| 3 | The **client process name**, quoted | `"chrome"`, `"slack"`, `"gh"`, `"internal_proxy_client"`, `"Unknown"`, … — per-application attribution comes free |
+| 4 | Protocol | `HTTP1`, `HTTP2`, `TLS`, `IQUIC`, `TCP`, `UDP`, `STUN_TURN` |
+| 6, 7 | Host and path | `-` where the protocol has none; **the browsing record itself** |
+| 9 | Request type | `xhr`, `img`, `script`, `any`, `other\|xhr`, … — `\|`-joined |
+| 10 | **Action** | `NONE`, `MODIFIED_META`, `BLOCKED`, `MODIFIED_CONTENT`, `WHITELISTED`, `-` |
+| 11 | A small count (0–3 observed) | Not yet identified. Rule matches is a guess, and not a measurement |
+| 12 | `ID=<n>` when a rule decided the line, otherwise `-` | `ID=2` is AdGuard Base's id in `agflm_standard.db` |
+| 17 | **The rule's text**, after the `--` marker, present exactly when field 12 is `ID=` | e.g. an `@@…` exception or a blocking rule |
+
+**Blocking is attributable to a filter list**, which is the finding that decides whether "top blocking rules" is buildable. Of 44,690 `BLOCKED` lines, 44,284 carry `ID=`, which joins against the catalogue for the list's name, and the rule text itself. The 406 without it are all `TLS` or `IQUIC`, and what blocked them is not identified.
+
+**Counts are not a steady rate.** `BLOCKED` ran from 73 of 14,924 lines in one generation to 9,856 of 18,123 in another. In the five heavy generations every blocked line came from one client. In the one examined closely, all 9,575 also came from one filter list, and each was to a **different host**, so one source of requests was enough to multiply the figure a hundredfold. A dashboard that shows a raw total will mostly be showing whatever that source is.
+
+**QUIC is logged, and not like the rest.** `IQUIC` lines split almost evenly between action `NONE` (2,319) and `-` (2,323), with 365 `BLOCKED`. `https_filtering.http3_filtering_enabled` is `true` on this machine. Whether `-` means "not inspected" is exactly the HTTP/3 question issue #21 raises, and one machine's log cannot answer it.
+
+**Two privacy facts the milestone inherits.** The rule text in field 17 routinely contains the domain it matched, so a "top rules" view is a browsing record too, not only the host column. And field 3 names every program on the machine that used the network.
+
+**Still open, and each one is the owner's to authorise:** what `log_level` `debug` or `trace` adds or removes; whether 1.4.13's shape survives a CLI upgrade; and what field 11 counts.
+
 ### Where a relative path resolves — measured, and the answer is "it depends on the key"
 
 `architecture.md` §7 makes *where `har_writer.location: '.'` resolves* the first task of the HAR item, on the grounds that nothing records the proxy's working directory. **The working directory is now recorded, and it does not settle the question — it sharpens it.** Measured 2 August 2026:
