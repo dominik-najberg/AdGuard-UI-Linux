@@ -16,13 +16,18 @@
 //! while it is showing, and it says when the reading was taken, so a snapshot
 //! is never mistaken for a live view.
 //!
-//! # It writes nothing, and it links nowhere yet
+//! # It writes nothing, and every problem leads to its fix
 //!
 //! Every fix for a problem shown here already lives on the page that owns it —
 //! the helper's command on Advanced, the certificate's and the browsers' on
 //! Protection, the restart on Status. Repeating those controls here would be a
-//! second copy of each to keep in step; the page names the problem and the
-//! other pages keep their one writer.
+//! second copy of each to keep in step, so a problem row says what fixes it
+//! and **leads to the page that holds the fix**, the way a reading on Status
+//! leads to its setting. The other pages keep their one writer.
+//!
+//! The first version of this page named problems and stopped there, and the
+//! first person to use it said so: a failure with no way forward reads as the
+//! application shrugging.
 //!
 //! [issue #21]: https://github.com/dominik-najberg/AdGuard-UI-Linux/issues/21
 
@@ -36,7 +41,10 @@ use gtk::glib;
 use gtk4 as gtk;
 use libadwaita as adw;
 
-use crate::{toast, worker};
+use adguard_core::config::key;
+use adguard_core::diagnostics::FixedOn;
+
+use crate::{toast, worker, Destination};
 
 /// What the page is, before anything has been read.
 const WHAT_IT_IS: &str =
@@ -67,6 +75,8 @@ pub struct DiagnosticsPage {
     /// would put two sets of CLI calls against one data directory (contract
     /// §3) for an answer the first is about to give.
     busy: Cell<bool>,
+    /// Where a problem row's fix is, resolved by the window — as on Status.
+    navigate: Rc<RefCell<Option<Box<dyn Fn(Destination)>>>>,
 }
 
 impl DiagnosticsPage {
@@ -95,6 +105,7 @@ impl DiagnosticsPage {
             sections: RefCell::new(Vec::new()),
             text: RefCell::new(None),
             busy: Cell::new(false),
+            navigate: Rc::new(RefCell::new(None)),
         });
 
         this.copy.connect_clicked({
@@ -115,6 +126,11 @@ impl DiagnosticsPage {
 
     pub fn widget(&self) -> &adw::PreferencesPage {
         &self.page
+    }
+
+    /// Called with the page that holds a problem's fix, when its row is clicked.
+    pub fn connect_navigate(&self, navigate: impl Fn(Destination) + 'static) {
+        self.navigate.replace(Some(Box::new(navigate)));
     }
 
     /// Read everything again. Called when the page is selected and by the
@@ -146,7 +162,7 @@ impl DiagnosticsPage {
         let groups: Vec<_> = report
             .sections
             .iter()
-            .map(|section| section_group(section, home.as_deref()))
+            .map(|section| section_group(section, home.as_deref(), &self.navigate))
             .collect();
         for group in &groups {
             self.page.add(group);
@@ -180,25 +196,63 @@ fn summary(problems: usize) -> String {
 /// One report section as a group. Values are shown with the home directory
 /// shortened, as every other page shows a path, and so the screen and the
 /// copied text read the same.
-fn section_group(section: &diagnostics::Section, home: Option<&str>) -> adw::PreferencesGroup {
+fn section_group(
+    section: &diagnostics::Section,
+    home: Option<&str>,
+    navigate: &Rc<RefCell<Option<Box<dyn Fn(Destination)>>>>,
+) -> adw::PreferencesGroup {
     let group = adw::PreferencesGroup::builder().title(section.title).build();
     if let Some(note) = section.note {
         group.set_description(Some(note));
     }
     for finding in &section.findings {
-        group.add(&finding_row(finding, home));
+        group.add(&finding_row(finding, home, navigate));
     }
     group
 }
 
-fn finding_row(finding: &diagnostics::Finding, home: Option<&str>) -> adw::ActionRow {
+fn finding_row(
+    finding: &diagnostics::Finding,
+    home: Option<&str>,
+    navigate: &Rc<RefCell<Option<Box<dyn Fn(Destination)>>>>,
+) -> adw::ActionRow {
     let row = adw::ActionRow::new();
     // Before the strings, which are consumed as they are set: CLI messages and
     // paths can contain `&`, and markup is on by default.
     row.set_use_markup(false);
     row.set_title(finding.label);
-    row.set_subtitle(&diagnostics::redact_home(&finding.value, home));
-    row.set_subtitle_selectable(true);
+    let value = diagnostics::redact_home(&finding.value, home);
+
+    match finding.remedy {
+        // The reading, then what fixes it, on a line of its own so the two are
+        // not read as one sentence.
+        Some(remedy) => {
+            row.set_subtitle(&format!("{value}\n{}", remedy.hint));
+            row.set_subtitle_lines(0);
+            if let Some(page) = remedy.page {
+                // A link rather than a button: nothing here runs the fix, it
+                // leads to the one control that does. Not selectable, because a
+                // selectable label swallows the click that should activate the
+                // row.
+                row.set_activatable(true);
+                row.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
+                let navigate = Rc::downgrade(navigate);
+                row.connect_activated(move |_| {
+                    if let Some(navigate) = navigate.upgrade() {
+                        if let Some(navigate) = navigate.borrow().as_ref() {
+                            navigate(destination(page));
+                        }
+                    }
+                });
+            } else {
+                row.set_subtitle_selectable(true);
+            }
+        }
+        None => {
+            row.set_subtitle(&value);
+            row.set_subtitle_selectable(true);
+        }
+    }
 
     let image = match marker(finding.level) {
         Some((icon, class, word)) => {
@@ -221,6 +275,16 @@ fn finding_row(finding: &diagnostics::Finding, home: Option<&str>) -> adw::Actio
     };
     row.add_prefix(&image);
     row
+}
+
+/// The window's name for the page a fix is on.
+fn destination(page: FixedOn) -> Destination {
+    match page {
+        FixedOn::Status => Destination::Status,
+        FixedOn::Protection => Destination::Protection,
+        FixedOn::AdvancedProxyMode => Destination::Advanced(key::PROXY_MODE),
+        FixedOn::DnsProxy => Destination::DnsProxy,
+    }
 }
 
 /// The icon, its colour and its spoken word, by level. A plain reading gets

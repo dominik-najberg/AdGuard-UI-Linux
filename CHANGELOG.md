@@ -19,7 +19,11 @@ The second item of [#21](https://github.com/dominik-najberg/AdGuard-UI-Linux/iss
 
 **Copy report** puts the same lines on the clipboard as plain text for a bug report. It shortens your home folder to `~` and never includes your licence key, e-mail, network addresses or anything from your browsing.
 
-The page is read when you open it and when you press refresh, and it changes nothing.
+Each problem says what fixes it, and clicking it takes you to the page that has the fix: Status for a restart or activation, Protection for the certificate and browser commands, Advanced for the root helper, DNS for the listen port. The page is read when you open it and when you press refresh, and it changes nothing itself.
+
+### Browsers you do not have are no longer listed
+
+Password managers and other extensions' helpers create a folder for every browser they support, whether or not that browser is installed. AdGuard's browser-integration check took any such folder as an installed browser. A folder that holds nothing but those helpers' files now does not count. The Protection page uses the same check and is corrected with it.
 
 ---
 

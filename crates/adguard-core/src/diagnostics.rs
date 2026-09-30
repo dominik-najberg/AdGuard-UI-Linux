@@ -88,12 +88,45 @@ impl Level {
     }
 }
 
+/// The page that holds the fix for a problem.
+///
+/// Named here rather than in the GUI because *which* page owns a fix is a fact
+/// about the check, and the report's text has to say it too. The GUI maps each
+/// one to its own navigation; nothing here knows how a page is reached.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FixedOn {
+    /// Start, stop, restart, and licence activation.
+    Status,
+    /// The certificate and browser-integration commands.
+    Protection,
+    /// The root helper's setup command, under the proxy-mode setting.
+    AdvancedProxyMode,
+    /// The local DNS proxy's listen port.
+    DnsProxy,
+}
+
+/// What to do about a problem, and where.
+///
+/// **A pointer, never the command itself.** Each command already has one
+/// renderer, on the page that owns it, which checks it is safe to show before
+/// showing it (`trust::quotable`) and withholds it when it is not. A second
+/// copy here would be a second place to get that wrong.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Remedy {
+    pub hint: &'static str,
+    /// `None` when no page in this application can help — a missing file only
+    /// reinstalling AdGuard restores.
+    pub page: Option<FixedOn>,
+}
+
 /// One line of the report.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Finding {
     pub label: &'static str,
     pub value: String,
     pub level: Level,
+    /// Set on every [`Level::Problem`] this application knows a fix for.
+    pub remedy: Option<Remedy>,
 }
 
 impl Finding {
@@ -102,7 +135,14 @@ impl Finding {
             label,
             value: value.into(),
             level,
+            remedy: None,
         }
+    }
+
+    /// Attach a fix. Only meaningful on a problem, and only ever called on one.
+    fn fixed(mut self, hint: &'static str, page: Option<FixedOn>) -> Self {
+        self.remedy = Some(Remedy { hint, page });
+        self
     }
 }
 
@@ -277,6 +317,9 @@ impl Report {
                     finding.label,
                     finding.value
                 ));
+                if let Some(remedy) = finding.remedy {
+                    out.push_str(&format!("         Fix: {}\n", remedy.hint));
+                }
             }
         }
         out
@@ -309,7 +352,11 @@ fn cli_section(inputs: &Inputs) -> Section {
         Ok(config) => Finding::new("Configuration", config.path().display().to_string(), Level::Fact),
         // An unreadable `proxy.yaml` is positive evidence: every page reads
         // its settings from there, and none of them can show anything.
-        Err(err) => Finding::new("Configuration", err.clone(), Level::Problem),
+        Err(err) => Finding::new("Configuration", err.clone(), Level::Problem).fixed(
+            "Every page reads its settings from this file. Correct it by hand, or restore it \
+             from a backup.",
+            None,
+        ),
     });
 
     findings.push(match &inputs.licence {
@@ -318,10 +365,10 @@ fn cli_section(inputs: &Inputs) -> Section {
         }
         // Rendered as itself: a status word this does not recognise is shown
         // rather than mapped, the same as the Status page does.
-        Ok(status) => Finding::new("Licence", status.clone(), Level::Problem),
-        Err(LicenceError::Unlicensed) => {
-            Finding::new("Licence", "Not activated", Level::Problem)
-        }
+        Ok(status) => Finding::new("Licence", status.clone(), Level::Problem)
+            .fixed(ACTIVATE, Some(FixedOn::Status)),
+        Err(LicenceError::Unlicensed) => Finding::new("Licence", "Not activated", Level::Problem)
+            .fixed(ACTIVATE, Some(FixedOn::Status)),
         Err(LicenceError::Unreadable(err)) => Finding::new("Licence", err.clone(), Level::Unknown),
     });
 
@@ -343,6 +390,7 @@ fn proxy_section(inputs: &Inputs, config: Option<&Config>) -> Section {
                 // Stopped is something the user may have chosen, and still the
                 // first thing anyone diagnosing "nothing is filtered" needs.
                 Finding::new("State", "Stopped", Level::Problem)
+                    .fixed("Start protection on the Status page.", Some(FixedOn::Status))
             });
             Some(status)
         }
@@ -380,8 +428,12 @@ fn proxy_section(inputs: &Inputs, config: Option<&Config>) -> Section {
             HelperProcess::Running => Finding::new("Root helper process", "Running", Level::Healthy),
             HelperProcess::Defunct => Finding::new(
                 "Root helper process",
-                "Exited — traffic is no longer reaching the proxy. Restarting it clears this.",
+                "Exited — traffic is no longer reaching the proxy",
                 Level::Problem,
+            )
+            .fixed(
+                "Restart protection on the Status page. A restart is what clears this.",
+                Some(FixedOn::Status),
             ),
             HelperProcess::Unseen => {
                 Finding::new("Root helper process", "Not seen", Level::Unknown)
@@ -398,6 +450,12 @@ fn proxy_section(inputs: &Inputs, config: Option<&Config>) -> Section {
                 "AdGuard's own requests have been failing for hours, and nothing else is \
                  reaching the proxy",
                 Level::Problem,
+            )
+            .fixed(
+                "Restart protection on the Status page, which is what cleared this every time it \
+                 was measured. If this computer has been offline for hours, that alone would \
+                 explain it.",
+                Some(FixedOn::Status),
             ),
             Some(Filtering::Unseen) => Finding::new(
                 "Traffic",
@@ -433,6 +491,11 @@ fn daemon_finding(daemons: &Daemons, claims_running: Option<bool>) -> Finding {
             LABEL,
             format!("PID {pid}, though the CLI reports the proxy stopped — it has lost track of it"),
             Level::Problem,
+        )
+        .fixed(
+            "Start protection on the Status page. If this process is in the way, the page ends \
+             it and tries again.",
+            Some(FixedOn::Status),
         ),
         (Daemons::One { pid, uptime, .. }, _) => {
             let value = match uptime {
@@ -449,6 +512,11 @@ fn daemon_finding(daemons: &Daemons, claims_running: Option<bool>) -> Finding {
                 pids.iter().map(i32::to_string).collect::<Vec<_>>().join(", ")
             ),
             Level::Problem,
+        )
+        .fixed(
+            "Stop protection on the Status page and start it again. A start that finds a \
+             leftover process in its way ends it and tries again.",
+            Some(FixedOn::Status),
         ),
     }
 }
@@ -469,6 +537,10 @@ fn helper_section(inputs: &Inputs) -> Section {
                     "Setup",
                     format!("Missing {}", helper.unmet().join(", ")),
                     Level::Problem,
+                )
+                .fixed(
+                    "Advanced shows AdGuard's own command that sets it up, under Proxy mode.",
+                    Some(FixedOn::AdvancedProxyMode),
                 )
             };
             vec![
@@ -511,6 +583,10 @@ fn https_section(inputs: &Inputs, config: Option<&Config>) -> Section {
             };
             findings.push(match ca.unmet().first() {
                 None => Finding::new("Certificate", "Trusted by the system", Level::Healthy),
+                Some(unmet) if failing == Level::Problem => {
+                    Finding::new("Certificate", capitalise(unmet), failing)
+                        .fixed(certificate_fix(ca), Some(FixedOn::Protection))
+                }
                 Some(unmet) => Finding::new("Certificate", capitalise(unmet), failing),
             });
             findings.push(Finding::new(
@@ -541,11 +617,14 @@ fn browser_section(inputs: &Inputs) -> Section {
         Some(integration) => {
             let mut findings = Vec::new();
             if !integration.host_present {
-                findings.push(Finding::new(
-                    "Native host",
-                    format!("{} is missing beside adguard-cli", browser::HOST_BINARY),
-                    Level::Problem,
-                ));
+                findings.push(
+                    Finding::new(
+                        "Native host",
+                        format!("{} is missing beside adguard-cli", browser::HOST_BINARY),
+                        Level::Problem,
+                    )
+                    .fixed("Reinstalling AdGuard CLI restores it.", None),
+                );
             }
             if integration.browsers.is_empty() {
                 findings.push(Finding::new(
@@ -559,12 +638,14 @@ fn browser_section(inputs: &Inputs) -> Section {
                     browser::State::Ready => Finding::new(found.name, "Integrated", Level::Healthy),
                     browser::State::Missing => {
                         Finding::new(found.name, "Not integrated", Level::Problem)
+                            .fixed(INTEGRATE, Some(FixedOn::Protection))
                     }
                     browser::State::Stale(named) => Finding::new(
                         found.name,
                         format!("Points at {}, not this AdGuard", named.display()),
                         Level::Problem,
-                    ),
+                    )
+                    .fixed(INTEGRATE, Some(FixedOn::Protection)),
                     browser::State::Unreadable(why) => Finding::new(
                         found.name,
                         format!("Manifest could not be read: {why}"),
@@ -589,11 +670,17 @@ fn dns_section(inputs: &Inputs, config: Option<&Config>) -> Section {
     // The one dependency the CLI does not enforce and the pages already warn
     // about: on in manual mode with no listener filters nothing (contract §5).
     if enabled == Some(true) && config.is_some_and(Config::dns_filtering_is_inert) {
-        findings.push(Finding::new(
-            "Listener",
-            "None — in manual mode DNS filtering needs a listen port, so it filters nothing",
-            Level::Problem,
-        ));
+        findings.push(
+            Finding::new(
+                "Listener",
+                "None — in manual mode DNS filtering needs a listen port, so it filters nothing",
+                Level::Problem,
+            )
+            .fixed(
+                "Give the local DNS proxy a port on the DNS page.",
+                Some(FixedOn::DnsProxy),
+            ),
+        );
     }
     if let Ok(status) = &inputs.status {
         if status.running {
@@ -633,6 +720,32 @@ fn loopback_or_port(endpoint: &str) -> String {
         "a non-loopback address".to_owned()
     } else {
         format!("port {port}, on a non-loopback address")
+    }
+}
+
+/// The licence's fix, from either of its two failing readings.
+const ACTIVATE: &str = "Activate it on the Status page.";
+
+/// A browser's fix. One command covers every browser AdGuard finds.
+const INTEGRATE: &str =
+    "Protection shows AdGuard's own command that installs the integration for every browser it \
+     finds.";
+
+/// What fixes the certificate, by which step it has not reached.
+///
+/// In [`CaTrust::unmet`]'s order, and matching the command the Protection page
+/// shows for each — that page renders the command, this names it.
+fn certificate_fix(ca: &CaTrust) -> &'static str {
+    if !ca.generated {
+        "Protection shows AdGuard's own command that generates one."
+    } else if ca.stale {
+        "AdGuard's installer will not replace a file of the same name, so the old certificate \
+         has to be removed first. Protection shows one command that does both; it asks for \
+         your password."
+    } else if !ca.anchored {
+        "Protection shows AdGuard's own installer command; it asks for your password."
+    } else {
+        "Protection shows the command that rebuilds the system's trust store."
     }
 }
 
@@ -813,10 +926,16 @@ mod tests {
         let found = finding(&report, "HTTPS filtering", "Certificate");
         assert_eq!(found.level, Level::Problem);
         assert_eq!(found.value, "No certificate has been generated");
+        assert_eq!(found.remedy.map(|r| r.page), Some(Some(FixedOn::Protection)));
 
         inputs.config = Ok(config("https_filtering:\n  enabled: false\n"));
         let report = Report::build(&inputs);
-        assert_eq!(finding(&report, "HTTPS filtering", "Certificate").level, Level::Fact);
+        let found = finding(&report, "HTTPS filtering", "Certificate");
+        assert_eq!(found.level, Level::Fact);
+        // Nothing to fix while nothing depends on it — and the Protection page
+        // hides its certificate rows in this state, so a link would land on
+        // nothing.
+        assert_eq!(found.remedy, None);
     }
 
     #[test]
@@ -892,6 +1011,61 @@ mod tests {
         assert_eq!(loopback_or_port("192.168.1.20:3129"), "port 3129, on a non-loopback address");
         assert_eq!(loopback_or_port("0.0.0.0:1081"), "port 1081, on a non-loopback address");
         assert_eq!(loopback_or_port("[fe80::1]:1081"), "port 1081, on a non-loopback address");
+    }
+
+    /// The user's complaint that prompted this: a problem with no way forward.
+    #[test]
+    fn every_problem_says_how_to_fix_it() {
+        let home = std::env::temp_dir().join(format!("adguard-diag-fix-{}", std::process::id()));
+        std::fs::create_dir_all(home.join(".config/chromium")).unwrap();
+        let inputs = Inputs {
+            binary: PathBuf::from("/x/adguard-cli"),
+            version: Err("gone".into()),
+            status: Ok(ProxyStatus {
+                running: false,
+                ..running()
+            }),
+            licence: Err(LicenceError::Unlicensed),
+            config: Ok(config(
+                "proxy_mode: 'manual'\nhttps_filtering:\n  enabled: true\n\
+                 dns_filtering:\n  enabled: true\n  listen_port: -1\n",
+            )),
+            daemons: Daemons::One {
+                pid: 7,
+                uptime: None,
+                helper: HelperProcess::Defunct,
+                filtering: Some(Filtering::Bypassed),
+            },
+            helper: Some(RootHelper::inspect("/bin/sh").map_err(|err| err.to_string())),
+            ca: Some(CaTrust::inspect("/nonexistent/AdGuard CLI CA.pem", None, None)),
+            browsers: Some(BrowserIntegration::detect_under(&home, None)),
+        };
+        let report = Report::build(&inputs);
+        std::fs::remove_dir_all(&home).unwrap();
+
+        let problems: Vec<_> = report.problems().collect();
+        assert!(problems.len() >= 8, "{problems:#?}");
+        for problem in problems {
+            assert!(problem.remedy.is_some(), "no fix for {problem:?}");
+        }
+        // And only problems carry one: a fix beside a passing line would read
+        // as an instruction to change something that works.
+        for section in &report.sections {
+            for finding in section.findings.iter().filter(|f| f.level != Level::Problem) {
+                assert_eq!(finding.remedy, None, "{finding:?}");
+            }
+        }
+        assert!(report.text("t").contains("         Fix: Activate it on the Status page.\n"));
+    }
+
+    #[test]
+    fn a_stale_certificate_says_the_old_one_has_to_go_first() {
+        let ca = CaTrust {
+            stale: true,
+            ..CaTrust::inspect("/nonexistent/AdGuard CLI CA.pem", None, None)
+        };
+        let ca = CaTrust { generated: true, ..ca };
+        assert!(certificate_fix(&ca).contains("removed first"), "{}", certificate_fix(&ca));
     }
 
     #[test]

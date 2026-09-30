@@ -580,6 +580,9 @@ struct Page {
 /// step, and what "arriving" means once there, are all [`main_view`]'s business.
 #[derive(Clone, Copy)]
 pub enum Destination {
+    /// The Status page itself — start, stop, restart and the licence. Only the
+    /// Diagnostics page leads here; every link on Status leads away from it.
+    Status,
     /// The six protection modules.
     Protection,
     /// The HTTP/HTTPS filter catalogue.
@@ -603,6 +606,7 @@ impl Destination {
     /// Which of [`PAGES`] this leads to.
     fn page(self) -> &'static str {
         match self {
+            Self::Status => "status",
             Self::Protection => "protection",
             Self::WebFilters => "filters",
             Self::DnsFilters | Self::DnsProxy => "dns",
@@ -838,7 +842,7 @@ fn main_view(cli: &Cli) -> MainView {
     // Every capture here is weak, and it has to be: the sidebar's own
     // `row-selected` handler holds a strong `status`, so a strong sidebar here
     // would close the loop and neither would ever be freed.
-    status.connect_navigate({
+    let navigate = Rc::new({
         let sidebar = sidebar.downgrade();
         let advanced = Rc::downgrade(&advanced);
         let dns = Rc::downgrade(&dns);
@@ -886,11 +890,20 @@ fn main_view(cli: &Cli) -> MainView {
                         dns.scroll_to_lists();
                     }
                 }
-                // The whole page is the answer: the six modules are all of it.
-                Destination::Protection => {}
+                // The whole page is the answer: the six modules are all of it,
+                // and on Status the actions are at the top.
+                Destination::Protection | Destination::Status => {}
             }
         }
     });
+    // Two pages link to the others: Status to the setting behind each reading,
+    // and Diagnostics to the fix for each problem (#21). One resolver, so the
+    // two cannot disagree about where a destination is.
+    status.connect_navigate({
+        let navigate = navigate.clone();
+        move |destination| navigate(destination)
+    });
+    diagnostics.connect_navigate(move |destination| navigate(destination));
 
     let sidebar_view = adw::ToolbarView::new();
     sidebar_view.add_top_bar(&adw::HeaderBar::new());
@@ -1130,6 +1143,7 @@ mod tests {
     #[test]
     fn every_destination_names_a_page() {
         for destination in [
+            Destination::Status,
             Destination::Protection,
             Destination::WebFilters,
             Destination::DnsFilters,
