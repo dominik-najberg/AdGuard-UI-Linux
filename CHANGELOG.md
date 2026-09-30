@@ -35,6 +35,38 @@ Each is reported as trusted, missing, or holding the certificate without trustin
 
 Nothing is written to any browser's store; the stores are only read.
 
+### Search single requests
+
+The Activity page has a **Requests** group below its lists. Type a site, an address, an app or a rule, and it shows the matching requests newest first: when, which app, over what, what became of it, and the rule and filter list that decided it. A menu narrows it to blocked, modified, allowed or passed requests. Clicking an entry in any of the four lists above searches for it.
+
+The search reads AdGuard's own log each time and **keeps nothing**, so the counts-only history is unchanged. It reaches back as far as AdGuard keeps its log, a few days, and the group says how far that is.
+
+### Choose how long counts are kept
+
+**Keep counts for**, under History, offers 7 days, 30 days, 90 days or a year. Ninety stays the default. A shorter choice asks first, then deletes the older counts at once.
+
+### Check one website
+
+Diagnostics has a **Check a Website** group. Name a site that does not load, or loads with ads, and it is checked from end to end. It lists any problem on this computer first, since that breaks every site. Then it looks the name up and opens one connection to port 443, which shows a DNS block or a site that does not answer. AdGuard's log shows how many requests went to the site, what became of them, and which rules and filter lists decided them. It says whether the site is in AdGuard's HTTPS exclusions and whether AdGuard actually decrypted it, and whether the browser reached it over QUIC with HTTP/3 filtering off.
+
+Each finding leads to the page that changes it: the requests to Activity, a blocking rule to your own rules on Filters, a DNS block to the DNS page, QUIC to the HTTP/3 switch. A rule that blocked something is shown as a fact, never a fault, because blocking is what rules are for. **Clear** removes the results. Nothing about the site is kept, and it is not in the copied report.
+
+### HTTP/3 in Diagnostics
+
+The HTTPS section now says how much of AdGuard's log went over QUIC, how much of that was blocked, and how much was logged with no action. With HTTP/3 filtering off, the line leads to the switch.
+
+### Save the diagnostics report
+
+**Save…** beside **Copy report** writes the same text to a file, named with the date and time.
+
+### Add the certificate to browsers with one click
+
+**Add to Browsers**, on the Protection page's Browsers row, adds AdGuard's certificate to every browser store that lacks it. It runs the same `certutil` step AdGuard's own installer runs for each browser, with the `certutil` AdGuard ships. It needs no password and changes only your own files. Each store is read again afterwards, and success is reported only when the store trusts the certificate. The system store needs `sudo`, so it stays a command to copy.
+
+### Flatpak browsers and newer Firefox profiles are checked
+
+The certificate check also reads Flatpak Firefox, Chrome, Brave, Edge, Vivaldi and ungoogled Chromium, and Firefox profiles under `~/.config/mozilla`. AdGuard's installer does not know these places. A Firefox profile there is named in its command with `-f`. A Flatpak Chromium-based browser is out of the installer's reach, so **Add to Browsers** is the fix, and the group says so.
+
 ### Browsers you do not have are no longer listed
 
 Password managers and other extensions' helpers create a folder for every browser they support, whether or not that browser is installed. AdGuard's browser-integration check took any such folder as an installed browser. A folder that holds nothing but those helpers' files now does not count. The Protection page uses the same check and is corrected with it.
