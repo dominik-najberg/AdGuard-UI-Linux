@@ -19,6 +19,7 @@ mod filter_settings;
 mod filters;
 mod geometry;
 mod protection;
+mod requests;
 mod root_helper;
 mod setup;
 mod status;

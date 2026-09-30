@@ -30,6 +30,7 @@ use gtk::glib;
 use gtk4 as gtk;
 use libadwaita as adw;
 
+use crate::requests::RequestSearch;
 use crate::{style, toast, worker};
 
 /// How often [`keep_up`] reads the log.
@@ -110,6 +111,9 @@ pub struct ActivityPage {
     unread: adw::ActionRow,
     /// The four top lists. Rebuilt whole on every reading.
     lists: RefCell<Vec<adw::PreferencesGroup>>,
+    /// Single requests, from AdGuard's log in place. Below the lists and above
+    /// History.
+    search: Rc<RequestSearch>,
     privacy: adw::PreferencesGroup,
     /// How long counts are kept, one of `activity::RETENTION_CHOICES`.
     retention: adw::ComboRow,
@@ -261,6 +265,8 @@ impl ActivityPage {
             .selected(retention_index(activity::DEFAULT_RETENTION_DAYS))
             .build();
         privacy.add(&retention);
+        let search = RequestSearch::new();
+        page.add(search.widget());
         page.add(&privacy);
 
         let this = Rc::new(Self {
@@ -276,6 +282,7 @@ impl ActivityPage {
             footnote,
             unread,
             lists: RefCell::new(Vec::new()),
+            search,
             privacy,
             retention,
             kept_days: Cell::new(activity::DEFAULT_RETENTION_DAYS),
@@ -322,6 +329,11 @@ impl ActivityPage {
 
     pub fn widget(&self) -> &adw::PreferencesPage {
         &self.page
+    }
+
+    /// Search AdGuard's log for `text`. For links from other pages.
+    pub fn search_for(&self, text: &str) {
+        self.search.search_for(text);
     }
 
     /// Read the log, then the counts for the chosen range. Called when the page
@@ -422,17 +434,21 @@ impl ActivityPage {
         for group in self.lists.take() {
             self.page.remove(&group);
         }
+        let search = &self.search;
         let groups = vec![
             ranked_group(
                 "Most Blocked Sites",
+                search,
                 summary.blocked_hosts.iter().map(|host| (host.name.clone(), None, host.requests)),
             ),
             ranked_group(
                 "Most Requested Sites",
+                search,
                 summary.hosts.iter().map(|host| (host.name.clone(), None, host.requests)),
             ),
             ranked_group(
                 "Rules That Matched Most",
+                search,
                 summary.rules.iter().map(|rule| {
                     let list = loaded
                         .names
@@ -444,6 +460,7 @@ impl ActivityPage {
             ),
             ranked_group(
                 "Apps",
+                search,
                 summary.clients.iter().map(|client| {
                     let name = match client.name.as_str() {
                         INTERNAL_CLIENT => "AdGuard itself".to_owned(),
@@ -453,13 +470,17 @@ impl ActivityPage {
                 }),
             ),
         ];
-        // Above the history group, which stays last.
+        // Above the search and the history group, which stay last.
+        self.page.remove(self.search.widget());
         self.page.remove(&self.privacy);
         for group in &groups {
             self.page.add(group);
         }
+        self.page.add(self.search.widget());
         self.page.add(&self.privacy);
         self.lists.replace(groups);
+        self.search.set_names(loaded.names.clone());
+        self.search.run();
     }
 
     fn describe_privacy(&self) {
@@ -587,8 +608,13 @@ fn load(span: Span) -> Result<Loaded, String> {
 }
 
 /// A top list: one row per entry, the count on the right.
+///
+/// Every entry leads to its requests: clicking it searches AdGuard's log for
+/// it, below. Not selectable for that reason — a selectable title swallows the
+/// click that should activate the row.
 fn ranked_group(
     title: &str,
+    search: &Rc<RequestSearch>,
     entries: impl Iterator<Item = (String, Option<String>, u64)>,
 ) -> adw::PreferencesGroup {
     let group = adw::PreferencesGroup::builder().title(title).build();
@@ -601,7 +627,17 @@ fn ranked_group(
         row.set_use_markup(false);
         row.set_title(&name);
         row.set_title_lines(2);
-        row.set_title_selectable(true);
+        row.set_activatable(true);
+        row.set_tooltip_text(Some("Show these requests in AdGuard's log"));
+        row.connect_activated({
+            let search = Rc::downgrade(search);
+            let name = name.clone();
+            move |_| {
+                if let Some(search) = search.upgrade() {
+                    search.search_for(&name);
+                }
+            }
+        });
         if let Some(subtitle) = subtitle {
             row.set_subtitle(&subtitle);
         }
@@ -609,6 +645,7 @@ fn ranked_group(
         count.add_css_class("dim-label");
         count.add_css_class("numeric");
         row.add_suffix(&count);
+        row.add_suffix(&gtk::Image::from_icon_name("system-search-symbolic"));
         group.add(&row);
     }
     if !any {

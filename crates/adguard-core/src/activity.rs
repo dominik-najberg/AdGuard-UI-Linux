@@ -171,7 +171,7 @@ impl Action {
         Self::Uninspected,
     ];
 
-    fn parse(field: &str) -> Option<Self> {
+    pub(crate) fn parse(field: &str) -> Option<Self> {
         match field {
             "NONE" => Some(Self::Passed),
             "BLOCKED" => Some(Self::Blocked),
@@ -719,8 +719,8 @@ impl Cursor {
 }
 
 /// One log file, opened.
-struct Generation {
-    file: File,
+pub(crate) struct Generation {
+    pub(crate) file: File,
     inode: u64,
     len: u64,
     /// [`fingerprint`] of its first line, or `None` while it has none.
@@ -732,7 +732,7 @@ struct Generation {
 /// Opened **newest first**, which is what makes a rotation during the walk
 /// harmless: a file renamed between two opens is met twice under two names and
 /// kept once by inode, where opening oldest first could step past it.
-fn generations(live: &Path) -> Vec<Generation> {
+pub(crate) fn generations(live: &Path) -> Vec<Generation> {
     let mut found: Vec<Generation> = Vec::new();
     for index in 0..GENERATIONS {
         let path = if index == 0 {
@@ -763,7 +763,7 @@ fn generations(live: &Path) -> Vec<Generation> {
 }
 
 /// A file's contents from `from` onwards, or `None` if it cannot be read.
-fn read_from(file: &File, from: u64) -> Option<Vec<u8>> {
+pub(crate) fn read_from(file: &File, from: u64) -> Option<Vec<u8>> {
     let mut file = file;
     file.seek(SeekFrom::Start(from)).ok()?;
     let mut bytes = Vec::new();
@@ -784,19 +784,31 @@ fn fingerprint(bytes: &[u8]) -> Option<i64> {
     Some(hash as i64)
 }
 
-/// One request, as far as it is kept.
+/// One request, as far as it is read.
+///
+/// `target`, `protocol` and `status` are here for [`crate::requests`], which
+/// shows a request on screen and stores nothing. [`Tally`] never reads them,
+/// and the privacy test below holds the database to that.
 #[derive(Debug, PartialEq, Eq)]
-struct Request<'a> {
+pub(crate) struct Request<'a> {
     /// Microseconds since the epoch.
-    at: i64,
+    pub(crate) at: i64,
     /// Local hour and local midnight it fell in, epoch seconds.
     hour: i64,
     day: i64,
-    client: &'a str,
-    host: Option<String>,
-    action: Action,
-    filter: Option<i64>,
-    rule: Option<&'a str>,
+    pub(crate) client: &'a str,
+    /// Field 4.
+    pub(crate) protocol: &'a str,
+    /// Field 6 as logged: a full URL on HTTP lines, a bare host otherwise, and
+    /// `None` for `-`.
+    pub(crate) target: Option<&'a str>,
+    pub(crate) host: Option<String>,
+    /// Field 8, when it is a number. `-` and `0` are what a request that never
+    /// got an answer carries.
+    pub(crate) status: Option<u16>,
+    pub(crate) action: Action,
+    pub(crate) filter: Option<i64>,
+    pub(crate) rule: Option<&'a str>,
     bytes: u64,
 }
 
@@ -806,7 +818,7 @@ struct Request<'a> {
 /// 4 protocol, 5 method, 6 URL or host, 7 referrer, 8 status, 9 request type,
 /// 10 action, 11 a small count, 12 `ID=<n>` or `-`, 13 upstream, 14 size,
 /// 15 duration, 16 `--`, then the rule when 12 names one.
-fn parse<'a>(line: &'a str, clock: &mut Clock) -> Option<Request<'a>> {
+pub(crate) fn parse<'a>(line: &'a str, clock: &mut Clock) -> Option<Request<'a>> {
     let mut fields = [""; FIELDS];
     let mut rest = line;
     for field in &mut fields {
@@ -844,7 +856,10 @@ fn parse<'a>(line: &'a str, clock: &mut Clock) -> Option<Request<'a>> {
         hour,
         day,
         client,
+        protocol: fields[3],
+        target: (fields[5] != "-").then_some(fields[5]),
         host: host(fields[5]),
+        status: fields[7].parse().ok().filter(|&status| status > 0),
         action,
         filter,
         rule,
@@ -894,7 +909,7 @@ fn host(field: &str) -> Option<String> {
 /// [`crate::access::epoch`] documents; the minutes and seconds inside an hour
 /// are then plain arithmetic.
 #[derive(Default)]
-struct Clock {
+pub(crate) struct Clock {
     date: String,
     hour_of_day: u32,
     /// `(hour start, midnight)`, for [`Self::date`] and [`Self::hour_of_day`].
