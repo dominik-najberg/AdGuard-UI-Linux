@@ -247,7 +247,7 @@ impl CaTrust {
     /// Firefox and Chrome keep their own NSS databases and consult the system
     /// store for nothing; `install_cert.sh` adds the certificate to both — with
     /// `certutil`, the system's or the copy AdGuard ships beside it — and this
-    /// check sees neither.
+    /// check sees neither; [`crate::nss`] reads those.
     /// So a `true` here means the machine trusts the CA, never that every
     /// browser on it does.
     ///
@@ -312,6 +312,75 @@ pub fn install_command(installer: &Path, certificate: &Path) -> Option<String> {
             certificate.display()
         )
     })
+}
+
+/// The same command aimed at one Firefox profile, with AdGuard's own `-f`.
+///
+/// The installer finds Firefox's *default* profile by itself and no other —
+/// it reads `profiles.ini` and keeps the section carrying `Default=1` — so a
+/// second profile is only ever reached by naming it. The flag and its quoting
+/// are the CLI's again, the other half of the format string quoted in the
+/// module docs: ` -f "{}"`. An absolute path is what the script checks for
+/// first and uses as given, so the directory is passed whole rather than as
+/// the relative name `profiles.ini` holds.
+///
+/// `None` under the same rule as [`install_command`], for any of the three
+/// paths.
+pub fn install_command_for_profile(
+    installer: &Path,
+    certificate: &Path,
+    profile: &Path,
+) -> Option<String> {
+    let install = install_command(installer, certificate)?;
+    quotable(profile).then(|| format!("{install} -f \"{}\"", profile.display()))
+}
+
+/// The certificate at `path` as DER — the bytes a browser's own store keeps.
+///
+/// The system bundle is PEM and is compared as text by [`bodies`]; NSS stores
+/// the decoded certificate in a column of its own (see [`crate::nss`]), so
+/// that comparison needs the bytes the base64 stands for. The first
+/// certificate in the file, as [`CaTrust::inspect`] takes the first.
+///
+/// `None` when the file holds no certificate, or one whose body is not base64.
+pub fn der(path: &Path) -> Option<Vec<u8>> {
+    bodies(&read(path))
+        .into_iter()
+        .next()
+        .and_then(|body| base64(&body))
+}
+
+/// Decode standard base64, as a PEM body carries it once [`bodies`] has taken
+/// out the whitespace.
+///
+/// Twenty lines rather than a dependency, for the reason the manifest reader in
+/// [`crate::browser`] is hand-rolled: this is the only base64 in the project and
+/// its input is a certificate AdGuard wrote. Strict about the alphabet — a
+/// character outside it is a file this is not the right reader for, and the
+/// answer to that is `None`, never a guess at the bytes.
+fn base64(text: &str) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(text.len() / 4 * 3);
+    let mut acc: u32 = 0;
+    let mut bits = 0;
+    for byte in text.bytes() {
+        let value = match byte {
+            b'A'..=b'Z' => byte - b'A',
+            b'a'..=b'z' => byte - b'a' + 26,
+            b'0'..=b'9' => byte - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            b'=' => break,
+            _ => return None,
+        };
+        acc = (acc << 6) | u32::from(value);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+            acc &= (1 << bits) - 1;
+        }
+    }
+    Some(out)
 }
 
 /// Whether a path survives being put inside a double-quoted shell word.
@@ -919,6 +988,50 @@ mod tests {
             assert!(quotable(Path::new(name)), "{name}");
             assert!(install_command(installer, Path::new(name)).is_some(), "{name}");
         }
+    }
+
+    /// A second Firefox profile is named with AdGuard's own `-f`, quoted as
+    /// the rest of the line is, and refused on the same grounds. The profile's
+    /// directory is named by the user in Firefox's profile manager, so it is
+    /// as much user input as the certificate's name is.
+    #[test]
+    fn a_named_profile_is_passed_with_the_installers_own_flag() {
+        let installer = Path::new("/opt/adguard-cli/install_cert.sh");
+        let certificate = Path::new("/data/AdGuard CLI CA.pem");
+        assert_eq!(
+            install_command_for_profile(
+                installer,
+                certificate,
+                Path::new("/home/someone/.mozilla/firefox/abcd1234.work")
+            )
+            .as_deref(),
+            Some(
+                "\"/opt/adguard-cli/install_cert.sh\" -c \"/data/AdGuard CLI CA.pem\" \
+                 -f \"/home/someone/.mozilla/firefox/abcd1234.work\""
+            )
+        );
+        assert_eq!(
+            install_command_for_profile(installer, certificate, Path::new("/x/$(id).work")),
+            None
+        );
+    }
+
+    /// The DER a browser's store keeps is what the PEM body decodes to.
+    /// `ONE`'s body is the base64 of `ABCDEFG`, which is why it was chosen.
+    #[test]
+    fn a_pem_body_decodes_to_its_bytes() {
+        assert_eq!(base64("QUJDREVGRw==").as_deref(), Some(&b"ABCDEFG"[..]));
+        assert_eq!(base64("QUJD").as_deref(), Some(&b"ABC"[..]));
+        assert_eq!(base64("QUI=").as_deref(), Some(&b"AB"[..]));
+        assert_eq!(base64("").as_deref(), Some(&b""[..]));
+        // Outside the alphabet: not a guess, an answer of "not this reader's".
+        assert_eq!(base64("QU*D"), None);
+
+        let dir = scratch("der");
+        let certificate = dir.join("Test CA.pem");
+        fs::write(&certificate, format!("{ONE}{TWO}")).expect("write the certificate");
+        assert_eq!(der(&certificate).as_deref(), Some(&b"ABCDEFG"[..]));
+        assert_eq!(der(&dir.join("absent.pem")), None);
     }
 
     /// The installer's own path is checked too. It is ours to locate, but it is

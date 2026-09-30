@@ -172,11 +172,7 @@ impl BrowserIntegration {
     /// paths individually because there are six of them and a per-path override
     /// would let them disagree.
     pub fn detect() -> Option<Self> {
-        let home = std::env::var_os("ADGUARD_BROWSER_HOME")
-            .filter(|home| !home.is_empty())
-            .or_else(|| std::env::var_os("HOME"))
-            .map(PathBuf::from)?;
-        Some(Self::detect_under(&home, crate::paths::nm_host()))
+        Some(Self::detect_under(&home()?, crate::paths::nm_host()))
     }
 
     /// The same check against an explicit `$HOME` and host binary.
@@ -233,6 +229,19 @@ impl BrowserIntegration {
         let cli = crate::paths::cli_binary().filter(|path| crate::trust::quotable(path))?;
         Some(format!("\"{}\" install-browser-integration", cli.display()))
     }
+}
+
+/// The `$HOME` the browser checks look under: `$ADGUARD_BROWSER_HOME` when it
+/// is set, for the reason [`BrowserIntegration::detect`] gives.
+///
+/// Shared with [`crate::nss`], because the two checks are about the same
+/// browsers and a sandbox that stood one of them up must not leave the other
+/// reading the real profiles.
+pub(crate) fn home() -> Option<PathBuf> {
+    std::env::var_os("ADGUARD_BROWSER_HOME")
+        .filter(|home| !home.is_empty())
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from)
 }
 
 /// Whether a browser's own directory says the browser is on this machine.
