@@ -11,18 +11,6 @@ This file is the one changelog.
 
 ---
 
-## Unreleased
-
-### Browsers' own certificate stores are checked
-
-The third item of [#21](https://github.com/dominik-najberg/AdGuard-UI-Linux/issues/21). Firefox and Chrome keep certificate stores of their own and ignore the system's, so a machine that trusts AdGuard's certificate could still fail every filtered page in the browser you actually use, and nothing here could tell. AdGuard UI now reads those stores: every Firefox profile, the store Chrome, Chromium, Edge, Brave and Vivaldi share, and the snap versions of both.
-
-Each is reported as trusted, missing, or holding the certificate without trusting it to identify websites. Only the current certificate counts: an older AdGuard certificate of the same name, left from before it was regenerated, does not. The Protection page names the browsers that are not set up and shows AdGuard's own installer command for them. That command needs no password once the system itself trusts the certificate. AdGuard's installer only finds Firefox's default profile by itself, so any other profile is named in the command with the installer's `-f` option. Diagnostics lists each store on a line of its own, numbered rather than named so the report stays safe to post.
-
-Nothing is written to any browser's store; the stores are only read.
-
----
-
 ## 1.7.0 — 30 September 2026
 
 ### An Activity page
@@ -38,6 +26,14 @@ The second item of [#21](https://github.com/dominik-najberg/AdGuard-UI-Linux/iss
 **Copy report** puts the same lines on the clipboard as plain text for a bug report. It shortens your home folder to `~` and never includes your licence key, e-mail, network addresses or anything from your browsing.
 
 Each problem says what fixes it, and clicking it takes you to the page that has the fix: Status for a restart or activation, Protection for the certificate and browser commands, Advanced for the root helper, DNS for the listen port. The page is read when you open it and when you press refresh, and it changes nothing itself.
+
+### Browsers' own certificate stores are checked
+
+The third item of [#21](https://github.com/dominik-najberg/AdGuard-UI-Linux/issues/21). Firefox and Chrome keep certificate stores of their own and ignore the system's, so a machine that trusts AdGuard's certificate could still fail every filtered page in the browser you actually use, and nothing here could tell. AdGuard UI now reads those stores: every Firefox profile, the store Chrome, Chromium, Edge, Brave and Vivaldi share, and the snap versions of both.
+
+Each is reported as trusted, missing, or holding the certificate without trusting it to identify websites. Only the current certificate counts: an older AdGuard certificate of the same name, left from before it was regenerated, does not. The Protection page names the browsers that are not set up and shows AdGuard's own installer command for them. That command needs no password once the system itself trusts the certificate. AdGuard's installer only finds Firefox's default profile by itself, so any other profile is named in the command with the installer's `-f` option. Diagnostics lists each store on a line of its own, numbered rather than named so the report stays safe to post.
+
+Nothing is written to any browser's store; the stores are only read.
 
 ### Browsers you do not have are no longer listed
 
