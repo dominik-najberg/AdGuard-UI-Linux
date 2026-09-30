@@ -616,7 +616,7 @@ fn https_section(inputs: &Inputs, config: Option<&Config>) -> Section {
         if stores.stores.is_empty() {
             findings.push(Finding::new(
                 "Browser stores",
-                "None found where AdGuard's installer looks",
+                "None found",
                 Level::Fact,
             ));
         }
@@ -629,8 +629,8 @@ fn https_section(inputs: &Inputs, config: Option<&Config>) -> Section {
         title: "HTTPS filtering",
         note: Some(
             "Checks the system trust store, and the stores Firefox profiles and Chromium-based \
-             browsers keep of their own — the places AdGuard's installer writes to. Flatpak \
-             browsers are not checked.",
+             browsers keep of their own — the places AdGuard's installer writes to, and the \
+             Flatpak and newer Firefox locations it does not know.",
         ),
         findings,
     }
@@ -659,7 +659,9 @@ fn store_finding(store: &Store, failing: Level) -> Finding {
     if failing != Level::Problem {
         return finding;
     }
-    let hint = if store.profile_flag().is_some() {
+    let hint = if !store.installer_reaches() {
+        OUT_OF_INSTALLER_REACH
+    } else if store.profile_flag().is_some() {
         NAMED_PROFILE
     } else {
         INSTALL_IN_BROWSERS
@@ -793,12 +795,18 @@ const INTEGRATE: &str =
 
 /// A browser store the installer reaches on its own.
 const INSTALL_IN_BROWSERS: &str =
-    "Protection shows AdGuard's own installer command, which adds it to this store.";
+    "Protection can add it to this store for you, and shows AdGuard's own installer command, \
+     which does the same.";
 
 /// A Firefox profile the installer only reaches when it is named.
 const NAMED_PROFILE: &str =
-    "AdGuard's installer only reaches Firefox's default profile by itself. Protection shows its \
-     command with this profile named.";
+    "Protection can add it to this store for you. AdGuard's installer only reaches Firefox's \
+     default profile by itself, so its command there names this one.";
+
+/// A Flatpak Chromium store, which the installer has no way to reach.
+const OUT_OF_INSTALLER_REACH: &str =
+    "Protection can add it to this store for you. AdGuard's own installer does not know about \
+     Flatpak browsers.";
 
 /// What fixes the certificate, by which step it has not reached.
 ///
@@ -1016,6 +1024,7 @@ mod tests {
 
         let store = |profile: Option<Profile>, state| Store {
             browser: if profile.is_some() { "Firefox" } else { "Chromium-based browsers" },
+            scanned: true,
             profile,
             database: PathBuf::from("/home/someone/.pki/nssdb/cert9.db"),
             state,
@@ -1098,7 +1107,7 @@ mod tests {
         assert!(text.starts_with("AdGuard UI 1.6.1 — diagnostics\n"));
         assert!(text.contains("  [ok]   State: Running\n"), "{text}");
         assert!(text.contains("         Mode: auto\n"), "{text}");
-        assert!(text.contains("Flatpak browsers are not checked"), "{text}");
+        assert!(text.contains("the Flatpak and newer Firefox locations"), "{text}");
     }
 
     /// The report is written for a public tracker.
