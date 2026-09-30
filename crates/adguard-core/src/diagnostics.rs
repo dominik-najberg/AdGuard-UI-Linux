@@ -105,6 +105,15 @@ pub enum FixedOn {
     AdvancedProxyMode,
     /// The local DNS proxy's listen port.
     DnsProxy,
+    /// The HTTP filter catalogue and the user's own rules.
+    WebFilters,
+    /// The DNS filter catalogue and the user's own DNS rules.
+    DnsFilters,
+    /// The HTTP/3 filtering switch, on Advanced.
+    AdvancedHttp3,
+    /// The Activity page's request search, for the site a website check is
+    /// about. Only the website check links here; the caller knows the site.
+    Activity,
 }
 
 /// What to do about a problem, and where.
@@ -134,7 +143,7 @@ pub struct Finding {
 }
 
 impl Finding {
-    fn new(label: impl Into<Cow<'static, str>>, value: impl Into<String>, level: Level) -> Self {
+    pub(crate) fn new(label: impl Into<Cow<'static, str>>, value: impl Into<String>, level: Level) -> Self {
         Self {
             label: label.into(),
             value: value.into(),
@@ -144,7 +153,7 @@ impl Finding {
     }
 
     /// Attach a fix. Only meaningful on a problem, and only ever called on one.
-    fn fixed(mut self, hint: &'static str, page: Option<FixedOn>) -> Self {
+    pub(crate) fn fixed(mut self, hint: &'static str, page: Option<FixedOn>) -> Self {
         self.remedy = Some(Remedy { hint, page });
         self
     }
@@ -207,6 +216,10 @@ pub struct Inputs {
     /// look for — no certificate, or no home directory.
     pub stores: Option<BrowserStores>,
     pub browsers: Option<BrowserIntegration>,
+    /// How much of AdGuard's log went over QUIC. `None` without a data
+    /// directory. A count of lines and nothing about what they were to, so it
+    /// is safe for the copied report.
+    pub quic: Option<crate::requests::Quic>,
 }
 
 /// Why the licence could not be read — the one distinction the Status page
@@ -254,6 +267,7 @@ impl Inputs {
                 .and_then(BrowserStores::detect),
             ca: CaTrust::detect(certificate_name),
             browsers: BrowserIntegration::detect(),
+            quic: access::path().map(|live| crate::requests::quic(&live)),
             config,
         }
     }
@@ -570,10 +584,11 @@ fn https_section(inputs: &Inputs, config: Option<&Config>) -> Section {
     let mut findings = Vec::new();
     let enabled = config.and_then(|config| config.bool_at(key::HTTPS_FILTERING));
     findings.push(on_off("HTTPS filtering", enabled));
-    findings.push(on_off(
-        "HTTP/3 filtering",
-        config.and_then(|config| config.bool_at(key::HTTPS_HTTP3)),
-    ));
+    let http3 = config.and_then(|config| config.bool_at(key::HTTPS_HTTP3));
+    findings.push(on_off("HTTP/3 filtering", http3));
+    if let Some(quic) = inputs.quic.filter(|quic| quic.lines > 0) {
+        findings.push(quic_finding(quic, http3));
+    }
 
     match &inputs.ca {
         None => findings.push(Finding::new(
@@ -633,6 +648,29 @@ fn https_section(inputs: &Inputs, config: Option<&Config>) -> Section {
              Flatpak and newer Firefox locations it does not know.",
         ),
         findings,
+    }
+}
+
+/// How much of the log went over QUIC, read against the HTTP/3 switch.
+///
+/// Never a problem: QUIC passing unfiltered is what the switch being off
+/// means, and with it on, what a `-` action means is not measured (contract
+/// §9). So a fact, carrying the way to the switch when it is off.
+fn quic_finding(quic: crate::requests::Quic, http3: Option<bool>) -> Finding {
+    const LABEL: &str = "QUIC in the log";
+    if quic.quic == 0 {
+        return Finding::new(LABEL, "None", Level::Fact);
+    }
+    let share = quic.quic as f64 * 100.0 / quic.lines as f64;
+    let value = format!(
+        "{} of {} requests ({share:.1}%): {} blocked, {} logged with no action",
+        quic.quic, quic.lines, quic.blocked, quic.uninspected
+    );
+    let finding = Finding::new(LABEL, value, Level::Fact);
+    if http3 == Some(false) {
+        finding.fixed(QUIC_OFF, Some(FixedOn::AdvancedHttp3))
+    } else {
+        finding
     }
 }
 
@@ -803,6 +841,10 @@ const NAMED_PROFILE: &str =
     "Protection can add it to this store for you. AdGuard's installer only reaches Firefox's \
      default profile by itself, so its command there names this one.";
 
+/// QUIC in the log while HTTP/3 filtering is off.
+const QUIC_OFF: &str =
+    "With HTTP/3 filtering off, AdGuard lets these through unfiltered. The switch is on Advanced.";
+
 /// A Flatpak Chromium store, which the installer has no way to reach.
 const OUT_OF_INSTALLER_REACH: &str =
     "Protection can add it to this store for you. AdGuard's own installer does not know about \
@@ -870,11 +912,11 @@ fn capitalise(text: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::path::Path;
 
-    fn config(text: &str) -> Config {
+    pub(crate) fn config(text: &str) -> Config {
         Config::parse(text, Path::new("/home/someone/.local/share/adguard-cli/proxy.yaml"))
             .expect("fixture parses")
     }
@@ -891,7 +933,7 @@ mod tests {
     }
 
     /// A healthy machine: one daemon, a live helper, traffic reaching it.
-    fn healthy() -> Inputs {
+    pub(crate) fn healthy() -> Inputs {
         Inputs {
             binary: PathBuf::from("/home/someone/.local/bin/adguard-cli"),
             version: Ok("AdGuard CLI v1.4.13".into()),
@@ -911,6 +953,7 @@ mod tests {
             ca: None,
             stores: None,
             browsers: None,
+            quic: None,
         }
     }
 
@@ -1101,6 +1144,20 @@ mod tests {
         assert_eq!(finding(&report, "AdGuard CLI", "Licence").level, Level::Unknown);
     }
 
+    /// The machine-wide QUIC line: a fact either way, leading to the switch
+    /// only while it is off — the healthy fixture has it off.
+    #[test]
+    fn quic_in_the_log_leads_to_the_switch_only_while_it_is_off() {
+        let mut inputs = healthy();
+        inputs.quic = Some(crate::requests::Quic { lines: 200, quic: 50, uninspected: 20, blocked: 5 });
+        let report = Report::build(&inputs);
+        let line = finding(&report, "HTTPS filtering", "QUIC in the log");
+        assert_eq!(line.level, Level::Fact);
+        assert_eq!(line.value, "50 of 200 requests (25.0%): 5 blocked, 20 logged with no action");
+        assert_eq!(line.remedy.map(|remedy| remedy.page), Some(Some(FixedOn::AdvancedHttp3)));
+        assert_eq!(quic_finding(inputs.quic.unwrap(), Some(true)).remedy, None);
+    }
+
     #[test]
     fn the_text_marks_each_line_and_carries_the_certificate_caveat() {
         let text = Report::build(&healthy()).text("1.6.1");
@@ -1165,6 +1222,7 @@ mod tests {
             ca: Some(CaTrust::inspect("/nonexistent/AdGuard CLI CA.pem", None, None)),
             stores: None,
             browsers: Some(BrowserIntegration::detect_under(&home, None)),
+            quic: None,
         };
         let report = Report::build(&inputs);
         std::fs::remove_dir_all(&home).unwrap();

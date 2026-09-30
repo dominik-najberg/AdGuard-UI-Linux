@@ -147,6 +147,150 @@ pub fn search(live: &Path, query: &Query) -> Found {
     found
 }
 
+/// Everything AdGuard's log says about one site, for the website check.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Seen {
+    /// Requests to the host or any name under it.
+    pub total: u64,
+    pub counts: activity::Counts,
+    /// HTTP requests whose full `https://` address was logged — which AdGuard
+    /// can only see for a connection it decrypted.
+    pub decrypted: u64,
+    /// `TLS` lines: an encrypted connection logged without its contents.
+    pub tls: u64,
+    /// `IQUIC` lines, and how many of them carried `-` for an action, and how
+    /// many were blocked.
+    pub quic: u64,
+    pub quic_uninspected: u64,
+    pub quic_blocked: u64,
+    /// The rules that decided requests to it, most requests first: filter id,
+    /// rule text, what it did, and how often.
+    pub rules: Vec<(i64, String, Action, u64)>,
+    /// The newest request, in microseconds.
+    pub last: Option<i64>,
+    /// As [`Found::reaches_back`].
+    pub reaches_back: Option<i64>,
+}
+
+/// How many rules [`Seen::rules`] keeps.
+const SEEN_RULES: usize = 5;
+
+/// Read every line of the log for requests to `host` or a name under it.
+///
+/// A whole pass, not a search that stops at a page: the website check counts.
+/// `host` is compared as [`activity`] stores hosts — lower case, no trailing
+/// dot.
+pub fn seen(live: &Path, host: &str) -> Seen {
+    let host = host.trim_end_matches('.').to_ascii_lowercase();
+    let suffix = format!(".{host}");
+    let mut seen = Seen::default();
+    let mut clock = Clock::default();
+    let mut rules: std::collections::HashMap<(i64, String, Action), u64> = Default::default();
+
+    let generations = activity::generations(live);
+    if let Some(oldest) = generations.first() {
+        seen.reaches_back = first_request(&oldest.file, &mut clock);
+    }
+    for generation in &generations {
+        let Some(bytes) = activity::read_from(&generation.file, 0) else {
+            continue;
+        };
+        for line in bytes.split(|&byte| byte == b'\n') {
+            if !contains(&line.to_ascii_lowercase(), host.as_bytes()) {
+                continue;
+            }
+            let Ok(text) = std::str::from_utf8(line) else { continue };
+            let Some(request) = activity::parse(text, &mut clock) else {
+                continue;
+            };
+            let Some(name) = request.host.as_deref() else { continue };
+            if name != host && !name.ends_with(&suffix) {
+                continue;
+            }
+            seen.total += 1;
+            seen.counts.add(request.action, 1);
+            seen.last = seen.last.max(Some(request.at));
+            match request.protocol {
+                "IQUIC" => {
+                    seen.quic += 1;
+                    match request.action {
+                        Action::Uninspected => seen.quic_uninspected += 1,
+                        Action::Blocked => seen.quic_blocked += 1,
+                        _ => {}
+                    }
+                }
+                "TLS" => seen.tls += 1,
+                _ => {
+                    if request.target.is_some_and(|target| target.starts_with("https://")) {
+                        seen.decrypted += 1;
+                    }
+                }
+            }
+            if let (Some(filter), Some(rule)) = (request.filter, request.rule) {
+                *rules.entry((filter, rule.to_owned(), request.action)).or_default() += 1;
+            }
+        }
+    }
+    let mut rules: Vec<_> = rules
+        .into_iter()
+        .map(|((filter, rule, action), count)| (filter, rule, action, count))
+        .collect();
+    rules.sort_by(|a, b| b.3.cmp(&a.3).then_with(|| a.1.cmp(&b.1)));
+    rules.truncate(SEEN_RULES);
+    seen.rules = rules;
+    seen
+}
+
+/// How much of what AdGuard logged went over QUIC, for the Diagnostics page's
+/// HTTP/3 line.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Quic {
+    /// Every line in the log, readable or not.
+    pub lines: u64,
+    /// `IQUIC` lines that were read.
+    pub quic: u64,
+    /// Of those, the ones with `-` for an action, and the blocked ones.
+    pub uninspected: u64,
+    pub blocked: u64,
+}
+
+/// Count QUIC in the whole log. Only lines that mention `IQUIC` are parsed, so
+/// this costs little more than reading the files.
+pub fn quic(live: &Path) -> Quic {
+    let mut found = Quic::default();
+    let mut clock = Clock::default();
+    for generation in activity::generations(live) {
+        let Some(bytes) = activity::read_from(&generation.file, 0) else {
+            continue;
+        };
+        for line in bytes.split(|&byte| byte == b'\n') {
+            if line.iter().all(u8::is_ascii_whitespace) {
+                continue;
+            }
+            found.lines += 1;
+            if !contains(line, b" IQUIC ") {
+                continue;
+            }
+            let Some(request) = std::str::from_utf8(line)
+                .ok()
+                .and_then(|text| activity::parse(text, &mut clock))
+            else {
+                continue;
+            };
+            if request.protocol != "IQUIC" {
+                continue;
+            }
+            found.quic += 1;
+            match request.action {
+                Action::Uninspected => found.uninspected += 1,
+                Action::Blocked => found.blocked += 1,
+                _ => {}
+            }
+        }
+    }
+    found
+}
+
 /// Whether one lower-cased word is in a field the user can mean.
 fn matches(request: &activity::Request, term: &str) -> bool {
     let fields = [
@@ -319,6 +463,56 @@ mod tests {
         let scratch = Scratch::new("unread");
         scratch.write("access.log", &["garbage mentioning a.example".to_owned()]);
         assert!(search(&scratch.live(), &query("a.example")).hits.is_empty());
+    }
+
+    /// The website check's pass: the host and names under it, never a name
+    /// that merely contains it, with each kind of connection counted apart.
+    #[test]
+    fn seen_counts_a_site_and_its_subdomains_only() {
+        let scratch = Scratch::new("seen");
+        let quic = |clock: &str, host: &str, action: &str| {
+            format!("25.08.2026 {clock}.000001 \"chrome\" IQUIC - {host} - - any {action} 0 - 192.0.2.1:443 1b 1ms --")
+        };
+        let tls = |clock: &str, host: &str| {
+            format!("25.08.2026 {clock}.000001 \"chrome\" TLS - {host} - - any NONE 0 - 192.0.2.1:443 1b 1ms --")
+        };
+        scratch.write("access.log", &[
+            line("10:00:00", "chrome", "https://www.example.com/", "NONE", None),
+            line("10:00:01", "chrome", "https://ads.example.com/x", "BLOCKED", Some((2, "||ads.example.com^"))),
+            line("10:00:02", "chrome", "https://notexample.com/", "NONE", None),
+            line("10:00:03", "chrome", "https://example.com.evil.test/", "NONE", None),
+            tls("10:00:04", "example.com"),
+            quic("10:00:05", "video.example.com", "-"),
+            quic("10:00:06", "video.example.com", "BLOCKED"),
+        ]);
+        let seen = seen(&scratch.live(), "Example.COM.");
+        assert_eq!(seen.total, 5, "{seen:?}");
+        assert_eq!(seen.counts.blocked, 2);
+        assert_eq!(seen.decrypted, 2);
+        assert_eq!(seen.tls, 1);
+        assert_eq!((seen.quic, seen.quic_uninspected, seen.quic_blocked), (2, 1, 1));
+        assert_eq!(seen.rules, vec![(2, "||ads.example.com^".to_owned(), Action::Blocked, 1)]);
+        assert!(seen.last.is_some());
+    }
+
+    #[test]
+    fn quic_is_counted_against_every_line() {
+        let scratch = Scratch::new("quic");
+        let quic = |action: &str| {
+            format!("25.08.2026 10:00:00.000001 \"chrome\" IQUIC - v.example.com - - any {action} 0 - 192.0.2.1:443 1b 1ms --")
+        };
+        scratch.write("access.log", &[
+            line("10:00:00", "chrome", "https://www.example.com/", "NONE", None),
+            quic("-"),
+            quic("-"),
+            quic("BLOCKED"),
+            quic("NONE"),
+            "unreadable line".to_owned(),
+        ]);
+        assert_eq!(
+            super::quic(&scratch.live()),
+            Quic { lines: 6, quic: 4, uninspected: 2, blocked: 1 }
+        );
     }
 
     #[test]

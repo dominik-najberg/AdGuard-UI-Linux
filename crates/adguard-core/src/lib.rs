@@ -23,6 +23,7 @@ pub mod paths;
 mod proc;
 pub mod release;
 pub mod requests;
+pub mod site;
 pub mod trust;
 pub mod userscripts;
 pub mod window_state;

@@ -226,7 +226,7 @@ impl Counts {
         }
     }
 
-    fn add(&mut self, action: Action, requests: u64) {
+    pub(crate) fn add(&mut self, action: Action, requests: u64) {
         let slot = match action {
             Action::Passed => &mut self.passed,
             Action::Blocked => &mut self.blocked,
@@ -873,7 +873,7 @@ pub(crate) fn parse<'a>(line: &'a str, clock: &mut Clock) -> Option<Request<'a>>
 /// lines (contract §9). **This is where the path and query are dropped**, which
 /// is the privacy decision in the module header: only what is returned here is
 /// ever stored.
-fn host(field: &str) -> Option<String> {
+pub(crate) fn host(field: &str) -> Option<String> {
     if field == "-" {
         return None;
     }

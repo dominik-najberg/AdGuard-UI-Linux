@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use adguard_core::access;
 use adguard_core::activity::Action;
-use adguard_core::requests::{search, Query};
+use adguard_core::requests::{quic, search, seen, Query};
 
 #[test]
 fn the_real_log_can_be_searched() {
@@ -38,4 +38,17 @@ fn the_real_log_can_be_searched() {
     let blocked = search(&live, &Query { action: Some(Action::Blocked), ..Query::default() });
     eprintln!("blocked page: {} hits, in {:?}", blocked.hits.len(), started.elapsed());
     assert!(blocked.hits.iter().all(|hit| hit.action == Action::Blocked));
+
+    // The two whole passes the Diagnostics page and the website check make.
+    let started = Instant::now();
+    let share = quic(&live);
+    eprintln!(
+        "quic: {} of {} lines, {} with no action, in {:?}",
+        share.quic, share.lines, share.uninspected, started.elapsed()
+    );
+    assert!(share.quic <= share.lines);
+
+    let started = Instant::now();
+    let site = seen(&live, "example.com");
+    eprintln!("seen: {} requests, in {:?}", site.total, started.elapsed());
 }
