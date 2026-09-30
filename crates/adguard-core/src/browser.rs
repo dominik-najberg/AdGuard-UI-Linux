@@ -193,7 +193,7 @@ impl BrowserIntegration {
 
         let browsers = KNOWN
             .iter()
-            .filter(|(_, marker, _)| home.join(marker).is_dir())
+            .filter(|(_, marker, _)| installed(&home.join(marker)))
             .map(|(name, _, hosts)| {
                 let manifest = home.join(hosts).join(MANIFEST);
                 Browser {
@@ -232,6 +232,36 @@ impl BrowserIntegration {
     pub fn install_command(&self) -> Option<String> {
         let cli = crate::paths::cli_binary().filter(|path| crate::trust::quotable(path))?;
         Some(format!("\"{}\" install-browser-integration", cli.display()))
+    }
+}
+
+/// Whether a browser's own directory says the browser is on this machine.
+///
+/// **Existence is not enough, and it was the rule until 30 September 2026.**
+/// Every application that ships a native-messaging host writes its manifest
+/// into *every* browser it knows about, creating `<browser>/NativeMessagingHosts`
+/// on the way whether or not that browser was ever installed. Measured on the
+/// reference machine: Chromium, Edge, Brave and Vivaldi each had a directory
+/// holding nothing but that one subdirectory — put there by 1Password, Claude
+/// Code and Codex, whose manifests sit in it beside AdGuard's — and all four
+/// were listed as integrated browsers on a machine that has only Chrome.
+///
+/// AdGuard's own installer is fooled the same way and writes its manifest
+/// there too, which is harmless. Reporting a browser the user does not have is
+/// not: it reads as the application not having looked.
+///
+/// So a directory whose **only** entry is `NativeMessagingHosts` is not a
+/// browser. Anything else in it is — including nothing at all, which is how the
+/// sandbox recipes and the tests below stand a browser up, and which no
+/// manifest-writing application produces.
+fn installed(marker: &Path) -> bool {
+    let Ok(entries) = fs::read_dir(marker) else {
+        return false;
+    };
+    let mut entries = entries.flatten().map(|entry| entry.file_name());
+    match (entries.next(), entries.next()) {
+        (Some(only), None) => only != "NativeMessagingHosts",
+        _ => true,
     }
 }
 
@@ -343,10 +373,15 @@ mod tests {
     }
 
     /// A sandbox `$HOME` with the given browser markers, and a host binary.
+    ///
+    /// Each marker gets a `Default` profile inside it, as a browser that has
+    /// run once has. Without one, a marker whose manifest is then written
+    /// beside it holds only `NativeMessagingHosts` — the shape [`installed`]
+    /// refuses, because that is what another application's installer leaves.
     fn sandbox(name: &str, markers: &[&str]) -> (Sandbox, PathBuf) {
         let dir = Sandbox::new(name);
         for marker in markers {
-            fs::create_dir_all(dir.path().join(marker)).unwrap();
+            fs::create_dir_all(dir.path().join(marker).join("Default")).unwrap();
         }
         let host = dir.path().join("opt").join(HOST_BINARY);
         write(&host, "#!/bin/sh\n");
@@ -381,6 +416,22 @@ mod tests {
         let check = BrowserIntegration::detect_under(dir.path(), Some(host));
         assert!(check.browsers.is_empty());
         assert!(check.unmet().is_empty());
+    }
+
+    /// A browser directory that another application's native-messaging
+    /// installer created is not a browser — measured on the reference machine,
+    /// where four of them stood beside the one browser really installed.
+    #[test]
+    fn a_directory_holding_only_native_messaging_hosts_is_not_a_browser() {
+        let (dir, host) = sandbox("hosts-only", &[".config/google-chrome"]);
+        fs::create_dir_all(dir.path().join(".config/google-chrome/NativeMessagingHosts")).unwrap();
+        write(
+            &dir.path().join(".config/chromium/NativeMessagingHosts").join(MANIFEST),
+            &manifest_for(&host.display().to_string()),
+        );
+        let check = BrowserIntegration::detect_under(dir.path(), Some(host));
+        let names: Vec<_> = check.browsers.iter().map(|browser| browser.name).collect();
+        assert_eq!(names, ["Google Chrome"], "{check:?}");
     }
 
     /// Firefox is gated on its profile directory, not on `.mozilla` — measured

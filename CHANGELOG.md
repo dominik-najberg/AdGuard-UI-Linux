@@ -11,6 +11,22 @@ This file is the one changelog.
 
 ---
 
+## Unreleased
+
+### A Diagnostics page
+
+The second item of [#21](https://github.com/dominik-najberg/AdGuard-UI-Linux/issues/21). A new page between Extensions and About lists every check this application already makes, one row each, marked as passing, failing or unknown: the CLI's version and licence state, the proxy's state, mode, endpoints and process, whether the root helper is alive and AdGuard's own requests are getting through, the helper's setup, the certificate, each browser's integration, and DNS.
+
+**Copy report** puts the same lines on the clipboard as plain text for a bug report. It shortens your home folder to `~` and never includes your licence key, e-mail, network addresses or anything from your browsing.
+
+Each problem says what fixes it, and clicking it takes you to the page that has the fix: Status for a restart or activation, Protection for the certificate and browser commands, Advanced for the root helper, DNS for the listen port. The page is read when you open it and when you press refresh, and it changes nothing itself.
+
+### Browsers you do not have are no longer listed
+
+Password managers and other extensions' helpers create a folder for every browser they support, whether or not that browser is installed. AdGuard's browser-integration check took any such folder as an installed browser. A folder that holds nothing but those helpers' files now does not count. The Protection page uses the same check and is corrected with it.
+
+---
+
 ## 1.6.1 — 18 September 2026
 
 ### Fix a misleading activation prompt
