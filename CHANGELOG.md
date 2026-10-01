@@ -11,7 +11,7 @@ This file is the one changelog.
 
 ---
 
-## 1.7.0 — 30 September 2026
+## 1.7.0 — 1 October 2026
 
 ### An Activity page
 
@@ -49,7 +49,7 @@ The search reads AdGuard's own log each time and **keeps nothing**, so the count
 
 Diagnostics has a **Check a Website** group. Name a site that does not load, or loads with ads, and it is checked from end to end. It lists any problem on this computer first, since that breaks every site. Then it looks the name up and opens one connection to port 443, which shows a DNS block or a site that does not answer. AdGuard's log shows how many requests went to the site, what became of them, and which rules and filter lists decided them. It says whether the site is in AdGuard's HTTPS exclusions and whether AdGuard actually decrypted it, and whether the browser reached it over QUIC with HTTP/3 filtering off.
 
-Each finding leads to the page that changes it: the requests to Activity, a blocking rule to your own rules on Filters, a DNS block to the DNS page, QUIC to the HTTP/3 switch. A rule that blocked something is shown as a fact, never a fault, because blocking is what rules are for. **Clear** removes the results. Nothing about the site is kept, and it is not in the copied report.
+Each finding leads to the page that changes it: the requests to Activity, a blocking rule to your own rules on Filters, a DNS block to the DNS page, QUIC to the HTTP/3 switch. A rule that blocked something is shown as a fact, never a fault, because blocking is what rules are for. The results sit in one tinted panel headed with the site's name, apart from the checks on this computer below it, and **Clear** in that panel removes them. Nothing about the site is kept, and it is not in the copied report.
 
 ### HTTP/3 in Diagnostics
 

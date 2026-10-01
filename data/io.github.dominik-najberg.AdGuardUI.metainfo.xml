@@ -53,7 +53,7 @@
     application is its first release.
   -->
   <releases>
-    <release version="1.7.0" type="stable" date="2026-09-30">
+    <release version="1.7.0" type="stable" date="2026-10-01">
       <url type="details">https://github.com/dominik-najberg/AdGuard-UI-Linux/releases/tag/v1.7.0</url>
       <description>
         <p>Two new pages, for what AdGuard is doing and for why something is wrong:</p>

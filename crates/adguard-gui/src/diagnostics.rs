@@ -34,8 +34,11 @@
 //! *Check a Website* runs the same kind of report for one site the user names:
 //! the machine-wide problems first, then the name lookup and a connection,
 //! AdGuard's log for it, HTTPS and HTTP/3 (`adguard_core::site`). Its results
-//! sit between that group and the machine-wide sections, and stay until the
-//! next check — a refresh re-reads the machine, not the site. They are not in
+//! sit in one tinted panel between that group and the machine-wide sections,
+//! with a heading over the machine's, since the two are otherwise the same
+//! groups of the same rows and one site's *HTTPS* would read as the machine's
+//! *HTTPS filtering*. They stay until the next check or **Clear** — a refresh
+//! re-reads the machine, not the site. They are not in
 //! the copied report, which is written for a public tracker and would carry the
 //! site's name.
 //!
@@ -54,7 +57,7 @@ use libadwaita as adw;
 use adguard_core::config::key;
 use adguard_core::diagnostics::FixedOn;
 
-use crate::{toast, worker, Destination};
+use crate::{style, toast, worker, Destination};
 
 /// What the page is, before anything has been read.
 const WHAT_IT_IS: &str =
@@ -108,10 +111,20 @@ pub struct DiagnosticsPage {
     site_group: adw::PreferencesGroup,
     site_entry: adw::EntryRow,
     site_button: gtk::Button,
-    /// Takes the results away. Shown only while there are some.
+    /// Holds the results panel. Shown only while there are results.
+    site_panel: adw::PreferencesGroup,
+    /// The tinted panel itself: a heading, then one group per site section.
+    site_box: gtk::Box,
+    site_heading: gtk::Label,
+    /// When the site was checked and what was found.
+    site_summary: gtk::Label,
+    /// Takes the results away. In the panel's heading, beside what it removes.
     site_clear: gtk::Button,
-    /// The last website check's groups, between `site_group` and `sections`.
+    /// The last website check's groups, inside `site_box`.
     site_results: RefCell<Vec<adw::PreferencesGroup>>,
+    /// Over the machine-wide sections, shown with the panel so where the site's
+    /// results end is said as well as drawn.
+    machine_heading: adw::PreferencesGroup,
     site_busy: Cell<bool>,
 }
 
@@ -148,19 +161,54 @@ impl DiagnosticsPage {
         site_button.add_css_class("suggested-action");
         let site_entry = adw::EntryRow::builder().title("Site, or a page's address").build();
         site_entry.add_suffix(&site_button);
-        let site_clear = gtk::Button::builder()
-            .label("Clear")
-            .valign(gtk::Align::Center)
-            .visible(false)
-            .tooltip_text("Remove this check's results and the site's name from the page")
-            .build();
         let site_group = adw::PreferencesGroup::builder()
             .title("Check a Website")
             .description(WHAT_THE_SITE_CHECK_IS)
-            .header_suffix(&site_clear)
             .build();
         site_group.add(&site_entry);
         page.add(&site_group);
+
+        let site_clear = gtk::Button::builder()
+            .label("Clear")
+            .valign(gtk::Align::Center)
+            .tooltip_text("Remove this check's results and the site's name from the page")
+            .build();
+        let site_heading = gtk::Label::builder().xalign(0.0).wrap(true).build();
+        site_heading.add_css_class("heading");
+        let site_summary = gtk::Label::builder().xalign(0.0).wrap(true).build();
+        site_summary.add_css_class("dim-label");
+        let site_titles = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(4)
+            .hexpand(true)
+            .build();
+        site_titles.append(&site_heading);
+        site_titles.append(&site_summary);
+        let site_header = gtk::Box::builder().spacing(12).build();
+        site_header.append(&site_titles);
+        site_header.append(&site_clear);
+        let site_box = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(18)
+            .build();
+        site_box.add_css_class(style::SITE_RESULTS);
+        site_box.append(&site_header);
+        let site_panel = adw::PreferencesGroup::builder().visible(false).build();
+        site_panel.add(&site_box);
+        page.add(&site_panel);
+
+        // A label a size up rather than a group title: a titled group with no
+        // rows reads as a section that came back empty, and this heads all of
+        // the sections under it.
+        let machine_title = gtk::Label::builder()
+            .label("Checks on This Computer")
+            .xalign(0.0)
+            .wrap(true)
+            .build();
+        machine_title.add_css_class("title-4");
+        let machine_heading = adw::PreferencesGroup::builder().visible(false).build();
+        machine_heading.add(&machine_title);
+        page.add(&machine_heading);
 
         let this = Rc::new(Self {
             cli,
@@ -177,8 +225,13 @@ impl DiagnosticsPage {
             site_group,
             site_entry,
             site_button,
+            site_panel,
+            site_box,
+            site_heading,
+            site_summary,
             site_clear,
             site_results: RefCell::new(Vec::new()),
+            machine_heading,
             site_busy: Cell::new(false),
         });
         this.site_button.connect_clicked({
@@ -281,22 +334,17 @@ impl DiagnosticsPage {
     /// the entry. Nothing was kept anywhere else, so this is all of it.
     fn clear_site(&self) {
         for group in self.site_results.take() {
-            self.page.remove(&group);
+            self.site_box.remove(&group);
         }
         self.site_entry.set_text("");
-        self.site_clear.set_visible(false);
+        self.site_panel.set_visible(false);
+        self.machine_heading.set_visible(false);
         self.site_group.set_description(Some(WHAT_THE_SITE_CHECK_IS));
     }
 
     fn render_site(&self, host: &str, report: &Report) {
         for group in self.site_results.take() {
-            self.page.remove(&group);
-        }
-        // The machine sections come after the site's, so they are taken off
-        // and put back below.
-        let machine = self.sections.borrow().clone();
-        for group in &machine {
-            self.page.remove(group);
+            self.site_box.remove(&group);
         }
 
         let home = std::env::var("HOME").ok();
@@ -318,17 +366,12 @@ impl DiagnosticsPage {
         let groups: Vec<_> = report
             .sections
             .iter()
-            .map(|section| {
-                let group = section_group(section, home.as_deref(), &link);
-                group.set_title(&format!("{host}: {}", section.title));
-                group
-            })
+            .map(|section| section_group(section, home.as_deref(), &link))
             .collect();
-        for group in groups.iter().chain(&machine) {
-            self.page.add(group);
+        for group in &groups {
+            self.site_box.append(group);
         }
         self.site_results.replace(groups);
-        self.site_clear.set_visible(true);
 
         let when = glib::DateTime::now_local()
             .ok()
@@ -339,10 +382,16 @@ impl DiagnosticsPage {
             1 => "1 problem found".to_owned(),
             n => format!("{n} problems found"),
         };
-        self.site_group.set_description(Some(&format!(
-            "{host}, checked {when} — {found}. The results are below; rules that matched are \
-             listed as facts, since blocking is what they are for."
-        )));
+        let heading = format!("Results for {host}");
+        self.site_heading.set_label(&heading);
+        self.site_box.update_property(&[gtk::accessible::Property::Label(&heading)]);
+        self.site_summary.set_label(&format!(
+            "Checked {when} — {found}. Rules that matched are listed as facts, since blocking \
+             is what they are for."
+        ));
+        self.site_group.set_description(Some(WHAT_THE_SITE_CHECK_IS));
+        self.site_panel.set_visible(true);
+        self.machine_heading.set_visible(true);
     }
 
     /// Read everything again. Called when the page is selected and by the
