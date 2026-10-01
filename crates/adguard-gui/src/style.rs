@@ -43,6 +43,9 @@ pub const STAT_BUTTON: &str = "stat-button";
 pub const REVEAL_TARGET: &str = "reveal-target";
 pub const REVEALED: &str = "revealed";
 
+/// The panel that holds one website check's results on Diagnostics.
+pub const SITE_RESULTS: &str = "site-results";
+
 const CSS: &str = "
 .hero {
   padding: 24px;
@@ -130,6 +133,18 @@ const CSS: &str = "
 .reveal-target.revealed {
   background-color: alpha(@accent_color, 0.13);
   transition: none;
+}
+
+/* One website's results, set apart from the machine-wide sections below them,
+   which are otherwise the same groups of the same rows. A tint, as on the hero,
+   so the cards inside keep the theme's contrast; the accent, because the panel
+   is what the Check button made. The border is for high contrast, where a 6%
+   tint can vanish and the edge is what is left to say where the panel ends. */
+.site-results {
+  padding: 18px;
+  border-radius: 12px;
+  background-color: alpha(@accent_color, 0.06);
+  border: 1px solid alpha(@accent_color, 0.25);
 }
 ";
 
