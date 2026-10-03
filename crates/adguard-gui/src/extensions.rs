@@ -28,7 +28,7 @@ use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 use std::time::Duration;
 
-use adguard_core::{userscripts, Cli, Config, Locale, Userscript, INSTALL_LINKS};
+use adguard_core::{userscripts, Cli, Config, Locale, Userscript};
 use adw::prelude::*;
 use gtk::glib;
 use gtk4 as gtk;
@@ -105,10 +105,24 @@ const ADD_DESCRIPTION: &str =
     "AdGuard fetches userscripts over the web, so this takes an http or https address \
      ending in .user.js — a file on this computer cannot be installed.";
 
+/// What the banner says after an address was pasted while the browser helper
+/// is missing (#29). It names the button people already know from Greasy Fork
+/// rather than the helper, whose name means nothing until it is explained.
+const HELPER_HINT: &str = "You can skip copying addresses: with the browser helper, the Install \
+                           button on Greasy Fork brings scripts here.";
+
 pub struct ExtensionsPage {
+    /// The banner above the page, then the page.
+    root: gtk::Box,
+    /// The browser-helper suggestion. Outside `bin` so a rebuild of the page —
+    /// which every install triggers — does not take it down with it.
+    banner: adw::Banner,
     /// Swapped wholesale — spinner, error, or the list — which is simpler and
     /// less error-prone than reconciling child lists.
     bin: adw::Bin,
+    /// The *From your browser* group in the current build, for the banner to
+    /// point at.
+    browser_group: RefCell<Option<adw::PreferencesGroup>>,
     cli: Cli,
     toasts: adw::ToastOverlay,
     locale: Locale,
@@ -127,8 +141,22 @@ pub struct ExtensionsPage {
 
 impl ExtensionsPage {
     pub fn new(cli: Cli, toasts: adw::ToastOverlay) -> Rc<Self> {
+        let banner = adw::Banner::builder()
+            .title(HELPER_HINT)
+            .button_label("Show")
+            .use_markup(false)
+            .revealed(false)
+            .build();
+        let bin = adw::Bin::builder().vexpand(true).build();
+        let root = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        root.append(&banner);
+        root.append(&bin);
+
         let this = Rc::new(Self {
-            bin: adw::Bin::new(),
+            root,
+            banner,
+            bin,
+            browser_group: RefCell::new(None),
             cli,
             toasts,
             locale: Locale::from_env(),
@@ -138,12 +166,27 @@ impl ExtensionsPage {
             asking: RefCell::new(None),
             hinted: Cell::new(false),
         });
+
+        // *Show* rather than an install from the banner: the group it points
+        // at says what the helper does, and adding it is that group's button.
+        let page = Rc::downgrade(&this);
+        this.banner.connect_button_clicked(move |banner| {
+            banner.set_revealed(false);
+            let Some(page) = page.upgrade() else {
+                return;
+            };
+            let group = page.browser_group.borrow().clone();
+            if let Some(group) = group {
+                crate::reveal(&group);
+            }
+        });
+
         this.reload();
         this
     }
 
-    pub fn widget(&self) -> &adw::Bin {
-        &self.bin
+    pub fn widget(&self) -> &gtk::Box {
+        &self.root
     }
 
     /// Re-read both sources and rebuild the page.
@@ -166,6 +209,7 @@ impl ExtensionsPage {
                 }
                 Err(err) => {
                     this.rows.borrow_mut().clear();
+                    this.browser_group.replace(None);
                     this.bin.set_child(Some(&error_view(&err)));
                 }
             },
@@ -229,9 +273,15 @@ impl ExtensionsPage {
         page.add(&self.add_group());
         // Directly under the address field: the two are ways of doing the same
         // thing, and the helper is the one that saves typing the address.
-        if let Some(group) = self.install_links_group(loaded.install_links) {
-            page.add(&group);
+        let browser_group = self.install_links_group(loaded.install_links);
+        if let Some(group) = &browser_group {
+            page.add(group);
+        } else {
+            // Added, from the banner's group or anywhere else: nothing left
+            // to suggest.
+            self.banner.set_revealed(false);
         }
+        self.browser_group.replace(browser_group);
         if let Some(group) = self.offered_group(&loaded.offered) {
             page.add(&group);
         }
@@ -356,7 +406,16 @@ impl ExtensionsPage {
                  to open AdGuard UI.",
             )
             .build();
-        group.add(&self.offer_row(entry));
+        // Titled for what it does rather than with the script's own name,
+        // which reads as a product nobody has heard of. The name follows, so
+        // the row can be matched to the one that appears under *Installed*.
+        let row = self.offer_row(entry);
+        row.set_title("Install from your browser");
+        row.set_subtitle(&format!(
+            "Adds the “{}” userscript. Each script is still added only after you confirm it.",
+            entry.name
+        ));
+        group.add(&row);
         Some(group)
     }
 
@@ -647,10 +706,12 @@ impl ExtensionsPage {
 
     /// Ask before deleting a script, and say what cannot be undone.
     ///
-    /// The wording names the source URL when there is one, because that is the
-    /// only thing that can bring the script back — and points at the switch,
-    /// because "stop it running" is what most people reaching for this actually
-    /// want.
+    /// The body points at the switch, because "stop it running" is what most
+    /// people reaching for this actually want. The rows below name the script
+    /// and where it came from, since its address is the only thing that can
+    /// bring it back — folded away and copyable rather than printed in the
+    /// body, where an escaped URL is a wall of `%20`s centred across five
+    /// lines.
     async fn confirm_removal(&self, id: &str) -> bool {
         let (name, source) = {
             let rows = self.rows.borrow();
@@ -664,24 +725,10 @@ impl ExtensionsPage {
             )
         };
 
-        let undo = match &source {
-            Some(url) => format!("There is no undo: getting it back means adding {url} again."),
-            // Worth saying plainly rather than softening. A script with no
-            // recorded source cannot be re-fetched by this application at all.
-            None => "There is no undo, and AdGuard did not record where this one came from — \
-                     it cannot be reinstalled from here."
-                .to_owned(),
-        };
-
-        let dialog = adw::AlertDialog::new(
-            Some("Remove this userscript?"),
-            Some(&format!(
-                "{name} will be deleted from AdGuard, not just switched off. {undo}\n\n\
-                 To stop it running without losing it, switch it off instead."
-            )),
-        );
-        // Not markup: a script's name is text somebody else wrote.
+        let dialog = adw::AlertDialog::new(Some("Remove this userscript?"), Some(REMOVE_BODY));
         dialog.set_body_use_markup(false);
+        dialog.set_prefer_wide_layout(true);
+        dialog.set_extra_child(Some(&removal_details(&name, source.as_deref())));
         dialog.add_response("cancel", "Cancel");
         dialog.add_response("remove", "Remove");
         dialog.set_response_appearance("remove", adw::ResponseAppearance::Destructive);
@@ -1095,12 +1142,16 @@ impl ExtensionsPage {
         match after.iter().find(|s| !before.contains(&s.id)) {
             Some(new) => {
                 set_busy(false, true);
-                let added = format!("Added {}", new.display_name());
+                self.toasts.add_toast(toast(&format!("Added {}", new.display_name())));
+                // The moment the helper is worth mentioning: someone has just
+                // copied a script's address out of a browser and pasted it
+                // here, which is exactly what it saves. Once per run, and only
+                // while it is missing — a reminder, not a campaign. A banner
+                // rather than the toast: a toast has one line, and a long
+                // script name leaves no room for the explanation.
                 let helper_missing = userscripts::install_links(&after).is_some();
                 if typed && helper_missing && !self.hinted.replace(true) {
-                    self.toasts.add_toast(self.helper_hint(&added));
-                } else {
-                    self.toasts.add_toast(toast(&added));
+                    self.banner.set_revealed(true);
                 }
             }
             // Nothing new. Either it was refused, or the URL was one already
@@ -1115,30 +1166,6 @@ impl ExtensionsPage {
             }
         }
         self.reload();
-    }
-
-    /// The toast after an address was typed in, telling the user the browser
-    /// could have done it (#29).
-    ///
-    /// This is the moment the helper is worth mentioning: someone has just
-    /// copied a script's address out of a browser and pasted it here, which is
-    /// exactly what it saves. Once per run of the application, and only while
-    /// the helper is not installed — a reminder, not a campaign. The button
-    /// adds it the way the *From your browser* row does.
-    fn helper_hint(self: &Rc<Self>, added: &str) -> adw::Toast {
-        let hint = adw::Toast::builder()
-            .use_markup(false)
-            .title(format!("{added}. Next time, add scripts straight from your browser"))
-            .button_label("Add Helper")
-            .timeout(10)
-            .build();
-        let this = Rc::downgrade(self);
-        hint.connect_button_clicked(move |_| {
-            if let Some(this) = this.upgrade() {
-                this.add_recommended(&INSTALL_LINKS);
-            }
-        });
-        hint
     }
 
     /// The display name for a row, for a message about it.
@@ -1332,6 +1359,52 @@ impl InstallDetails {
             self.listed.borrow_mut().push(row);
         }
     }
+}
+
+/// The line under the removal question. The difference between *off* and
+/// *gone* is the whole of what it has to say.
+const REMOVE_BODY: &str = "It will be deleted from AdGuard, not just switched off. To stop it \
+                           running but keep it, switch it off instead.";
+
+/// The rows under the removal question: the script, and what getting it back
+/// would take.
+fn removal_details(name: &str, source: Option<&str>) -> gtk::ListBox {
+    let list = gtk::ListBox::builder()
+        .selection_mode(gtk::SelectionMode::None)
+        .build();
+    list.add_css_class("boxed-list");
+
+    // Not markup, as everywhere here: a script's name is text somebody else
+    // wrote.
+    let named = static_row(name);
+    named.set_title_lines(3);
+    list.append(&named);
+
+    let origin = static_row("Source");
+    let value = value_label();
+    list.append(&origin);
+
+    match source {
+        Some(url) => {
+            value.set_label(&install_link::summary(url, &Details::Reading).source);
+            origin.add_suffix(&value);
+            origin.set_subtitle("There is no undo: to get it back, add its address again");
+            list.append(&address_row(url));
+        }
+        // Worth saying plainly rather than softening. A script with no
+        // recorded source cannot be re-fetched by this application at all.
+        // Icon and text both, so the warning does not rest on colour.
+        None => {
+            let warning = gtk::Image::from_icon_name("dialog-warning-symbolic");
+            warning.add_css_class("warning");
+            origin.add_suffix(&warning);
+            value.set_label("Not recorded");
+            value.add_css_class("warning");
+            origin.add_suffix(&value);
+            origin.set_subtitle("There is no undo, and it cannot be added back from here");
+        }
+    }
+    list
 }
 
 /// A row that states something. Not activatable and not focusable, so the
