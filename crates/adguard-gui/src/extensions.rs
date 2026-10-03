@@ -1132,7 +1132,12 @@ const INSTALL_BODY: &str = "Add only scripts from sources you trust. It can read
 /// and this is read to make a decision.
 struct InstallDetails {
     list: gtk::ListBox,
+    /// The name, with whatever short line goes under it.
     name: adw::ActionRow,
+    /// The name, when the description is too long for two lines: it expands
+    /// to the whole text.
+    described: adw::ExpanderRow,
+    description: gtk::Label,
     version: adw::ActionRow,
     version_value: gtk::Label,
     source_value: gtk::Label,
@@ -1159,6 +1164,32 @@ impl InstallDetails {
         name.set_title_lines(3);
         name.set_subtitle_lines(2);
         list.append(&name);
+
+        let described = adw::ExpanderRow::builder().build();
+        described.set_use_markup(false);
+        described.set_title_lines(3);
+        described.set_subtitle_lines(2);
+        let description = gtk::Label::builder()
+            .use_markup(false)
+            .wrap(true)
+            .wrap_mode(gtk::pango::WrapMode::WordChar)
+            .xalign(0.0)
+            .margin_top(12)
+            .margin_bottom(12)
+            .margin_start(12)
+            .margin_end(12)
+            .build();
+        described.add_row(&description);
+        // Collapsed, the two-line preview; expanded, only the full text under
+        // the row, so the start of it is not on screen twice.
+        described.connect_expanded_notify({
+            let description = description.clone();
+            move |row| {
+                let preview = if row.is_expanded() { String::new() } else { description.label().into() };
+                row.set_subtitle(&preview);
+            }
+        });
+        list.append(&described);
 
         let version = static_row("Version");
         let version_value = value_label();
@@ -1197,6 +1228,8 @@ impl InstallDetails {
         Self {
             list,
             name,
+            described,
+            description,
             version,
             version_value,
             source_value,
@@ -1211,11 +1244,16 @@ impl InstallDetails {
     }
 
     fn show(&self, summary: &Summary) {
-        self.name.set_title(&summary.name);
         let note = summary.note.as_deref().unwrap_or("");
+        let long = note.chars().count() > DESCRIPTION_PREVIEW;
+        self.name.set_visible(!long);
+        self.described.set_visible(long);
+
+        self.name.set_title(&summary.name);
         self.name.set_subtitle(note);
-        // The description is cut to two lines on the row; all of it is here.
-        self.name.set_tooltip_text(summary.note.as_deref());
+        self.described.set_title(&summary.name);
+        self.description.set_label(note);
+        self.described.set_subtitle(if self.described.is_expanded() { "" } else { note });
 
         self.version.set_visible(summary.version.is_some());
         self.version_value
@@ -1262,18 +1300,29 @@ fn static_row(title: &str) -> adw::ActionRow {
     row
 }
 
-/// The value beside a row's title, right-aligned and wrapping rather than
-/// pushing the dialog wider.
+/// About how much description fits the name row's two-line preview; longer
+/// ones get a row that expands to the whole text.
+const DESCRIPTION_PREVIEW: usize = 100;
+
+/// The value beside a row's title, on one line.
+///
+/// Never wrapped: "1.0 / .18" and "update.gre- / asyfork.org" broken across
+/// lines are harder to read than anything they save. The titles beside them
+/// are single words, so a value has room; one that still does not fit is cut
+/// in the middle — a host keeps both ends, which are the parts that identify
+/// it — and the whole of it is in the tooltip.
 fn value_label() -> gtk::Label {
-    gtk::Label::builder()
+    let label = gtk::Label::builder()
         .use_markup(false)
-        .wrap(true)
-        .wrap_mode(gtk::pango::WrapMode::WordChar)
         .xalign(1.0)
-        .justify(gtk::Justification::Right)
-        .max_width_chars(28)
+        .ellipsize(gtk::pango::EllipsizeMode::Middle)
         .valign(gtk::Align::Center)
-        .build()
+        .build();
+    label.connect_label_notify(|label| {
+        let text = label.label();
+        label.set_tooltip_text((!text.is_empty()).then_some(text.as_str()));
+    });
+    label
 }
 
 /// The URL in full, folded away: the name and source are what a person
