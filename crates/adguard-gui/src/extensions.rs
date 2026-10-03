@@ -24,8 +24,9 @@
 //! is where the condition is computed.
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
+use std::time::Duration;
 
 use adguard_core::{userscripts, Cli, Config, Locale, Userscript};
 use adw::prelude::*;
@@ -42,6 +43,9 @@ struct Loaded {
     /// `scripts`, but computed on the worker thread with everything else so the
     /// view builder has nothing left to work out.
     offered: Vec<&'static adguard_core::Recommended>,
+    /// This application's own script for browser install links, while it is
+    /// not installed.
+    install_links: Option<&'static adguard_core::Recommended>,
 }
 
 /// A rendered userscript and the state it was rendered from.
@@ -110,6 +114,10 @@ pub struct ExtensionsPage {
     /// tell a user's click from our own reconcile. Property notifications are
     /// synchronous, so a plain flag around the write is enough.
     reconciling: Cell<bool>,
+    /// Install links waiting for their dialog, oldest first.
+    offers: RefCell<VecDeque<String>>,
+    /// The link whose dialog — or install — is under way, if any.
+    asking: RefCell<Option<String>>,
 }
 
 impl ExtensionsPage {
@@ -121,6 +129,8 @@ impl ExtensionsPage {
             locale: Locale::from_env(),
             rows: RefCell::new(HashMap::new()),
             reconciling: Cell::new(false),
+            offers: RefCell::new(VecDeque::new()),
+            asking: RefCell::new(None),
         });
         this.reload();
         this
@@ -214,6 +224,9 @@ impl ExtensionsPage {
         if let Some(group) = self.offered_group(&loaded.offered) {
             page.add(&group);
         }
+        if let Some(group) = self.install_links_group(loaded.install_links) {
+            page.add(&group);
+        }
 
         if loaded.scripts.is_empty() {
             // Not an error: an install whose last script was removed is a
@@ -274,7 +287,8 @@ impl ExtensionsPage {
             if url.is_empty() {
                 return;
             }
-            this.install(url, entry.clone(), spinner.clone());
+            let field = Some((entry.clone(), spinner.clone()));
+            glib::spawn_future_local(async move { this.install(url, field).await });
         });
 
         group.add(&entry);
@@ -308,54 +322,82 @@ impl ExtensionsPage {
             .build();
 
         for entry in offered {
-            let row = adw::ActionRow::builder()
-                .title(entry.name)
-                .subtitle(offered_subtitle(entry))
-                .build();
-            row.set_use_markup(false);
-            row.set_subtitle_lines(2);
-
-            let add = gtk::Button::builder()
-                .label("Add")
-                .valign(gtk::Align::Center)
-                .build();
-            add.add_css_class("suggested-action");
-
-            let this = Rc::downgrade(self);
-            let entry = *entry;
-            add.connect_clicked(move |button| {
-                let Some(this) = this.upgrade() else {
-                    return;
-                };
-                // Fenced at the click, like every other action here: the fetch
-                // takes seconds and a second press would issue a second install.
-                button.set_sensitive(false);
-                this.add_recommended(entry);
-            });
-
-            add.set_tooltip_text(Some(&format!("Add {}", entry.name)));
-            row.add_suffix(&add);
-            // Deliberately **not** the row's activatable widget. Setting it
-            // makes `AdwActionRow` give the button the row's own name — a walk
-            // confirms it announcing as "AdGuard Popup Blocker", with the word
-            // *Add* surviving only as a label inside it, so the one thing the
-            // control does is the thing a screen reader would not say. And
-            // pressing this downloads and runs somebody else's script, which
-            // should take a press on the button rather than a click anywhere
-            // along a row the user might merely be reading.
-            //
-            // The button's own text is what names it, and an explicit
-            // accessible label does **not** override it — measured both before
-            // and after the row is assembled, so it is the widget's rule and
-            // not a question of ordering. That leaves three buttons all reading
-            // "Add", distinguished by the list item each sits in; the tooltip
-            // carries the script's name for the pointer, and unlike the trash
-            // buttons on the rows below there is no unnamed control here to
-            // fix.
-            group.add(&row);
+            group.add(&self.offer_row(entry));
         }
 
         Some(group)
+    }
+
+    /// The browser-links script, until it is installed (#29).
+    ///
+    /// A group of its own rather than a fifth row under *From AdGuard*: it is
+    /// this application's script, not AdGuard's, and it changes what happens
+    /// on other sites when a link is clicked — which is worth a sentence of its
+    /// own before anyone presses *Add*.
+    fn install_links_group(
+        self: &Rc<Self>,
+        entry: Option<&'static adguard_core::Recommended>,
+    ) -> Option<adw::PreferencesGroup> {
+        let entry = entry?;
+        let group = adw::PreferencesGroup::builder()
+            .title("From your browser")
+            .description(
+                "With this added, the Install button on Greasy Fork, Sleazy Fork, OpenUserJS \
+                 and GitHub brings the script here to be added, instead of opening it as text. \
+                 It needs HTTPS filtering for your browser, and the browser asks once whether \
+                 to open AdGuard UI.",
+            )
+            .build();
+        group.add(&self.offer_row(entry));
+        Some(group)
+    }
+
+    /// One script offered for installation: what it is, and *Add*.
+    fn offer_row(self: &Rc<Self>, entry: &'static adguard_core::Recommended) -> adw::ActionRow {
+        let row = adw::ActionRow::builder()
+            .title(entry.name)
+            .subtitle(offered_subtitle(entry))
+            .build();
+        row.set_use_markup(false);
+        row.set_subtitle_lines(2);
+
+        let add = gtk::Button::builder()
+            .label("Add")
+            .valign(gtk::Align::Center)
+            .build();
+        add.add_css_class("suggested-action");
+
+        let this = Rc::downgrade(self);
+        add.connect_clicked(move |button| {
+            let Some(this) = this.upgrade() else {
+                return;
+            };
+            // Fenced at the click, like every other action here: the fetch
+            // takes seconds and a second press would issue a second install.
+            button.set_sensitive(false);
+            this.add_recommended(entry);
+        });
+
+        add.set_tooltip_text(Some(&format!("Add {}", entry.name)));
+        row.add_suffix(&add);
+        // Deliberately **not** the row's activatable widget. Setting it
+        // makes `AdwActionRow` give the button the row's own name — a walk
+        // confirms it announcing as "AdGuard Popup Blocker", with the word
+        // *Add* surviving only as a label inside it, so the one thing the
+        // control does is the thing a screen reader would not say. And
+        // pressing this downloads and runs somebody else's script, which
+        // should take a press on the button rather than a click anywhere
+        // along a row the user might merely be reading.
+        //
+        // The button's own text is what names it, and an explicit
+        // accessible label does **not** override it — measured both before
+        // and after the row is assembled, so it is the widget's rule and
+        // not a question of ordering. That leaves several buttons all reading
+        // "Add", distinguished by the list item each sits in; the tooltip
+        // carries the script's name for the pointer, and unlike the trash
+        // buttons on the rows below there is no unnamed control here to
+        // fix.
+        row
     }
 
     /// Install one of AdGuard's own scripts, in the state AdGuard ships it.
@@ -877,6 +919,98 @@ impl ExtensionsPage {
         );
     }
 
+    /// An install link arrived from a browser (`crate::install_link`): ask,
+    /// and install only on a yes.
+    ///
+    /// **One dialog at a time.** Links queue, and the next is asked about only
+    /// once the last answer — and the install it led to — is over. A page that
+    /// fires ten links gets ten questions in a row rather than a stack of
+    /// dialogs to click through blind, and two installs never race each other
+    /// to `proxy.yaml`. A link already queued, or the one being asked about, is
+    /// not queued again: a double click in the browser is one question.
+    pub fn offer_install(self: &Rc<Self>, url: String) {
+        let duplicate = self.asking.borrow().as_deref() == Some(url.as_str())
+            || self.offers.borrow().contains(&url);
+        if duplicate {
+            return;
+        }
+        self.offers.borrow_mut().push_back(url);
+        if self.asking.borrow().is_some() {
+            return;
+        }
+
+        let this = self.clone();
+        glib::spawn_future_local(async move {
+            loop {
+                let Some(url) = this.offers.borrow_mut().pop_front() else {
+                    break;
+                };
+                this.asking.replace(Some(url.clone()));
+                if this.confirm_install(&url).await {
+                    this.install(url, None).await;
+                }
+                this.asking.replace(None);
+            }
+        });
+    }
+
+    /// The link's only gate. Anything on the web can open one, so the URL is
+    /// shown whole — the host is the part that says whose code this is — and
+    /// the safe answer is the default one.
+    ///
+    /// **Add cannot be pressed for the first [`ADD_DELAY`].** The dialog comes
+    /// up because of a click in another window, often right under the pointer,
+    /// and the click or keypress after it lands on whatever is there — a page
+    /// can even ask for that, with a "click twice" game. So Add starts greyed
+    /// out with a countdown on it, the way Firefox guards its install prompts,
+    /// and the countdown starts again whenever the window loses focus, so it
+    /// cannot be waited out elsewhere and then clicked through unread. Enter
+    /// and Escape are Cancel throughout, and Add is a plain button rather than
+    /// a highlighted one, so the eye does not land on it first.
+    async fn confirm_install(&self, url: &str) -> bool {
+        let body = format!(
+            "A web page asked to add the userscript at\n\n{url}\n\nIt will run on every site \
+             it names, able to read and change what you see there. Add it only if you just \
+             clicked an install link and trust where it came from."
+        );
+
+        let dialog = adw::AlertDialog::new(Some("Add this userscript?"), Some(&body));
+        dialog.set_body_use_markup(false);
+        dialog.add_response("cancel", "Cancel");
+        dialog.add_response("install", "Add");
+        dialog.set_default_response(Some("cancel"));
+        dialog.set_close_response("cancel");
+
+        let countdown = Countdown::new(&dialog, "install", "Add");
+        let window = self.bin.root().and_downcast::<gtk::Window>();
+        let focus = window.as_ref().map(|window| {
+            let countdown = countdown.clone();
+            window.connect_is_active_notify(move |window| {
+                if window.is_active() {
+                    countdown.start();
+                } else {
+                    countdown.hold();
+                }
+            })
+        });
+        // A window launched from a click in a browser may not have focus yet —
+        // GNOME can decline to raise it — and then the countdown waits for the
+        // first time it does.
+        if window.as_ref().is_none_or(|window| window.is_active()) {
+            countdown.start();
+        } else {
+            countdown.hold();
+        }
+
+        let answer = dialog.choose_future(Some(&self.bin)).await;
+
+        countdown.hold();
+        if let (Some(window), Some(focus)) = (window, focus) {
+            window.disconnect(focus);
+        }
+        answer == "install"
+    }
+
     /// Fetch and install a userscript, then confirm it against the directory.
     ///
     /// The id is assigned by AdGuard from the filename, so — as with a custom
@@ -884,55 +1018,62 @@ impl ExtensionsPage {
     /// after, and one that was not there before is the evidence. An id that was
     /// *already* there is the reinstall case, which is a legitimate outcome of
     /// pasting a URL twice and is reported as such rather than as a failure.
-    fn install(self: &Rc<Self>, url: String, entry: adw::EntryRow, spinner: adw::Spinner) {
-        entry.set_sensitive(false);
-        spinner.set_visible(true);
+    ///
+    /// `field` is the add row and its spinner when the URL was typed there, and
+    /// `None` when it arrived as an install link (`crate::install_link`) — that
+    /// row is rebuilt with the page, so it cannot be held across a dialog.
+    async fn install(self: &Rc<Self>, url: String, field: Option<(adw::EntryRow, adw::Spinner)>) {
+        let set_busy = |busy: bool, clear: bool| {
+            if let Some((entry, spinner)) = &field {
+                entry.set_sensitive(!busy);
+                spinner.set_visible(busy);
+                if clear {
+                    entry.set_text("");
+                }
+            }
+        };
+        set_busy(true, false);
 
         let cli = self.cli.clone();
         let locale = self.locale.clone();
-        let this = self.clone();
-        worker::run(
-            move || {
-                let before: Vec<String> = read(&locale)
-                    .map(|loaded| loaded.scripts.into_iter().map(|s| s.id).collect())
-                    .unwrap_or_default();
-                let refused = cli.userscripts_install(&url).err().map(|e| e.to_string());
-                let after = read(&locale).ok().map(|loaded| loaded.scripts);
-                (refused, before, after)
-            },
-            move |(refused, before, after)| {
-                entry.set_sensitive(true);
-                spinner.set_visible(false);
+        let outcome = worker::job(move || {
+            let before: Vec<String> = read(&locale)
+                .map(|loaded| loaded.scripts.into_iter().map(|s| s.id).collect())
+                .unwrap_or_default();
+            let refused = cli.userscripts_install(&url).err().map(|e| e.to_string());
+            let after = read(&locale).ok().map(|loaded| loaded.scripts);
+            (refused, before, after)
+        })
+        .await;
 
-                let Some(after) = after else {
-                    this.toasts.add_toast(toast(&refused.unwrap_or_else(|| {
-                        "Could not re-read the userscripts to confirm the install".to_owned()
-                    })));
-                    this.reload();
-                    return;
-                };
+        let Some((refused, before, Some(after))) = outcome else {
+            set_busy(false, false);
+            let refused = outcome.and_then(|(refused, _, _)| refused);
+            self.toasts.add_toast(toast(&refused.unwrap_or_else(|| {
+                "Could not re-read the userscripts to confirm the install".to_owned()
+            })));
+            self.reload();
+            return;
+        };
 
-                match after.iter().find(|s| !before.contains(&s.id)) {
-                    Some(new) => {
-                        entry.set_text("");
-                        this.toasts
-                            .add_toast(toast(&format!("Added {}", new.display_name())));
-                        this.reload();
-                    }
-                    // Nothing new. Either it was refused, or the URL was one
-                    // already installed and this was an update in place — which
-                    // the CLI reports identically, so the row count is what
-                    // tells them apart.
-                    None => {
-                        this.toasts.add_toast(toast(&refused.unwrap_or_else(|| {
-                            "That userscript was already installed; AdGuard updated it in place"
-                                .to_owned()
-                        })));
-                        this.reload();
-                    }
-                }
-            },
-        );
+        match after.iter().find(|s| !before.contains(&s.id)) {
+            Some(new) => {
+                set_busy(false, true);
+                self.toasts
+                    .add_toast(toast(&format!("Added {}", new.display_name())));
+            }
+            // Nothing new. Either it was refused, or the URL was one already
+            // installed and this was an update in place — which the CLI
+            // reports identically, so the row count is what tells them apart.
+            None => {
+                set_busy(false, false);
+                self.toasts.add_toast(toast(&refused.unwrap_or_else(|| {
+                    "That userscript was already installed; AdGuard updated it in place"
+                        .to_owned()
+                })));
+            }
+        }
+        self.reload();
     }
 
     /// The display name for a row, for a message about it.
@@ -946,13 +1087,89 @@ impl ExtensionsPage {
 }
 
 /// Read both sources, the way the page renders them.
+/// How long Add stays greyed out after an install link's dialog appears, or
+/// after its window comes back into focus.
+const ADD_DELAY: u32 = 2;
+
+/// The greyed-out, counting-down state of one dialog response.
+///
+/// Holds a weak reference to the dialog, so a timer still ticking when the
+/// dialog closes finds nothing to touch and stops.
+#[derive(Clone)]
+struct Countdown(Rc<CountdownInner>);
+
+struct CountdownInner {
+    dialog: glib::WeakRef<adw::AlertDialog>,
+    response: &'static str,
+    label: &'static str,
+    remaining: Cell<u32>,
+    timer: RefCell<Option<glib::SourceId>>,
+}
+
+impl Countdown {
+    fn new(dialog: &adw::AlertDialog, response: &'static str, label: &'static str) -> Self {
+        Self(Rc::new(CountdownInner {
+            dialog: dialog.downgrade(),
+            response,
+            label,
+            remaining: Cell::new(ADD_DELAY),
+            timer: RefCell::new(None),
+        }))
+    }
+
+    /// Grey the response out and count down from the top.
+    fn start(&self) {
+        self.hold();
+        let this = self.clone();
+        let timer = glib::timeout_add_local(Duration::from_secs(1), move || {
+            let left = this.0.remaining.get().saturating_sub(1);
+            this.0.remaining.set(left);
+            this.paint();
+            if left == 0 {
+                this.0.timer.take();
+                glib::ControlFlow::Break
+            } else {
+                glib::ControlFlow::Continue
+            }
+        });
+        self.0.timer.replace(Some(timer));
+    }
+
+    /// Grey the response out and stop counting, until [`Self::start`].
+    fn hold(&self) {
+        if let Some(timer) = self.0.timer.take() {
+            timer.remove();
+        }
+        self.0.remaining.set(ADD_DELAY);
+        self.paint();
+    }
+
+    fn paint(&self) {
+        let Some(dialog) = self.0.dialog.upgrade() else {
+            return;
+        };
+        let left = self.0.remaining.get();
+        dialog.set_response_enabled(self.0.response, left == 0);
+        let label = match left {
+            0 => self.0.label.to_owned(),
+            left => format!("{} ({left})", self.0.label),
+        };
+        dialog.set_response_label(self.0.response, &label);
+    }
+}
+
 fn read(locale: &Locale) -> Result<Loaded, String> {
     let config = Config::load().map_err(|err| err.to_string())?;
     let dir = adguard_core::paths::userscripts_dir()
         .ok_or_else(|| "Could not locate AdGuard's data directory".to_owned())?;
     let scripts = userscripts::read(&dir, &config.enabled_userscripts(), locale);
     let offered = userscripts::recommended(&scripts);
-    Ok(Loaded { scripts, offered })
+    let install_links = userscripts::install_links(&scripts);
+    Ok(Loaded {
+        scripts,
+        offered,
+        install_links,
+    })
 }
 
 /// Is `id` among these `meta:` paths? The config holds a path and the page

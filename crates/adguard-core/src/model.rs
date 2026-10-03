@@ -1694,6 +1694,30 @@ pub const RECOMMENDED: [Recommended; 4] = [
     },
 ];
 
+/// This application's own userscript: it hands clicks on userscript install
+/// links to the Extensions page (#29).
+///
+/// AdGuard CLI's proxy injects userscripts into HTML pages and passes a
+/// `.user.js` response through untouched, so the click has to be caught on the
+/// page that links to the script. This is what catches it, on the sites where
+/// userscripts are published, and turns it into an `adguard-ui://` link the
+/// application asks about before installing anything.
+///
+/// Kept out of [`RECOMMENDED`], which is AdGuard's own scripts and is pinned to
+/// AdGuard's host, and offered the same way: one press on *Add*, never
+/// installed unasked. Served from this repository's `main` branch, which is
+/// both where `data/userscripts/` lives and the address AdGuard re-fetches it
+/// from when it checks for userscript updates.
+pub const INSTALL_LINKS: Recommended = Recommended {
+    id: "adguard-ui-install-links",
+    name: "AdGuard UI install links",
+    description: "Sends clicks on userscript install links to AdGuard UI, which asks before \
+                  adding them to AdGuard.",
+    url: "https://raw.githubusercontent.com/dominik-najberg/AdGuard-UI-Linux/main/data/\
+          userscripts/adguard-ui-install-links.user.js",
+    enabled_by_default: true,
+};
+
 impl Userscript {
     /// What to call this script on screen.
     ///

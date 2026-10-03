@@ -11,6 +11,16 @@ This file is the one changelog.
 
 ---
 
+## Unreleased
+
+### Install userscripts from the browser
+
+The *Install* button on Greasy Fork, Sleazy Fork, OpenUserJS and GitHub can now bring a userscript to AdGuard UI instead of opening it as text, as AdGuard for Windows and Android do ([#29](https://github.com/dominik-najberg/AdGuard-UI-Linux/issues/29)). AdGuard CLI's proxy does not catch those clicks itself, so it takes a small userscript of this application's own, offered on the Extensions page under *From your browser* and added with one press. With it in place, a click opens AdGuard UI at the Extensions page and asks *Add this userscript?*, naming the address in full.
+
+Any web page can send such a link, so nothing is installed without a yes. Cancel is the default answer, and *Add* stays greyed out for two seconds after the question appears, counting down, and again whenever the window loses focus, so a click aimed at the browser cannot land on it by accident. Several links in a row are asked about one at a time. The browser asks once whether to open AdGuard UI, and the script needs HTTPS filtering for the browser to be on.
+
+---
+
 ## 1.8.1 — 3 October 2026
 
 ### A network that is down no longer reads as a bug in the application

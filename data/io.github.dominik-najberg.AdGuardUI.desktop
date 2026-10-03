@@ -3,12 +3,15 @@ Type=Application
 Name=AdGuard UI
 GenericName=Ad Blocker Settings
 Comment=Desktop front-end for AdGuard CLI
-Exec=adguard-ui
+# %u: an install link (adguard-ui://install-userscript?url=…) clicked in a
+# browser arrives as an argument. Expands to nothing from the launcher.
+Exec=adguard-ui %u
 Icon=io.github.dominik-najberg.AdGuardUI
 Terminal=false
 Categories=Network;Security;GTK;
 Keywords=adguard;adblock;proxy;filter;privacy;
 StartupNotify=true
+MimeType=x-scheme-handler/adguard-ui;
 # Must equal the GTK application ID and this file's basename, or GNOME fails to
 # group the window with its pinned launcher and shows a duplicate icon.
 StartupWMClass=io.github.dominik-najberg.AdGuardUI
