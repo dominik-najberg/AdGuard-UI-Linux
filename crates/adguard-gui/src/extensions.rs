@@ -274,7 +274,7 @@ impl ExtensionsPage {
             if url.is_empty() {
                 return;
             }
-            this.install(url, entry.clone(), spinner.clone());
+            this.install(url, Some((entry.clone(), spinner.clone())));
         });
 
         group.add(&entry);
@@ -877,6 +877,38 @@ impl ExtensionsPage {
         );
     }
 
+    /// An install link arrived from a browser (`crate::install_link`): ask,
+    /// and install only on a yes.
+    pub fn offer_install(self: &Rc<Self>, url: String) {
+        let this = self.clone();
+        glib::spawn_future_local(async move {
+            if this.confirm_install(&url).await {
+                this.install(url, None);
+            }
+        });
+    }
+
+    /// The link's only gate. Anything on the web can open one, so the URL is
+    /// shown whole — the host is the part that says whose code this is — and
+    /// the safe answer is the default one.
+    async fn confirm_install(&self, url: &str) -> bool {
+        let body = format!(
+            "A web page asked to add the userscript at\n\n{url}\n\nIt will run on every site \
+             it names, able to read and change what you see there. Add it only if you just \
+             clicked an install link and trust where it came from."
+        );
+
+        let dialog = adw::AlertDialog::new(Some("Add this userscript?"), Some(&body));
+        dialog.set_body_use_markup(false);
+        dialog.add_response("cancel", "Cancel");
+        dialog.add_response("install", "Add");
+        dialog.set_response_appearance("install", adw::ResponseAppearance::Suggested);
+        dialog.set_default_response(Some("cancel"));
+        dialog.set_close_response("cancel");
+
+        dialog.choose_future(Some(&self.bin)).await == "install"
+    }
+
     /// Fetch and install a userscript, then confirm it against the directory.
     ///
     /// The id is assigned by AdGuard from the filename, so — as with a custom
@@ -884,9 +916,21 @@ impl ExtensionsPage {
     /// after, and one that was not there before is the evidence. An id that was
     /// *already* there is the reinstall case, which is a legitimate outcome of
     /// pasting a URL twice and is reported as such rather than as a failure.
-    fn install(self: &Rc<Self>, url: String, entry: adw::EntryRow, spinner: adw::Spinner) {
-        entry.set_sensitive(false);
-        spinner.set_visible(true);
+    ///
+    /// `field` is the add row and its spinner when the URL was typed there, and
+    /// `None` when it arrived as an install link (`crate::install_link`) — that
+    /// row is rebuilt with the page, so it cannot be held across a dialog.
+    fn install(self: &Rc<Self>, url: String, field: Option<(adw::EntryRow, adw::Spinner)>) {
+        let set_busy = move |busy: bool, clear: bool| {
+            if let Some((entry, spinner)) = &field {
+                entry.set_sensitive(!busy);
+                spinner.set_visible(busy);
+                if clear {
+                    entry.set_text("");
+                }
+            }
+        };
+        set_busy(true, false);
 
         let cli = self.cli.clone();
         let locale = self.locale.clone();
@@ -901,10 +945,8 @@ impl ExtensionsPage {
                 (refused, before, after)
             },
             move |(refused, before, after)| {
-                entry.set_sensitive(true);
-                spinner.set_visible(false);
-
                 let Some(after) = after else {
+                    set_busy(false, false);
                     this.toasts.add_toast(toast(&refused.unwrap_or_else(|| {
                         "Could not re-read the userscripts to confirm the install".to_owned()
                     })));
@@ -914,7 +956,7 @@ impl ExtensionsPage {
 
                 match after.iter().find(|s| !before.contains(&s.id)) {
                     Some(new) => {
-                        entry.set_text("");
+                        set_busy(false, true);
                         this.toasts
                             .add_toast(toast(&format!("Added {}", new.display_name())));
                         this.reload();
@@ -924,6 +966,7 @@ impl ExtensionsPage {
                     // the CLI reports identically, so the row count is what
                     // tells them apart.
                     None => {
+                        set_busy(false, false);
                         this.toasts.add_toast(toast(&refused.unwrap_or_else(|| {
                             "That userscript was already installed; AdGuard updated it in place"
                                 .to_owned()
