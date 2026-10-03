@@ -355,6 +355,44 @@ fn installing_from_a_url_adds_the_pair_and_switches_it_on() {
     );
 }
 
+/// A filename with escapes in it keeps them in its id — and the id still works.
+///
+/// Greasy Fork serves every script under its title, percent-encoded:
+/// `…/scripts/1682/Google%20Hit%20Hider%20by%20Domain%20%28…%29.user.js`. The id
+/// AdGuard gives that is the stem **as it appears in the URL**, escapes and
+/// all — measured 3 October 2026 with a real install from Greasy Fork through
+/// an install link (#29), and pinned here. It looks odd on the row's id, but
+/// the row shows the `@name`, and what matters is that the id can be named:
+/// switched, and removed, like any other.
+#[test]
+#[ignore = "invokes the real adguard-cli"]
+fn an_escaped_filename_keeps_its_escapes_and_can_be_named() {
+    let Some(sandbox) = Sandbox::new("escaped") else {
+        return;
+    };
+    let server = Server::start();
+    let path = "/scripts/1/Sandbox%20Probe%20%28Escaped%29.user.js";
+    server.serve(path, script("Sandbox Probe (Escaped)", "1.0"));
+
+    sandbox
+        .cli
+        .userscripts_install(&server.url(path))
+        .expect("an escaped filename installs");
+
+    let id = "Sandbox%20Probe%20%28Escaped%29";
+    let installed = sandbox.find(id).expect("the id is the stem, still escaped");
+    assert_eq!(installed.name, "Sandbox Probe (Escaped)");
+    assert!(installed.enabled);
+    assert!(!installed.ambiguous);
+
+    sandbox.cli.userscripts_disable(id).expect("disable by the escaped id");
+    assert!(!sandbox.find(id).expect("still installed").enabled);
+    sandbox.cli.userscripts_enable(id).expect("enable by the escaped id");
+    assert!(sandbox.find(id).expect("still installed").enabled);
+    sandbox.cli.userscripts_remove(id).expect("remove by the escaped id");
+    assert_eq!(sandbox.pair_exists(id), (false, false));
+}
+
 /// The trap: an id contained in another script's id cannot be named at all,
 /// even when it is passed exactly.
 ///
@@ -450,6 +488,9 @@ fn a_missing_url_and_a_non_userscript_are_both_refused() {
     };
     let server = Server::start();
     server.serve("/plain.txt", "this is not a userscript\n".to_owned());
+    // Counted rather than assumed: the sandbox is seeded from this machine's
+    // install, which may hold more than the AdGuard Extra a stock one ships.
+    let before = sandbox.read().len();
 
     for url in [server.url("/nothing-here.user.js"), server.url("/plain.txt")] {
         match sandbox.cli.userscripts_install(&url) {
@@ -460,7 +501,7 @@ fn a_missing_url_and_a_non_userscript_are_both_refused() {
             other => panic!("{url} should have been refused, got {other:?}"),
         }
     }
-    assert_eq!(sandbox.read().len(), 1, "only AdGuard Extra is installed");
+    assert_eq!(sandbox.read().len(), before, "a refused install adds nothing");
 }
 
 /// The boundary that forces this suite to run a server: a local file is not an

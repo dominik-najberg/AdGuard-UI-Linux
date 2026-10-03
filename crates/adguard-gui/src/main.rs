@@ -18,6 +18,7 @@ mod extensions;
 mod filter_settings;
 mod filters;
 mod geometry;
+mod install_link;
 mod protection;
 mod requests;
 mod root_helper;
@@ -121,9 +122,30 @@ fn main() -> glib::ExitCode {
     });
 
     app.connect_command_line(move |app, cmdline| {
-        let background = cmdline.options_dict().contains(BACKGROUND);
+        // Install links from a browser (#29): `Exec=adguard-ui %u` in the
+        // `.desktop` file, so a click arrives here as an argument — in the
+        // running process, since this handler always runs in the primary one.
+        // Anything else positional is reported and ignored, as it always was.
+        let mut offers = Vec::new();
+        for arg in cmdline.arguments().iter().skip(1) {
+            let arg = arg.to_string_lossy();
+            match install_link::parse(&arg) {
+                Ok(url) => offers.push(url),
+                Err(why) => eprintln!("adguard-ui: ignoring {arg}: {why}"),
+            }
+        }
+
+        // A link needs the window to ask in, whatever else the launch said.
+        let background = cmdline.options_dict().contains(BACKGROUND) && offers.is_empty();
         match start(app, &ui, background) {
-            Ok(()) => glib::ExitCode::SUCCESS,
+            Ok(()) => {
+                if let Some(instance) = ui.borrow().as_ref() {
+                    for url in offers {
+                        instance.offer_install(url);
+                    }
+                }
+                glib::ExitCode::SUCCESS
+            }
             Err(reason) => {
                 // Our own stderr, not the caller's: this handler runs in the
                 // running process when there is one, but the only failure it
@@ -162,6 +184,9 @@ struct Instance {
     /// it settles, the application being told to quit, is reached from
     /// [`main`], which has no window in hand and finds it through here.
     geometry: Rc<geometry::Saver>,
+    /// Install links that arrived while the first-run assistant had the window,
+    /// held for the Extensions page that finishing it builds (#29).
+    pending: RefCell<Vec<String>>,
 }
 
 impl Instance {
@@ -171,6 +196,24 @@ impl Instance {
         self.window.present();
         if let Some(view) = &self.view {
             view.status.set_window_visible(true);
+        }
+    }
+
+    /// Hand an install link's URL to the Extensions page.
+    ///
+    /// While the first-run assistant owns the window there is no page yet, but
+    /// there will be one the moment it finishes, so the link waits for it —
+    /// someone who clicked *Install* before setting AdGuard up still meant it.
+    /// With the CLI missing there will never be a page, and the window already
+    /// says why; the link is dropped with a line on stderr.
+    fn offer_install(&self, url: String) {
+        self.present();
+        match (&self.view, &self.setup) {
+            (Some(view), _) => view.offer_install(url),
+            (None, Some(_)) => self.pending.borrow_mut().push(url),
+            (None, None) => {
+                eprintln!("adguard-ui: cannot install {url} without AdGuard CLI")
+            }
         }
     }
 }
@@ -271,6 +314,7 @@ fn start(
             view: None,
             setup: Some(assistant.clone()),
             geometry: saver,
+            pending: RefCell::new(Vec::new()),
         }));
 
         assistant.connect_finished({
@@ -344,6 +388,7 @@ fn start(
         view: view.ok(),
         setup: None,
         geometry: saver,
+        pending: RefCell::new(Vec::new()),
     }));
     Ok(())
 }
@@ -372,6 +417,9 @@ fn install_main_view(
     }
 
     if let Some(instance) = ui.borrow_mut().as_mut() {
+        for url in instance.pending.take() {
+            view.offer_install(url);
+        }
         instance.view = Some(view);
         // The assistant's last strong reference. Dropping it here rather than
         // leaving it parked is what keeps a finished wizard from holding its
@@ -635,6 +683,9 @@ pub enum Destination {
     /// The Activity page. Only the website check on Diagnostics leads here,
     /// and it asks the page to search for the site as well.
     Activity,
+    /// The Extensions page. Only an install link leads here (#29), so that the
+    /// confirmation it raises sits over the list the script will join.
+    Extensions,
 }
 
 impl Destination {
@@ -647,6 +698,7 @@ impl Destination {
             Self::DnsFilters | Self::DnsProxy => "dns",
             Self::Advanced(_) | Self::Autostart => "advanced",
             Self::Activity => "activity",
+            Self::Extensions => "extensions",
         }
     }
 
@@ -674,6 +726,11 @@ struct MainView {
     /// Held for the root-helper re-check, which needs the window and so cannot
     /// be wired up in `main_view` itself.
     advanced: Rc<advanced::AdvancedPage>,
+    /// Held for install links, which arrive on the command line (#29).
+    extensions: Rc<extensions::ExtensionsPage>,
+    /// The same resolver the pages' own links go through, for the one
+    /// destination that is reached from outside the window.
+    navigate: Rc<dyn Fn(Destination)>,
     /// The `proxy.yaml` subscription. Dropping it ends the subscription, so it
     /// lives exactly as long as the pages it reconciles — and it is what keeps
     /// the Advanced page reachable, since nothing else here holds one.
@@ -948,10 +1005,14 @@ fn main_view(cli: &Cli) -> MainView {
                         protection.reveal_certificate();
                     }
                 }
-                Destination::Protection | Destination::Status | Destination::Activity => {}
+                Destination::Protection
+                | Destination::Status
+                | Destination::Activity
+                | Destination::Extensions => {}
             }
         }
     });
+    let navigate_out: Rc<dyn Fn(Destination)> = navigate.clone();
     // Two pages link to the others: Status to the setting behind each reading,
     // and Diagnostics to the fix for each problem (#21). One resolver, so the
     // two cannot disagree about where a destination is.
@@ -1002,7 +1063,18 @@ fn main_view(cli: &Cli) -> MainView {
         status,
         protection,
         advanced,
+        extensions,
+        navigate: navigate_out,
         _watch: watch,
+    }
+}
+
+impl MainView {
+    /// A browser handed us a userscript to install: go to where it would be
+    /// listed, and ask.
+    fn offer_install(&self, url: String) {
+        (self.navigate)(Destination::Extensions);
+        self.extensions.offer_install(url);
     }
 }
 

@@ -33,3 +33,23 @@ where
         }
     });
 }
+
+/// [`run`], awaited: for a caller that must know the job is over before it
+/// does the next thing.
+///
+/// Install links queue up behind one another (#29), and each one ends in a
+/// `userscripts install` that writes `proxy.yaml` — so the second dialog waits
+/// for the first install to finish rather than racing it to the same file.
+///
+/// `None` only if the worker thread panicked, which drops the sender.
+pub async fn job<T, Job>(job: Job) -> Option<T>
+where
+    T: Send + 'static,
+    Job: FnOnce() -> T + Send + 'static,
+{
+    let (tx, rx) = async_channel::bounded(1);
+    std::thread::spawn(move || {
+        let _ = tx.send_blocking(job());
+    });
+    rx.recv().await.ok()
+}

@@ -19,6 +19,7 @@ pub mod model;
 pub mod nss;
 pub mod orphan;
 pub mod paths;
+pub mod preview;
 // Private: a `/proc` parse two modules here share, and nothing outside needs.
 mod proc;
 pub mod release;
@@ -47,5 +48,5 @@ pub use model::{
     ComponentUpdate, Consent, Filter, FilterAction, FilterCatalogue, FilterGroup, FilterSet,
     FilterState, Kind, License, ProxyStatus, Recommended, Setting, SettingGroup, Toggle,
     UpdatePart, UpdateReport, Userscript, Verdict, ADVANCED, ANNOYANCE_TERMS, FILTER_SETTINGS,
-    RECOMMENDED, SETUP, STEALTH,
+    INSTALL_LINKS, RECOMMENDED, SETUP, STEALTH,
 };

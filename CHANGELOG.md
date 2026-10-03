@@ -21,6 +21,14 @@ After a licence check that cannot reach AdGuard's servers, AdGuard CLI treats it
 
 When AdGuard CLI generates a new CA, every browser that trusted the old one fails every filtered HTTPS page — and still holds the old certificate under the same name. A browser store holding an earlier AdGuard CA is now updated by itself while protection runs: the old copies removed, the current CA added as AdGuard's installer adds it, and a notice naming the browsers to restart. A store that never held AdGuard's CA is still changed only by *Add to Browsers*, which now also replaces old copies rather than adding beside them.
 
+### Install userscripts from the browser
+
+The *Install* button on Greasy Fork, Sleazy Fork, OpenUserJS and GitHub can now bring a userscript to AdGuard UI instead of opening it as text, as AdGuard for Windows and Android do ([#29](https://github.com/dominik-najberg/AdGuard-UI-Linux/issues/29)). AdGuard CLI's proxy does not catch those clicks itself, so it takes a small userscript of this application's own, offered on the Extensions page under *From your browser*, right below the address field, and added with one press. Paste a script's address by hand and a banner points at the helper as well, once per run. With it in place, a click opens AdGuard UI at the Extensions page and asks *Add this userscript?*, showing what the script says about itself — its name, version, description and the sites it runs on — beside the host it comes from, rather than an address full of `%20`.
+
+Any web page can send such a link, so nothing is installed without a yes. Cancel is the default answer, and *Add* stays greyed out until the script has been read and for two seconds after the question appears, counting down, and again whenever the window loses focus, so a click aimed at the browser cannot land on it by accident. Several links in a row are asked about one at a time. The browser asks once whether to open AdGuard UI, and the script needs HTTPS filtering for the browser to be on.
+
+Removing a userscript asks more readably, too: the question names the script and the host it came from, with its address folded away, copyable and openable, instead of printed in full.
+
 ---
 
 ## 1.8.1 — 3 October 2026
