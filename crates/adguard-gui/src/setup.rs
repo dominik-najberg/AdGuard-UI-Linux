@@ -212,7 +212,7 @@ impl SetupAssistant {
         let cli = self.cli.clone();
         worker::run(
             move || cli.license().map(|_| ()).map_err(|err| match err {
-                cli::Error::Unlicensed { message } => Some(message),
+                cli::Error::Unlicensed { message, .. } => Some(message),
                 // Anything else — the initialisation race, a missing binary —
                 // is not a licence answer, and pretending it is would send the
                 // user off to activate something that is already active.

@@ -465,7 +465,7 @@ fn window(path: &Path) -> String {
 /// The first line is dropped whenever the read began part-way in, because a line
 /// cut through the middle can parse into anything — and the one thing this
 /// module may not do is read a fragment as a failure.
-fn tail(path: &Path, want: u64) -> String {
+pub(crate) fn tail(path: &Path, want: u64) -> String {
     let Ok(mut file) = File::open(path) else {
         return String::new();
     };

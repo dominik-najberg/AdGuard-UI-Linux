@@ -15,6 +15,7 @@ const CONFIG_FILE: &str = "proxy.yaml";
 const USERSCRIPTS_SUBDIR: &str = "userscripts";
 const LOGS_SUBDIR: &str = "logs";
 const ACCESS_LOG: &str = "access.log";
+const APP_LOG: &str = "app.log";
 
 fn home() -> Option<PathBuf> {
     env::var_os("HOME").map(PathBuf::from)
@@ -226,6 +227,15 @@ pub fn userscripts_dir_under(xdg_data_home: &Path) -> PathBuf {
 /// nothing here may hold an fd across reads.
 pub fn access_log() -> Option<PathBuf> {
     Some(data_dir()?.join(LOGS_SUBDIR).join(ACCESS_LOG))
+}
+
+/// AdGuard CLI's own diagnostic log, under a data directory.
+///
+/// Read-only, and only its tail — see [`crate::cli::last_failed_licence_check`],
+/// the one reader. Rotated by AdGuard at ~10 MiB like [`access_log`], so the
+/// same rule holds: open it per read, hold nothing across reads.
+pub fn app_log_in(data_dir: &Path) -> PathBuf {
+    data_dir.join(LOGS_SUBDIR).join(APP_LOG)
 }
 
 /// SQLite catalogue of HTTP/HTTPS filters. Open read-only.

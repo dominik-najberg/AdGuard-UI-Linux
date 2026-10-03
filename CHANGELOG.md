@@ -11,6 +11,18 @@ This file is the one changelog.
 
 ---
 
+## Unreleased
+
+### A licence lost to the network says so before it is activated again
+
+After a licence check that cannot reach AdGuard's servers, AdGuard CLI treats itself as not activated and refuses every command — for over two hours on one occasion — until `activate` is run, with nothing in its refusal saying the network was the cause. The application now reads the reason from AdGuard's own `app.log`: the licence row and the Status panel say AdGuard CLI could not reach its servers, and *Activate…* asks first, saying that activating needs a working connection and has, every time so far, made AdGuard CLI generate a new HTTPS certificate.
+
+### Browsers that trusted AdGuard's old certificate get the new one
+
+When AdGuard CLI generates a new CA, every browser that trusted the old one fails every filtered HTTPS page — and still holds the old certificate under the same name. A browser store holding an earlier AdGuard CA is now updated by itself while protection runs: the old copies removed, the current CA added as AdGuard's installer adds it, and a notice naming the browsers to restart. A store that never held AdGuard's CA is still changed only by *Add to Browsers*, which now also replaces old copies rather than adding beside them.
+
+---
+
 ## 1.8.1 — 3 October 2026
 
 ### A network that is down no longer reads as a bug in the application

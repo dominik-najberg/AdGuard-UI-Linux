@@ -213,7 +213,16 @@ impl CertificateView {
             move || {
                 stores
                     .iter()
-                    .map(|store| (store.name(), nss::add(store, &certutil, &certificate)))
+                    // A store still holding an earlier AdGuard CA has it
+                    // replaced rather than kept beside the new one.
+                    .map(|store| {
+                        let result = if store.stale > 0 {
+                            nss::renew(store, &certutil, &certificate).map(drop)
+                        } else {
+                            nss::add(store, &certutil, &certificate)
+                        };
+                        (store.name(), result)
+                    })
                     .collect::<Vec<_>>()
             },
             move |results: Vec<(String, Result<(), String>)>| {
@@ -792,6 +801,7 @@ mod tests {
             profile: None,
             database: PathBuf::from("/h/.pki/nssdb/cert9.db"),
             state,
+            stale: 0,
         }
     }
 
@@ -807,6 +817,7 @@ mod tests {
             }),
             database: PathBuf::from(format!("/h/.mozilla/firefox/abcd.{name}/cert9.db")),
             state,
+            stale: 0,
         }
     }
 
