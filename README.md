@@ -27,13 +27,13 @@ Every release carries a `.deb`, an `.rpm` and a tarball for `~/.local`, each bui
 On Ubuntu and Debian:
 
 ```bash
-sudo apt-get install ./adguard-ui_1.7.1_amd64.deb
+sudo apt-get install ./adguard-ui_1.8.0_amd64.deb
 ```
 
 On Fedora:
 
 ```bash
-sudo dnf install ./adguard-ui-1.7.1-1.x86_64.rpm
+sudo dnf install ./adguard-ui-1.8.0-1.x86_64.rpm
 ```
 
 [**Releases**](https://github.com/dominik-najberg/AdGuard-UI-Linux/releases) · [`CHANGELOG.md`](CHANGELOG.md). `apt-get install` and `dnf install` rather than `dpkg -i` or `rpm -i`, because they resolve the dependencies the package declares; the path has to start with `./` or they look the name up in the distribution's repositories instead. The tarball is the unprivileged route: extract it and run its `install.sh`, which writes under `~/.local` and never asks for a password.

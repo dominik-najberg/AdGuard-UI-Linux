@@ -53,6 +53,16 @@
     application is its first release.
   -->
   <releases>
+    <release version="1.8.0" type="stable" date="2026-10-03">
+      <url type="details">https://github.com/dominik-najberg/AdGuard-UI-Linux/releases/tag/v1.8.0</url>
+      <description>
+        <p>Fedora gets a package of its own:</p>
+        <ul>
+          <li>Every release now includes an .rpm for Fedora 43 and later, beside the .deb and the tarball.</li>
+          <li>Fix certificate now finds Ptyxis, the terminal Fedora Workstation ships by default.</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.7.1" type="stable" date="2026-10-03">
       <url type="details">https://github.com/dominik-najberg/AdGuard-UI-Linux/releases/tag/v1.7.1</url>
       <description>

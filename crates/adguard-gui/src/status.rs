@@ -1998,6 +1998,10 @@ fn open_in_terminal(command: &str) -> bool {
     let script = format!("{command}; printf '\\nPress Enter to close. '; read _");
     const TERMINALS: &[(&str, &[&str])] = &[
         ("gnome-terminal", &["--", "sh", "-c"]),
+        // Fedora Workstation's terminal since 41, where gnome-terminal is no
+        // longer installed. `--` and an argv is the form its own --help gives;
+        // `-x` would want the whole command as one string to re-parse.
+        ("ptyxis", &["--", "sh", "-c"]),
         ("kgx", &["-e", "sh", "-c"]),
         ("konsole", &["-e", "sh", "-c"]),
         ("xfce4-terminal", &["-x", "sh", "-c"]),
