@@ -11,6 +11,18 @@ This file is the one changelog.
 
 ---
 
+## Unreleased
+
+### An .rpm for Fedora
+
+Every release now carries `adguard-ui-<version>-1.x86_64.rpm` beside the `.deb` and the tarball, built in a clean Fedora 43 container and listed in `SHA256SUMS` with the others. Install it with `sudo dnf install ./adguard-ui-<version>-1.x86_64.rpm`; it installs on Fedora 43 and later. ([#20](https://github.com/dominik-najberg/AdGuard-UI-Linux/issues/20))
+
+It holds the same files as the `.deb`, in the same places, plus the licence under `/usr/share/licenses/adguard-ui/`. Its library requirements are worked out from the binary when it is built, not written down by hand. As with the `.deb`, it does not require AdGuard CLI, because no Fedora package provides it: install that from AdGuard first.
+
+`make install` now builds and installs the `.rpm` with `dnf` on a machine that has dnf and no apt, and `make rpm` builds it without installing it.
+
+---
+
 ## 1.7.1 — 3 October 2026
 
 ### A failed start stays on screen, and says what to do

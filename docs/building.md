@@ -36,6 +36,14 @@ sudo apt install build-essential pkg-config libgtk-4-dev libadwaita-1-dev
 
 Rust via [rustup](https://rustup.rs) — the distro `cargo` lags behind what the `gtk4` crates expect.
 
+### On Fedora 43 and later
+
+```bash
+sudo dnf install --setopt=install_weak_deps=False gcc pkgconf-pkg-config gtk4-devel libadwaita-devel
+```
+
+Add `rpm-build` to build the `.rpm` (§5). `--setopt=install_weak_deps=False` is not tidiness: without it `libadwaita-devel` drags in its demo, its documentation and a Mesa Vulkan stack — 514 packages in a bare `fedora:43` container, against a build that needs none of them. Fedora 43 ships GTK 4.20 and libadwaita 1.8, comfortably above the `v4_10` and `v1_7` floors in `Cargo.toml`. Rust via rustup here too.
+
 ### Optional developer tools (not installed here)
 
 ```bash
@@ -217,6 +225,8 @@ The `*_live` suites are safe and run by default, and **skip** rather than fail w
 **It runs in an `ubuntu:26.04` container rather than on the runner image.** `ubuntu-latest` was Ubuntu 24.04 when this was written, which ships **libadwaita 1.5** against a workspace that takes the crate's `v1_7` feature: a native job does not fail a test, it fails to build at all. The container also pins the distribution §1 describes, so a green run means what this document says it means.
 
 **Two tests had to change to survive it, and the reason is worth keeping.** A container runs as **root** by default, so a file a test writes into `/tmp` is *root-owned* — which is the one thing `helper.rs`'s two user-owned cases exist to assert the absence of. They failed on the first clean run and nothing local could have predicted it: on a developer's machine the premise is true by construction. Both now skip when `geteuid() == 0`, printing why, which is the same answer their neighbours already give when `/bin/ls` or `/etc/hostname` is missing. The met case is unaffected — it reads `/usr/bin/passwd`, which no test process owns.
+
+**A second job runs the same build and suite in `fedora:43`**, added with the `.rpm` for [#20](https://github.com/dominik-najberg/AdGuard-UI-Linux/issues/20). It is not a repeat of the first: Fedora keeps the trust store, the CA bundle and the toolkit in other places, and a test that quietly leans on an Ubuntu path would pass the first job and fail only this one. None did — rehearsed in a container on 3 October 2026, the totals were the same 552 passed and 68 ignored as on this machine, against GTK 4.20 and libadwaita 1.8.
 
 That is the whole argument for having CI on a project with one maintainer: not that the suite might break, but that a suite passing on the machine it was written on says nothing about a machine it was not.
 
@@ -516,7 +526,7 @@ sudo rm -f /usr/share/polkit-1/actions/io.github.dominik-najberg.AdGuardUI.polic
 
 ## 5. Packaging
 
-Both recommended routes are built. Neither script needs root, and neither installs anything — building a package and installing one are separate steps here, and only the second of them is privileged:
+All three recommended routes are built. No script needs root, and none installs anything — building a package and installing one are separate steps here, and only the second of them is privileged:
 
 ```bash
 make package
@@ -524,13 +534,23 @@ make package
 
 That leaves `target/package/adguard-ui_1.0.0_amd64.deb` (2.4 MB) and `adguard-ui-1.0.0-x86_64.tar.gz` (3.0 MB — gzip against the `.deb`'s zstd, and it carries the whole `data/` tree). `make deb` and `make tarball` build one each; the work is in `packaging/deb.sh` and `packaging/tarball.sh`, which carry the reasoning per step.
 
+The `.rpm` is built on Fedora, not here:
+
+```bash
+make rpm
+```
+
+That is `packaging/rpm.sh`, and it leaves `target/package/adguard-ui-<version>-1.x86_64.rpm` (3.7 MB at 1.7.1). It is not part of `make package`, because no one machine has `dpkg-deb` and `rpmbuild` both as a matter of course; the release workflow builds it in a Fedora container of its own. To build it from this machine, do the same — a `fedora:43` container with the packages from §1, and the caution about root-owned `target/` from §3 applies.
+
 To put the `.deb` on this machine rather than just build it:
 
 ```bash
 make install
 ```
 
-That is `make deb`, one `sudo apt-get install` of the file it wrote, and the cleanup described below it; it is the only target in the Makefile that asks for a password — the *build* stays unprivileged, exactly as above, and only the install step is handed to `sudo`. It is `apt-get install ./file.deb` and not `dpkg -i` because apt resolves the `Depends:` line `deb.sh` derived; `dpkg` would leave the package unpacked-but-unconfigured with a "dependency problems" error and expect you to run `apt-get -f install` yourself. Uninstall is `sudo apt-get remove adguard-ui`, which has no `make` target because it needs nothing built and nothing worked out.
+That is `make deb`, one `sudo apt-get install` of the file it wrote, and the cleanup described below it — or, on a machine with `dnf` and no `apt-get`, `make rpm` and one `sudo dnf install`; it is the only target in the Makefile that asks for a password — the *build* stays unprivileged, exactly as above, and only the install step is handed to `sudo`. It is `apt-get install ./file.deb` and not `dpkg -i` because apt resolves the `Depends:` line `deb.sh` derived; `dpkg` would leave the package unpacked-but-unconfigured with a "dependency problems" error and expect you to run `apt-get -f install` yourself. Uninstall is `sudo apt-get remove adguard-ui`, or `sudo dnf remove adguard-ui`, which has no `make` target because it needs nothing built and nothing worked out.
+
+**On Fedora a rebuild of the same version is a `dnf reinstall`, and `make install` picks that by itself.** `dnf install` of a file whose name, version and release are already installed prints "Nothing to do" and exits 0 — measured in a `fedora:43` container — which leaves the previous build in `/usr/bin` under a success message, and the `$PATH` check below cannot see it: the path is right and the file behind it is old.
 
 **The two routes shadow each other, and `make install` now resolves that rather than leaving it to be discovered.** A per-user install from the tarball puts `adguard-ui` in `~/.local/bin`, which is ahead of `/usr/bin` on a stock Ubuntu `$PATH`; both `.desktop` files run a bare `Exec=adguard-ui`; so with both installed, the package is on disk and the older per-user binary is what opens — from the terminal and from the app grid alike. Nothing about it reads as a failure. `apt` reports the package unpacked, `/usr/bin/adguard-ui` really is the new build, and the window that appears is weeks old. Version numbers cannot help here: these are not two versions of a package, they are two files with the same name, and only one of them is a package at all.
 
@@ -544,6 +564,7 @@ The routes were assessed for this machine before either was written:
 | --- | --- | --- |
 | **Tarball + `.desktop`** | **Built** — `packaging/tarball.sh` | Payload plus an `install.sh` that puts it under `~/.local`, which is §4 as a script. `PREFIX=` moves it, `--autostart` adds the login entry, `--list` names the files it would write without writing any. |
 | **`.deb`** | **Built** — `packaging/deb.sh` | `dpkg-deb -b` on a hand-assembled tree; `dpkg-dev` 1.23.7 supplies `dpkg-shlibdeps`, and `debhelper` is still not installed and still not needed. |
+| **`.rpm`** | **Built** — `packaging/rpm.sh`, on Fedora | `rpmbuild -bb` on a spec the script writes, copying the same hand-assembled tree. Added for [#20](https://github.com/dominik-najberg/AdGuard-UI-Linux/issues/20); a user had been running the tarball on Fedora KDE without trouble, so this is convenience, not a fix. No COPR repository: a file on the release page is the whole of it. |
 | **Flatpak** | Not installed at all | Needs `flatpak` + `flatpak-builder` + the `org.gnome.Platform//50` runtime/SDK (~1–2 GB download). The most "correct" GNOME distribution route, but greenfield here — and see the confinement note below. |
 | **Snap** | `snapd` 2.76.1 running; `snapcraft` **not** installed | Strict confinement would fight reaching `~/.local/bin/adguard-cli` and its data directory — which is the whole application. Not recommended. |
 | **AppImage** | No tooling | Possible; nothing in the app resists it. |
@@ -565,24 +586,33 @@ Six things the two scripts do that are worth knowing before changing them:
 
 **The two packages carry the licence differently, and that is deliberate.** The repository has held `LICENSE` — the verbatim GPLv3, byte-identical to `/usr/share/common-licenses/GPL-3` — since 1 August 2026. The `.deb` still ships no copy of it: its `copyright` file points at that system path, which is what Debian policy asks for and what every package on the machine already does. The tarball ships the file itself, because it is the one route by which this build reaches a machine whose `/usr/share/common-licenses` may not exist, and GPL-3.0-or-later §4 wants a copy conveyed with the program rather than a reference to one.
 
+**The `.rpm` is the `.deb`'s payload with four differences, and each is deliberate:**
+
+- **`Requires:` is generated, and there is no fallback to write down.** rpmbuild's ELF dependency generator reads the binary's `DT_NEEDED` set and the symbol versions it binds, and emits `libgtk-4.so.1()(64bit)`, `libadwaita-1.so.0(LIBADWAITA_1_0)(64bit)`, `libc.so.6(GLIBC_2.39)(64bit)` and the rest — the symbol-level floor `dpkg-shlibdeps` needs a stub `debian/` directory to reach. It runs on every build and has no failure mode that falls back to a list, so `rpm.sh` carries none. Measured at 1.7.1: the highest glibc symbol version is **2.39**, the same floor the `.deb` derives, so the package installs on Fedora 40 and later as far as glibc goes — 43 is what is claimed because it is the oldest release still supported.
+- **No `%{?dist}` in the release.** One package is built for every supported Fedora, against the oldest, and the generated glibc requirement says exactly where it installs; an `.fc43` in the filename would tell a Fedora 44 user it was not for them.
+- **No debuginfo package.** The binary arrives built and stripped; rpmbuild's `find-debuginfo` would find nothing and then fail on an empty source list, so the spec turns it off.
+- **The licence travels in the package**, under `/usr/share/licenses/adguard-ui/`, because Fedora has no `/usr/share/common-licenses` to point at. The spec owns that directory with a `%dir` line as well as the file with `%license`: an absolute path under `%license` owns nothing around it, and without the line `dnf remove` left the empty directory behind — measured, and fixed before the first release that carried an `.rpm`.
+
+No scriptlets, for the `.deb`'s reason: Fedora's file triggers refresh the icon cache and the desktop database. No `Requires: adguard-cli`, for the `.deb`'s reason. The release workflow installs the package in the container that built it, runs `rpm -V` over it and checks `ldd` for an unresolved library, so a generated requirement no Fedora package provides fails the release by name rather than on a user's download.
+
 One thing the packaging still does **not** do, on purpose: it writes no `changelog.Debian.gz`. Debian policy wants one for an archive upload, and this package is not built for an archive. `CHANGELOG.md` in the repository root is the one changelog, and the release workflow below reads the notes for a release out of it.
 
 ### Cutting a release
 
-A release is a tag. Everything else — building both packages in a clean container, checksumming them, writing the release page and attaching them to it — is [`.github/workflows/release.yml`](../.github/workflows/release.yml), which runs on any tag matching `v*`.
+A release is a tag. Everything else — building the three packages in clean containers, checksumming them, writing the release page and attaching them to it — is [`.github/workflows/release.yml`](../.github/workflows/release.yml), which runs on any tag matching `v*`.
 
 Four things happen before the tag, and all four are on the machine, not on the runner:
 
 ```bash
 cargo test --workspace --locked                 # 552 pass, 68 ignored
-make package                                    # both packages build here first
+make package                                    # the .deb and tarball build here first
 git status --porcelain                          # must be empty
 git log --oneline -1
 ```
 
 1. **Bump the version in `Cargo.toml`** — `workspace.package.version`, which every crate inherits and both packaging scripts read, so it is the only place the number is written. `cargo update --workspace` then moves it into `Cargo.lock`, which is committed; a build with `--locked` fails against a stale one, and every step of the workflow uses `--locked`.
 2. **Write the `CHANGELOG.md` section**, headed `## <version> — <date>`. The workflow extracts that section verbatim as the release notes, matching on `## <version> ` with the trailing space, so the heading's shape is load-bearing. A version with no section is not an error — the workflow says so in its log and falls back to GitHub's generated commit list.
-3. **Add the release to `data/…metainfo.xml`**, which is what GNOME Software renders, and **bump the `.deb` filename in `README.md`'s install example**. Those are the two other files carrying a version number — this step used to say metainfo was the only one, which was wrong from the day the README was written and stayed wrong through 1.0.0. The metainfo entry carries a description as well; the README's is a filename a reader will copy, so a stale one sends them to `apt` with a package that is not in the release.
+3. **Add the release to `data/…metainfo.xml`**, which is what GNOME Software renders, and **bump the `.deb` and `.rpm` filenames in `README.md`'s install examples**. Those are the two other files carrying a version number — this step used to say metainfo was the only one, which was wrong from the day the README was written and stayed wrong through 1.0.0. The metainfo entry carries a description as well; the README's is a filename a reader will copy, so a stale one sends them to `apt` with a package that is not in the release.
 
    **Screenshots are part of this step when the pages moved.** `docs/screenshots/` is fourteen frames and `README.md` embeds all fourteen; a release that adds settings to a page ships a README picturing the page without them. The recipe is §3 above, and the frames to re-take are the pages that changed — the Status and Stealth frames carry placeholders over this machine's own licence and IP, so re-taking one that did not need it is how a real address reaches a public repository.
 
@@ -602,7 +632,7 @@ The workflow re-derives the version from `Cargo.toml` and **fails if the tag doe
 
 `workflow_dispatch` runs the same build and stops before publishing, leaving the packages as a run artifact. That is how this file gets exercised without tagging anything — a tag-triggered workflow is otherwise only testable by pushing a tag you then have to explain.
 
-**What a release contains**, and each name comes from the scripts above: `adguard-ui_<version>_<arch>.deb`, `adguard-ui-<version>-<arch>.tar.gz`, and `SHA256SUMS` over both. The `.deb`'s `Depends:` is derived inside the container by `dpkg-shlibdeps` against that container's libraries, which is why `dpkg-dev` is in the workflow's package list and why the derived floor is Ubuntu 24.04's glibc rather than the build machine's.
+**What a release contains**, and each name comes from the scripts above: `adguard-ui_<version>_<arch>.deb`, `adguard-ui-<version>-1.<arch>.rpm`, `adguard-ui-<version>-<arch>.tar.gz`, and `SHA256SUMS` over all three. The `.rpm` comes from a `fedora:43` job of its own, and `publish` waits for both builds; a release cannot go out with one of its packages missing. The `.deb`'s `Depends:` is derived inside the container by `dpkg-shlibdeps` against that container's libraries, which is why `dpkg-dev` is in the workflow's package list and why the derived floor is Ubuntu 24.04's glibc rather than the build machine's.
 
 **The maintainer field comes from git**, and on a runner there is no `user.name` to read — so `deb.sh` falls back to the last commit's author rather than writing `unknown <unknown@invalid>` into the control and copyright files of the package everybody downloads.
 
