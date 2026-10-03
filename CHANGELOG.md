@@ -11,15 +11,31 @@ This file is the one changelog.
 
 ---
 
-## Unreleased
+## 1.8.0 — 3 October 2026
 
 ### An .rpm for Fedora
 
-Every release now carries `adguard-ui-<version>-1.x86_64.rpm` beside the `.deb` and the tarball, built in a clean Fedora 43 container and listed in `SHA256SUMS` with the others. Install it with `sudo dnf install ./adguard-ui-<version>-1.x86_64.rpm`; it installs on Fedora 43 and later. ([#20](https://github.com/dominik-najberg/AdGuard-UI-Linux/issues/20))
+Every release now carries `adguard-ui-<version>-1.x86_64.rpm` beside the `.deb` and the tarball, built in a clean Fedora 43 container and listed in `SHA256SUMS` with the others. It installs on Fedora 43 and later ([#20](https://github.com/dominik-najberg/AdGuard-UI-Linux/issues/20)):
 
-It holds the same files as the `.deb`, in the same places, plus the licence under `/usr/share/licenses/adguard-ui/`. Its library requirements are worked out from the binary when it is built, not written down by hand. As with the `.deb`, it does not require AdGuard CLI, because no Fedora package provides it: install that from AdGuard first.
+```bash
+sudo dnf install ./adguard-ui-1.8.0-1.x86_64.rpm
+```
 
-`make install` now builds and installs the `.rpm` with `dnf` on a machine that has dnf and no apt, and `make rpm` builds it without installing it.
+It holds the same files as the `.deb`, in the same places, plus the licence under `/usr/share/licenses/adguard-ui/`. Its library requirements are worked out from the binary when it is built, not written down by hand, and the release is not published until the package has been installed and verified in the container that built it. As with the `.deb`, it does not require AdGuard CLI, because no Fedora package provides it: install that from AdGuard first. `sudo dnf remove adguard-ui` takes it out again and leaves nothing behind.
+
+`make install` now builds and installs the `.rpm` with `dnf` on a machine that has dnf and no apt, and `make rpm` builds it without installing it. Rebuilding the same version and running `make install` again reinstalls it, rather than dnf reporting "Nothing to do" and keeping the old build.
+
+### Fix certificate finds Fedora's terminal
+
+**Fix certificate** opens a terminal running AdGuard's `cert` command, and it tried a list of terminals that did not include Ptyxis — the default on Fedora Workstation since Fedora 41, where GNOME Terminal is no longer installed. It is now tried right after GNOME Terminal. On KDE Plasma, Konsole was already on the list.
+
+### Built and tested on Fedora too
+
+Every pull request is now built and tested on Fedora 43 as well as on Ubuntu 26.04. The whole suite passes on both, with the same counts.
+
+### What this release does not do
+
+KDE Plasma is not yet verified beyond a smoke test: the `.rpm` installs and the application starts on Fedora 44 KDE Plasma. Plasma has a tray of its own, so the tray icon should appear there without the extension GNOME needs — but the icon's look, clicking it, raising the window from it and starting at login have not been checked on Plasma. If something looks wrong there, say so in [#20](https://github.com/dominik-najberg/AdGuard-UI-Linux/issues/20).
 
 ---
 
