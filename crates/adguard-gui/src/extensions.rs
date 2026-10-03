@@ -1385,10 +1385,13 @@ fn removal_details(name: &str, source: Option<&str>) -> gtk::ListBox {
     list.append(&origin);
 
     match source {
+        // Just the host, whole. The body already says it is gone for good,
+        // and a host is short enough to need no cutting with nothing beside
+        // it under the title.
         Some(url) => {
             value.set_label(&install_link::summary(url, &Details::Reading).source);
+            value.set_ellipsize(gtk::pango::EllipsizeMode::None);
             origin.add_suffix(&value);
-            origin.set_subtitle("There is no undo: to get it back, add its address again");
             list.append(&address_row(url));
         }
         // Worth saying plainly rather than softening. A script with no
@@ -1448,7 +1451,9 @@ fn value_label() -> gtk::Label {
 
 /// The URL in full, folded away: the name and source are what a person
 /// decides on, and the escaped URL is mostly noise — but it is there,
-/// selectable and copyable, for anyone checking exactly what AdGuard fetches.
+/// selectable, copyable and openable, for anyone checking exactly what AdGuard
+/// fetches. Opened, it is the script's source in the browser, which is the
+/// way to read it before saying yes.
 fn address_row(url: &str) -> adw::ExpanderRow {
     let row = adw::ExpanderRow::builder().title("Full address").build();
     row.set_use_markup(false);
@@ -1457,8 +1462,20 @@ fn address_row(url: &str) -> adw::ExpanderRow {
     address.set_use_markup(false);
     address.set_title_lines(0);
     address.set_title_selectable(true);
-    address.set_activatable(false);
     address.add_css_class("caption");
+    // The way the About page's links open, with the same icon.
+    address.set_activatable(true);
+    address.set_tooltip_text(Some("Open in the browser"));
+    let uri = url.to_owned();
+    address.connect_activated(move |row| {
+        let launcher = gtk::UriLauncher::new(&uri);
+        let window = row.root().and_downcast::<gtk::Window>();
+        glib::spawn_future_local(async move {
+            // Nothing to report on failure: the address is on screen, in
+            // full, with a copy button beside it.
+            let _ = launcher.launch_future(window.as_ref()).await;
+        });
+    });
 
     let copy = gtk::Button::from_icon_name("edit-copy-symbolic");
     copy.add_css_class("flat");
@@ -1470,6 +1487,7 @@ fn address_row(url: &str) -> adw::ExpanderRow {
         button.set_tooltip_text(Some("Copied"));
     });
     address.add_suffix(&copy);
+    address.add_suffix(&gtk::Image::from_icon_name("adw-external-link-symbolic"));
 
     row.add_row(&address);
     row

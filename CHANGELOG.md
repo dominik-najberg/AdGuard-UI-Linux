@@ -19,7 +19,7 @@ The *Install* button on Greasy Fork, Sleazy Fork, OpenUserJS and GitHub can now 
 
 Any web page can send such a link, so nothing is installed without a yes. Cancel is the default answer, and *Add* stays greyed out until the script has been read and for two seconds after the question appears, counting down, and again whenever the window loses focus, so a click aimed at the browser cannot land on it by accident. Several links in a row are asked about one at a time. The browser asks once whether to open AdGuard UI, and the script needs HTTPS filtering for the browser to be on.
 
-Removing a userscript asks more readably, too: the question names the script and its source in rows, with its address folded away and copyable instead of printed in full.
+Removing a userscript asks more readably, too: the question names the script and the host it came from, with its address folded away, copyable and openable, instead of printed in full.
 
 ---
 
