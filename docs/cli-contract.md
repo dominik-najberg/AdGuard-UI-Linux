@@ -1276,7 +1276,7 @@ Measured 30 September 2026 against `adguard-cli` 1.4.13 at `log_level: 'info'`, 
 | 6, 7 | Host and path | `-` where the protocol has none; **the browsing record itself** |
 | 9 | Request type | `xhr`, `img`, `script`, `any`, `other\|xhr`, … — `\|`-joined |
 | 10 | **Action** | `NONE`, `MODIFIED_META`, `BLOCKED`, `MODIFIED_CONTENT`, `WHITELISTED`, `-` |
-| 11 | A small count (0–3 observed) | Not yet identified. Rule matches is a guess, and not a measurement |
+| 11 | A small count (0–3 observed) | **Rules that touched the request**, by the evidence below; still not proven. Does not decide the action, and is not the rule shown in field 17 |
 | 12 | `ID=<n>` when a rule decided the line, otherwise `-` | `ID=2` is AdGuard Base's id in `agflm_standard.db` |
 | 17 | **The rule's text**, after the `--` marker, present exactly when field 12 is `ID=` | e.g. an `@@…` exception or a blocking rule |
 
@@ -1288,7 +1288,26 @@ Measured 30 September 2026 against `adguard-cli` 1.4.13 at `log_level: 'info'`, 
 
 **Two privacy facts the milestone inherits.** The rule text in field 17 routinely contains the domain it matched, so a "top rules" view is a browsing record too, not only the host column. And field 3 names every program on the machine that used the network.
 
-**Still open, and each one is the owner's to authorise:** what `log_level` `debug` or `trace` adds or removes; whether 1.4.13's shape survives a CLI upgrade; and what field 11 counts.
+**Field 11, narrowed on 3 October 2026 — by reading, nothing written.** Cross-tabulated over 247,650 lines (the live file and its nine predecessors, 16- and 17-field alike) against the other columns:
+
+| Action | Field 11 = 0 | = 1 | = 2 | = 3 |
+| --- | --- | --- | --- | --- |
+| `NONE` | 147,005 | 2,388 | 27 | — |
+| `-` | 2,348 | — | — | — |
+| `BLOCKED` | 187 | 45,854 | — | — |
+| `MODIFIED_META` | — | 3,453 | 44,235 | 46 |
+| `MODIFIED_CONTENT` | 158 | 615 | 987 | 23 |
+| `WHITELISTED` | — | 245 | 78 | 1 |
+
+- **It is zero on every line that nothing touched** (`-`, and almost all of `NONE`) and at least one on every line a rule did something to. That is the shape of "how many rules applied", and it is as far as the lines go.
+- **It is not the rule in field 17.** The text after the marker is one rule, and field 11 reaches 2 and 3 where one rule is shown. `WHITELISTED` lines carrying the same `ID=2` hold 1 on 127 of them and 2 on 62, so the count does not follow the filter list either.
+- **It is not the action.** `MODIFIED_META` is 2 on 44,235 lines and 1 on 3,453; `NONE` is non-zero on 2,415 lines.
+- **Most of the weight is one client.** All 44,235 `MODIFIED_META` lines at 2 are `"chrome"`, over `HTTP2`, request type `xhr|subdocument`. Every line at 3 is `"chrome"` too, 70 in all. No line over `TLS`, `IQUIC`, `TCP`, `UDP` or `STUN_TURN` is above 0 apart from four `TLS` lines at 1.
+- **Cannot be split from the lines alone:** "rules that matched" against "modifications applied". Telling them apart needs the rule lists of a known request, which is a test for a proxy, not a read of its log.
+
+So field 11 is not a number to put on a page as "rule matches". `activity.rs` does not read it, and nothing here changes that.
+
+**Still open, and each is the owner's to authorise:** what `log_level` `debug` or `trace` adds or removes; and whether 1.4.13's shape survives a CLI upgrade.
 
 ### What the Activity page takes from a line
 
