@@ -1307,7 +1307,15 @@ Measured 30 September 2026 against `adguard-cli` 1.4.13 at `log_level: 'info'`, 
 
 So field 11 is not a number to put on a page as "rule matches". `activity.rs` does not read it, and nothing here changes that.
 
-**Still open, and each is the owner's to authorise:** what `log_level` `debug` or `trace` adds or removes; and whether 1.4.13's shape survives a CLI upgrade.
+**`log_level: debug` — a preliminary result, about a minute long.** Measured 3 October 2026 against 1.4.13 on the reference machine, with the owner's go-ahead: `config set log_level debug` applied to the running proxy without a restart (`Settings applied successfully`), and the 205 `access.log` lines written in the next minute were compared with the `info` shapes above.
+
+- **No change in shape.** 203 lines of sixteen fields and 2 of seventeen, the same six actions, the same protocols. Nothing new appeared in any column that `activity.rs` reads.
+- **A minute is not a sample.** It is the 205 lines of one stretch of ordinary browsing, with no `IQUIC` or `WHITELISTED` rule text worth the name. It says the shape did not change at once, and not that `debug` never changes it.
+- **The cost is the finding.** `proxy.log` grew from 2.6 MB to 7.8 MB in under a minute, about 110 KB/s, against a roll every ~10 MiB with ten generations kept. At that rate a generation rolls every ~90 seconds, so **a few minutes at `debug` overwrites the whole history of `proxy.log`**, which `info` keeps for days. The value was set back to `info` after about a minute, before any roll, and `proxy.log.1` to `.9` were intact afterwards.
+
+**`log_level: trace` was not measured.** The run that was to generate traffic through the proxy was refused by the session's permission classifier, and the value was restored rather than left at `debug` while that was settled. A longer `debug` run and `trace` want a scratch `XDG_DATA_HOME`, as the HAR measurement used, so the real install's logs are not the cost.
+
+**Still open:** what `trace` adds or removes, `debug` over a longer and more varied window, and whether 1.4.13's shape survives a CLI upgrade. Each is the owner's to authorise.
 
 ### What the Activity page takes from a line
 

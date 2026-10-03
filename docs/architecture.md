@@ -757,7 +757,7 @@ Three decisions in it are this section's rather than the module's.
 - **HTTP/3** gets one machine-wide line in Diagnostics, the share of the log that went over QUIC and how much of it was logged with no action. What that `-` action means is still not measured (contract §9), so the line states counts and draws no conclusion from them.
 - **The report can be saved to a file** as well as copied, with the same text.
 
-What is still open from the issue is the other half of the stats spike (contract §9): what `log_level` changes and whether a second CLI version keeps the log's shape. Each needs the owner's permission, because each changes a running install. Field 11 was narrowed by reading the existing log (contract §9) and needed none.
+What is still open from the issue is the other half of the stats spike (contract §9): what `trace` changes (`debug` was measured for a minute on 3 October 2026 and left the shape alone, contract §9) and whether a second CLI version keeps the log's shape. Each needs the owner's permission, because each changes a running install. Field 11 was narrowed by reading the existing log (contract §9) and needed none.
 
 The command was run end to end against a scratch `$HOME` holding a real store in each state. With the system already trusted, the installer printed "Certificate already exists in system trust store", never reached its `sudo`, and left every store trusted; `-f` with an absolute profile path reached the non-default profile. That is the measurement behind the Protection page saying the command needs no password in that state.
 
