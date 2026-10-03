@@ -11,7 +11,7 @@ This file is the one changelog.
 
 ---
 
-## Unreleased
+## 1.9.0 — 4 October 2026
 
 ### A licence lost to the network says so before it is activated again
 

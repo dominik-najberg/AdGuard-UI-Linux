@@ -27,13 +27,13 @@ Every release carries a `.deb`, an `.rpm` and a tarball for `~/.local`, each bui
 On Ubuntu and Debian:
 
 ```bash
-sudo apt-get install ./adguard-ui_1.8.1_amd64.deb
+sudo apt-get install ./adguard-ui_1.9.0_amd64.deb
 ```
 
 On Fedora:
 
 ```bash
-sudo dnf install ./adguard-ui-1.8.1-1.x86_64.rpm
+sudo dnf install ./adguard-ui-1.9.0-1.x86_64.rpm
 ```
 
 [**Releases**](https://github.com/dominik-najberg/AdGuard-UI-Linux/releases) · [`CHANGELOG.md`](CHANGELOG.md). `apt-get install` and `dnf install` rather than `dpkg -i` or `rpm -i`, because they resolve the dependencies the package declares; the path has to start with `./` or they look the name up in the distribution's repositories instead. The tarball is the unprivileged route: extract it and run its `install.sh`, which writes under `~/.local` and never asks for a password.
@@ -130,7 +130,7 @@ Three groups at the foot of that page do more than set a key:
 
 **AdGuard's own four are listed, and adding one is a button.** AdGuard for Windows and Mac ship with four userscripts — Extra, Popup Blocker, Assistant and Web of Trust — and AdGuard CLI ships only Extra, so a *From AdGuard* group offers whichever of them you do not have and adds them in the state AdGuard itself uses: Extra and Popup Blocker on, Assistant and Web of Trust off. One you already have drops out of the group instead of being listed twice, so an empty group means you have all four. Nothing is fetched until you press **Add** — a userscript runs inside the pages you visit, and this application no more installs one on its own than it performs a privileged operation on its own.
 
-**One kind of row cannot be used, and says so.** AdGuard identifies a userscript by matching your text against every installed script's name and id, and offers no way to be more exact — so if one script's id appears inside another's, the shorter one cannot be switched or removed at all, from here or from a terminal. That row still shows the script and its true state, and carries a warning icon and a sentence naming the collision, with its controls inert rather than offered and then failing. Reinstalling, which is how a userscript is updated, also switches a disabled one back on with no way to prevent it; the confirmation says so when it applies. Both are AdGuard's behaviour rather than this application's, and the page says which. Nothing here reads or runs a userscript's code — *Edit* and *Storage*, which the Windows app offers, are deliberately absent.
+**One kind of row cannot be used, and says so.** AdGuard identifies a userscript by matching your text against every installed script's name and id, and offers no way to be more exact — so if one script's id appears inside another's, the shorter one cannot be switched or removed at all, from here or from a terminal. That row still shows the script and its true state, and carries a warning icon and a sentence naming the collision, with its controls inert rather than offered and then failing. Reinstalling, which is how a userscript is updated, also switches a disabled one back on with no way to prevent it; the confirmation says so when it applies. Both are AdGuard's behaviour rather than this application's, and the page says which. Nothing here runs a userscript's code, and the only part of it ever read is the metadata block at its head, to show what a script is before it is added — *Edit* and *Storage*, which the Windows app offers, are deliberately absent.
 
 **Diagnostics** — every check this application makes, one line each: the CLI and its licence state, the proxy and its process, whether AdGuard's root helper is alive and its own requests are getting through, the certificate, each browser's integration, and DNS. Where the Status page gives one answer, this page shows what it was weighed from. It is read when you open it rather than on a timer. **Copy report** puts the same lines on the clipboard for a bug report, and **Save…** writes them to a file. Your home folder is shortened to `~`, and the report never contains your licence key, e-mail, network addresses or anything from your browsing. The page changes nothing itself. Each problem says what fixes it, and clicking it takes you to the page that has the fix. **Check a Website** runs the same kind of check for one site you name: its name lookup and a connection, what AdGuard's log says happened to it and which rules decided it, HTTPS exclusions and decryption, and HTTP/3. It keeps nothing, and **Clear** removes the results.
 

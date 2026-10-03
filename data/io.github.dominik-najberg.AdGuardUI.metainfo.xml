@@ -53,6 +53,19 @@
     application is its first release.
   -->
   <releases>
+    <release version="1.9.0" type="stable" date="2026-10-04">
+      <url type="details">https://github.com/dominik-najberg/AdGuard-UI-Linux/releases/tag/v1.9.0</url>
+      <description>
+        <p>Userscripts can be installed from the browser, and certificate and licence trouble explains itself:</p>
+        <ul>
+          <li>The Install button on Greasy Fork, Sleazy Fork, OpenUserJS and GitHub can bring a userscript to AdGuard UI instead of opening it as text. It takes a small helper userscript, offered on the Extensions page under From your browser.</li>
+          <li>Nothing is installed without a yes. The question shows the script's name, version, description, the sites it runs on and where it comes from, and Add stays greyed out for two seconds, and again whenever the window loses focus.</li>
+          <li>Removing a userscript shows its name and source host, with the full address folded away.</li>
+          <li>When AdGuard CLI loses its licence because it could not reach AdGuard's servers, the licence row and the Status panel say so, and Activate asks first.</li>
+          <li>Browsers that trusted AdGuard's old certificate are given the new one while protection runs, with a notice naming the browsers to restart.</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.8.1" type="stable" date="2026-10-03">
       <url type="details">https://github.com/dominik-najberg/AdGuard-UI-Linux/releases/tag/v1.8.1</url>
       <description>
