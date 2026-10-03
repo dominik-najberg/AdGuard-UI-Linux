@@ -1263,7 +1263,7 @@ Caveats before building stats on this:
 
 ### What a line carries — the read-only half of the stats spike
 
-Measured 30 September 2026 against `adguard-cli` 1.4.13 at `log_level: 'info'`, by reading the live log and every rotated generation on the reference machine. Nothing was written, and no proxy was restarted. **This is the half of the spike `v2-plan.md` §3.5 asked for that needs no permission.** The other half needs `log_level` changed on a real install and a second CLI version, and is not taken.
+Measured 30 September 2026 against `adguard-cli` 1.4.13 at `log_level: 'info'`, by reading the live log and every rotated generation on the reference machine. Nothing was written, and no proxy was restarted. **This is the half of the spike `v2-plan.md` §3.5 asked for that needs no permission.** The other half — `log_level` and a second CLI version — is below: `log_level` was taken on 3 October 2026, in a sandbox, and the second version is not.
 
 **The rotation keeps ten generations, not two.** `access.log` plus `access.log.1` through `.9`, each rolled at ~10 MiB. When read, the live file and its nine predecessors held **233,066 lines** covering 27 to 30 September, about three and a half days. At heavier browsing a generation lasts two hours. So the log is a sliding window of a few days whose length depends on traffic, never a history. Anything that wants longer has to copy lines out, and that copy is the browsing record the stats milestone has to decide whether to keep.
 
@@ -1276,7 +1276,7 @@ Measured 30 September 2026 against `adguard-cli` 1.4.13 at `log_level: 'info'`, 
 | 6, 7 | Host and path | `-` where the protocol has none; **the browsing record itself** |
 | 9 | Request type | `xhr`, `img`, `script`, `any`, `other\|xhr`, … — `\|`-joined |
 | 10 | **Action** | `NONE`, `MODIFIED_META`, `BLOCKED`, `MODIFIED_CONTENT`, `WHITELISTED`, `-` |
-| 11 | A small count (0–3 observed) | **Rules that touched the request**, by the evidence below; still not proven. Does not decide the action, and is not the rule shown in field 17 |
+| 11 | A small count (0–3 observed) | **Not a count of the rules that matched**, measured below. Follows the *kind* of rule that decided the line: 0 for a plain request or an HTML-filtering rule, 1 for a blocking rule or a `$csp`, 2 for an exception. Is not the rule in field 17 and does not decide the action |
 | 12 | `ID=<n>` when a rule decided the line, otherwise `-` | `ID=2` is AdGuard Base's id in `agflm_standard.db` |
 | 17 | **The rule's text**, after the `--` marker, present exactly when field 12 is `ID=` | e.g. an `@@…` exception or a blocking rule |
 
@@ -1299,23 +1299,48 @@ Measured 30 September 2026 against `adguard-cli` 1.4.13 at `log_level: 'info'`, 
 | `MODIFIED_CONTENT` | 158 | 615 | 987 | 23 |
 | `WHITELISTED` | — | 245 | 78 | 1 |
 
-- **It is zero on every line that nothing touched** (`-`, and almost all of `NONE`) and at least one on every line a rule did something to. That is the shape of "how many rules applied", and it is as far as the lines go.
+- **It is zero on every line that nothing touched** (`-`, and almost all of `NONE`) and non-zero on most lines a rule decided. The sandbox run below shows that this is not "how many rules applied": the reading this bullet first carried — a count of rules — is refuted there.
 - **It is not the rule in field 17.** The text after the marker is one rule, and field 11 reaches 2 and 3 where one rule is shown. `WHITELISTED` lines carrying the same `ID=2` hold 1 on 127 of them and 2 on 62, so the count does not follow the filter list either.
 - **It is not the action.** `MODIFIED_META` is 2 on 44,235 lines and 1 on 3,453; `NONE` is non-zero on 2,415 lines.
 - **Most of the weight is one client.** All 44,235 `MODIFIED_META` lines at 2 are `"chrome"`, over `HTTP2`, request type `xhr|subdocument`. Every line at 3 is `"chrome"` too, 70 in all. No line over `TLS`, `IQUIC`, `TCP`, `UDP` or `STUN_TURN` is above 0 apart from four `TLS` lines at 1.
-- **Cannot be split from the lines alone:** "rules that matched" against "modifications applied". Telling them apart needs the rule lists of a known request, which is a test for a proxy, not a read of its log.
+- **The live log alone cannot say what it counts.** Telling "rules that matched", "modifications applied" and "kind of rule" apart needs requests whose rules are known, which is what the sandbox run below did.
 
-So field 11 is not a number to put on a page as "rule matches". `activity.rs` does not read it, and nothing here changes that.
+**Field 11 in a sandbox, 3 October 2026 — rules of known number and kind.** A licensed scratch `XDG_DATA_HOME`, manual mode, ports 3299/3281, a custom list per case, four requests per case (two HTTP/1.1, two HTTP/2) to `example.com`, and the page body and response headers read back so that a rule that did not act is not mistaken for a zero. The case ids are the run's own.
 
-**`log_level: debug` — a preliminary result, about a minute long.** Measured 3 October 2026 against 1.4.13 on the reference machine, with the owner's go-ahead: `config set log_level debug` applied to the running proxy without a restart (`Settings applied successfully`), and the 205 `access.log` lines written in the next minute were compared with the `info` shapes above.
+| Rules | What happened | Action | Field 11 |
+| --- | --- | --- | --- |
+| none | the proxy's own injection only | `MODIFIED_CONTENT` | 0 |
+| `$$p` (HTML filtering) | the `<p>` was removed | `MODIFIED_CONTENT` | **0** |
+| `$$p` and `$$link` | both removed | `MODIFIED_CONTENT` | **0** |
+| `##p` (cosmetic) | effect not verified | `MODIFIED_CONTENT` | 0 |
+| `$removeheader=server` | **did not act** — the `Server` header was still there | `MODIFIED_CONTENT` | 0 |
+| `$csp=script-src 'none'` | a `Content-Security-Policy` header appeared | `MODIFIED_CONTENT` | 1 |
+| both of the above | the CSP only | `MODIFIED_CONTENT` | 1 |
+| two blocking rules that both match (`\|\|example.com^` and `example.com`) | blocked, one `ID=` | `BLOCKED` | **1** |
+| one exception, `@@\|\|example.com^` | passed | `WHITELISTED` | **2** |
+| a blocking rule and two exceptions | passed | `WHITELISTED` | **2** |
 
-- **No change in shape.** 203 lines of sixteen fields and 2 of seventeen, the same six actions, the same protocols. Nothing new appeared in any column that `activity.rs` reads.
-- **A minute is not a sample.** It is the 205 lines of one stretch of ordinary browsing, with no `IQUIC` or `WHITELISTED` rule text worth the name. It says the shape did not change at once, and not that `debug` never changes it.
-- **The cost is the finding.** `proxy.log` grew from 2.6 MB to 7.8 MB in under a minute, about 110 KB/s, against a roll every ~10 MiB with ten generations kept. At that rate a generation rolls every ~90 seconds, so **a few minutes at `debug` overwrites the whole history of `proxy.log`**, which `info` keeps for days. The value was set back to `info` after about a minute, before any roll, and `proxy.log.1` to `.9` were intact afterwards.
+- **Not a count of rules matched.** Two blocking rules match and the field reads 1; three rules match and it reads 2; a single exception reads 2.
+- **Not a count of modifications.** An exception modifies nothing and reads 2; two HTML-filtering rules each removed an element and it reads 0.
+- **HTML-filtering rules never add to it**, though they plainly act. A header-modifying `$csp` adds 1, a block 1, an exception 2.
+- **Open:** the 2 and 3 on the live log's `MODIFIED_META` lines are not reproduced by any rule tried here, so they come from a kind of rule this run did not use. `$removeheader` did not act on plain HTTP in this form, so it says nothing either way. Cosmetic rules were not verified to have fired.
 
-**`log_level: trace` was not measured.** The run that was to generate traffic through the proxy was refused by the session's permission classifier, and the value was restored rather than left at `debug` while that was settled. A longer `debug` run and `trace` want a scratch `XDG_DATA_HOME`, as the HAR measurement used, so the real install's logs are not the cost.
+So field 11 is not a number to put on a page as "rule matches", or as a count of anything the user would recognise. `activity.rs` does not read it, and nothing here changes that.
 
-**Still open:** what `trace` adds or removes, `debug` over a longer and more varied window, and whether 1.4.13's shape survives a CLI upgrade. Each is the owner's to authorise.
+**`log_level`, measured in a sandbox on 3 October 2026** with the same traffic at each level: twelve `curl` requests over HTTP/1.1, HTTP/2 and an excluded TLS host, and three pages through headless Chrome, all over SOCKS5. `info` was run twice, so run-to-run noise is measured: **0 shapes appeared in only one of the two.**
+
+| Level | Lines | Fields | Unread by `activity.rs`'s rule | Shapes not seen at `info` | `proxy.log` per access line |
+| --- | --- | --- | --- | --- | --- |
+| `info` ×2 | 115, 109 | 16 and 17 | 0 | — | ~0 (a fixed ~82 KB of start-up warnings) |
+| `debug` | 113 | 16 and 17 | 0 | **0** | **~17 KB** |
+| `trace` ×3 | 119, 117, 117 | 16 and 17 | 0 | **0** | **~130 KB** |
+
+- **Neither level changes the shape of `access.log`.** Same eleven shapes, the same six actions, no new column, no line `activity.rs` would count as unread. `debug` applies to a running proxy without a restart; this is also what a minute of `debug` on the real install showed earlier the same day.
+- **The cost is entirely in `proxy.log`.** At ~130 KB per request, one 10 MiB generation lasts about 80 requests, so a few minutes of ordinary browsing at `trace` replaces all ten generations. `debug` is a tenth of that and is still minutes, not days. **This is the reason a log-level switch in the interface would need to say what it costs.**
+- **`trace` aborts the proxy on an HTML-filtering rule.** With `example.com$$p` installed, the first request that met it ended the process — `SIGABRT`, exit status 134 — in the middle of the HTML filter's own trace output, with no shutdown message. Reproduced twice (the first time before the exit status was being kept). The same rule at `info` and at `debug`, a network rule pair (`||…^` with an `@@` exception) and a cosmetic `##p` at `trace` all ran to the end. **A proxy that stops filtering silently is the worst thing a diagnostic setting can do**, so `trace` is not something to offer or to set on someone's install without that being known.
+- **What this does not cover.** Only `curl` and headless Chrome over SOCKS5 were generated, so there are no `IQUIC`, `UDP` or `STUN_TURN` lines at `debug` or `trace`; one machine; 1.4.13 only; and the abort was reproduced with one HTML-filtering rule, not several.
+
+**Still open:** whether 1.4.13's shape survives a CLI upgrade, which needs the next release rather than a run; `debug` and `trace` over `IQUIC`, `UDP` and `STUN_TURN` traffic, which SOCKS5 from `curl` and headless Chrome did not produce; and which kind of rule the live log's 2s and 3s in field 11 come from.
 
 ### What the Activity page takes from a line
 
