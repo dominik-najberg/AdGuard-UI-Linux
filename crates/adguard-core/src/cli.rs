@@ -142,6 +142,24 @@ pub enum Error {
     #[error("{message}")]
     Unlicensed { message: String },
 
+    /// The CLI could not reach AdGuard's servers to check the licence, so it
+    /// refused the command without knowing the answer.
+    ///
+    /// Measured on v1.4.13 with the network down (a router restart, a DNS that
+    /// answered `auth.adguard.com` with a private address): `status` exits **1**
+    /// with `Error while checking license status: Unable to connect, please
+    /// check your internet connection` on **stdout**, and the argument parser's
+    /// usage dump on stderr. Stderr being non-empty is what sent this to
+    /// [`Self::BadInvocation`], which printed the usage dump under
+    /// *"adguard-cli rejected `status`"* — blaming our command line for a
+    /// network that was down.
+    ///
+    /// Distinct from [`Self::Unlicensed`] on purpose: nothing says the licence
+    /// is missing, so no caller may offer activation on the strength of this.
+    /// Carries the CLI's own sentence.
+    #[error("{message}")]
+    LicenceCheckFailed { message: String },
+
     /// The command outlived its deadline and was killed. Distinct from
     /// [`Self::BadInvocation`] because nothing was rejected and nothing is
     /// known: the command may equally have done its work and hung on the way
@@ -444,6 +462,12 @@ impl Cli {
             // blaming ourselves.
             if let Some(message) = licence_complaint(&stderr) {
                 return Err(Error::Unlicensed { message });
+            }
+            // Nor is it our command line when the CLI could not ask AdGuard
+            // about the licence at all. Its sentence is on stdout, with the
+            // usage dump on stderr, so look in both.
+            if let Some(message) = licence_check_failure(&stdout, &stderr) {
+                return Err(Error::LicenceCheckFailed { message });
             }
             // Nor does a failure always explain itself on stderr, which is the
             // other half of what §3 first assumed. Measured: two invocations
@@ -1571,6 +1595,10 @@ fn redact_error(err: Error, secret: &str) -> Error {
         Error::Unlicensed { message } => Error::Unlicensed {
             message: redact(&message, secret),
         },
+        // A sentence the CLI wrote, treated like `Unlicensed`'s for the same reason.
+        Error::LicenceCheckFailed { message } => Error::LicenceCheckFailed {
+            message: redact(&message, secret),
+        },
         // Echoes an argument this crate passed — a userscript name. No caller
         // reaches it through a secret-bearing command today, since the only
         // route here is `config set` on a credential key; it is redacted anyway
@@ -1869,6 +1897,22 @@ fn licence_complaint(stderr: &str) -> Option<String> {
         // editing its words rather than arranging them.
         Some(advice) if advice != complaint => format!("{complaint} — {advice}"),
         _ => complaint,
+    })
+}
+
+/// Recognise the CLI failing to *check* the licence, as opposed to finding it
+/// missing — see [`Error::LicenceCheckFailed`].
+///
+/// Matched on the first line of either stream that begins with the CLI's own
+/// prefix, and on the prefix alone, so a reworded reason ("Unable to connect",
+/// a timeout, a TLS failure) is still recognised and still shown verbatim.
+fn licence_check_failure(stdout: &str, stderr: &str) -> Option<String> {
+    [stdout, stderr].into_iter().find_map(|stream| {
+        stream
+            .lines()
+            .map(str::trim)
+            .find(|line| line.to_ascii_lowercase().starts_with("error while checking licen"))
+            .map(str::to_owned)
     })
 }
 
@@ -2794,6 +2838,42 @@ mod tests {
         );
         // The user sees the CLI's own sentence, not "adguard-cli rejected `status`".
         assert_eq!(err.to_string(), UNLICENSED);
+    }
+
+    /// What v1.4.13 prints when it cannot reach AdGuard to check the licence:
+    /// this sentence on stdout, the usage dump on stderr, exit 1.
+    const CHECK_FAILED: &str = "Error while checking license status: Unable to connect, please check your internet connection";
+
+    #[test]
+    fn a_licence_check_that_could_not_connect_is_not_our_bug_nor_a_missing_licence() {
+        let err = cli_for("/bin/sh")
+            .run_within(
+                &[
+                    "-c",
+                    &format!(
+                        "echo '{CHECK_FAILED}'; echo; \
+                         printf '/home/you/.local/bin/adguard-cli\\n  Commands:\\n    activate    Activate an AdGuard license\\n' >&2; \
+                         exit 1"
+                    ),
+                ],
+                Duration::from_secs(10),
+            )
+            .expect_err("exit 1 is a failure");
+
+        assert!(
+            matches!(err, Error::LicenceCheckFailed { .. }),
+            "expected LicenceCheckFailed, got {err:?}"
+        );
+        // The CLI's sentence, without the usage dump.
+        assert_eq!(err.to_string(), CHECK_FAILED);
+    }
+
+    #[test]
+    fn a_failed_licence_check_is_found_on_either_stream() {
+        assert_eq!(licence_check_failure(CHECK_FAILED, "").as_deref(), Some(CHECK_FAILED));
+        assert_eq!(licence_check_failure("", CHECK_FAILED).as_deref(), Some(CHECK_FAILED));
+        assert_eq!(licence_check_failure("", UNLICENSED_FULL), None);
+        assert_eq!(licence_check_failure("unknown setting: nonsense.key", ""), None);
     }
 
     /// The other half of the same decision: a real malformed command line must

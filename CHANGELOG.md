@@ -11,6 +11,14 @@ This file is the one changelog.
 
 ---
 
+## Unreleased
+
+### A network that is down no longer reads as a bug in the application
+
+With no route to AdGuard's servers, `adguard-cli` cannot check the licence and refuses every command with `Error while checking license status: Unable to connect, please check your internet connection` — on its standard output, with its usage listing on the error stream. The Status page showed that listing under *"adguard-cli rejected `status`"*, as if the application had built a bad command line. It now shows the CLI's own sentence, and — unlike a licence that is not active — offers no activation, since nothing says the licence is missing.
+
+---
+
 ## 1.8.0 — 3 October 2026
 
 ### An .rpm for Fedora
