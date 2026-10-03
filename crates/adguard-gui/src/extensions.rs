@@ -1160,15 +1160,16 @@ impl InstallDetails {
             .build();
         list.add_css_class("boxed-list");
 
+        // Subtitles are never cut by the label (`subtitle-lines` 0): it cuts
+        // through words, and every line here is shortened at a word boundary
+        // by `install_link::shorten` instead.
         let name = static_row("");
         name.set_title_lines(3);
-        name.set_subtitle_lines(2);
         list.append(&name);
 
         let described = adw::ExpanderRow::builder().build();
         described.set_use_markup(false);
         described.set_title_lines(3);
-        described.set_subtitle_lines(2);
         let description = gtk::Label::builder()
             .use_markup(false)
             .wrap(true)
@@ -1185,7 +1186,11 @@ impl InstallDetails {
         described.connect_expanded_notify({
             let description = description.clone();
             move |row| {
-                let preview = if row.is_expanded() { String::new() } else { description.label().into() };
+                let preview = if row.is_expanded() {
+                    String::new()
+                } else {
+                    install_link::shorten(&description.label(), DESCRIPTION_PREVIEW)
+                };
                 row.set_subtitle(&preview);
             }
         });
@@ -1253,7 +1258,12 @@ impl InstallDetails {
         self.name.set_subtitle(note);
         self.described.set_title(&summary.name);
         self.description.set_label(note);
-        self.described.set_subtitle(if self.described.is_expanded() { "" } else { note });
+        let preview = if self.described.is_expanded() {
+            String::new()
+        } else {
+            install_link::shorten(note, DESCRIPTION_PREVIEW)
+        };
+        self.described.set_subtitle(&preview);
 
         self.version.set_visible(summary.version.is_some());
         self.version_value
@@ -1300,9 +1310,12 @@ fn static_row(title: &str) -> adw::ActionRow {
     row
 }
 
-/// About how much description fits the name row's two-line preview; longer
-/// ones get a row that expands to the whole text.
-const DESCRIPTION_PREVIEW: usize = 100;
+/// How much description fits two lines under the name, measured on the
+/// dialog at its usual width: some fifty characters a line, less where the
+/// words break badly — Greasy Fork's 87-character preview for #29's example
+/// took three. Longer ones get a row that expands to the whole text,
+/// previewed up to the last whole word within this.
+const DESCRIPTION_PREVIEW: usize = 80;
 
 /// The value beside a row's title, on one line.
 ///

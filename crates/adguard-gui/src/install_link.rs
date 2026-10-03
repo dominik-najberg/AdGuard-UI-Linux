@@ -144,14 +144,24 @@ impl Reach {
         }
     }
 
-    /// The line under "Runs on": the first few sites, or why the value is what
-    /// it is. The full list is the row's expansion.
+    /// The line under "Runs on": as many whole site names as fit one line,
+    /// or why the value is what it is. The full list is the row's expansion.
     pub fn note(&self) -> Option<String> {
-        const SHOWN: usize = 3;
+        /// What fits beside "Runs on" and its value on one line, measured on
+        /// the dialog at its usual width.
+        const BUDGET: usize = 30;
         match self {
             Reach::Sites(sites) if sites.len() > 1 => {
-                let first = sites[..sites.len().min(SHOWN)].join(", ");
-                Some(if sites.len() > SHOWN { format!("{first}, …") } else { first })
+                let mut shown = sites[0].clone();
+                let mut count = 1;
+                for site in &sites[1..] {
+                    if shown.chars().count() + 2 + site.chars().count() > BUDGET {
+                        break;
+                    }
+                    shown = format!("{shown}, {site}");
+                    count += 1;
+                }
+                Some(if count < sites.len() { format!("{shown}, …") } else { shown })
             }
             Reach::Unstated => Some("The script names no sites".to_owned()),
             Reach::Unknown => Some("It may run on every site".to_owned()),
@@ -172,6 +182,27 @@ impl Reach {
             _ => &[],
         }
     }
+}
+
+/// `text` cut to at most `max` characters at the end of a word, with an
+/// ellipsis — never through the middle of one, the way a label's own
+/// ellipsizing cuts ("TikT…"). Text that fits is returned whole. A single
+/// word longer than `max` is the one case that is cut where it stands.
+pub fn shorten(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_owned();
+    }
+    let cut = text.char_indices().nth(max).map_or(text.len(), |(i, _)| i);
+    let head = &text[..cut];
+    // If the cut landed between words, everything up to it is whole words.
+    let at_boundary = text[cut..].starts_with(char::is_whitespace);
+    let words = if at_boundary {
+        head
+    } else {
+        head.rsplit_once(char::is_whitespace).map_or(head, |(words, _)| words)
+    };
+    let words = words.trim_end().trim_end_matches([',', ';', ':', '.', '-', '–', '—']);
+    format!("{words}…")
 }
 
 /// The rows for `url`, from what is known about it so far.
@@ -238,7 +269,7 @@ mod tests {
             }
         );
         assert_eq!(summary.reach.value(), "4 sites");
-        assert_eq!(summary.reach.note().as_deref(), Some("google.com, bing.com, duckduckgo.com, …"));
+        assert_eq!(summary.reach.note().as_deref(), Some("google.com, bing.com, …"));
         assert_eq!(summary.reach.sites().len(), 4, "every site is listed on expansion");
         assert!(!summary.reach.warns());
     }
@@ -257,6 +288,42 @@ mod tests {
         assert_eq!(unread.note.as_deref(), Some("Its details could not be read: could not reach it"));
         assert!(unread.reach.warns());
         assert_eq!(unread.reach.value(), "Unknown");
+    }
+
+    #[test]
+    fn shortening_stops_after_a_whole_word() {
+        let text = "Block unwanted sites from your Google, DuckDuckGo, Startpage.com, Bing and \
+                    Yahoo search results.";
+        // The limit lands inside "search": the word is dropped, not cut.
+        assert_eq!(
+            shorten(text, 84),
+            "Block unwanted sites from your Google, DuckDuckGo, Startpage.com, Bing and Yahoo…"
+        );
+        // It lands right after "search": the word is whole, so it stays.
+        assert_eq!(
+            shorten(text, 87),
+            "Block unwanted sites from your Google, DuckDuckGo, Startpage.com, Bing and Yahoo \
+             search…"
+        );
+        // Trailing punctuation goes, so it never reads ",…".
+        assert_eq!(shorten("one, two, three, four", 10), "one, two…");
+        assert_eq!(shorten("fits", 10), "fits");
+        assert_eq!(shorten("exactly ten", 11), "exactly ten");
+        assert_eq!(shorten("Supercalifragilistic", 5), "Super…");
+    }
+
+    #[test]
+    fn the_runs_on_line_holds_whole_site_names() {
+        let sites = |names: &[&str]| Reach::Sites(names.iter().map(|s| s.to_string()).collect());
+        assert_eq!(
+            sites(&["google.*", "google.co*.*", "startpage.com", "bing.com"]).note().as_deref(),
+            Some("google.*, google.co*.*, …")
+        );
+        assert_eq!(
+            sites(&["ted.com", "youtube.com", "x.com", "twitter.com"]).note().as_deref(),
+            Some("ted.com, youtube.com, x.com, …")
+        );
+        assert_eq!(sites(&["ted.com", "x.com"]).note().as_deref(), Some("ted.com, x.com"));
     }
 
     #[test]
