@@ -139,8 +139,30 @@ pub enum Error {
     /// Carries the CLI's own sentence, for the same reason [`Self::Refused`]
     /// does: it is better wording than ours and it stays right if AdGuard
     /// changes it.
+    ///
+    /// # `offline`: when the refusal is a network outage in disguise
+    ///
+    /// Measured on v1.4.13, from its own `logs/app.log` on 7 September and
+    /// 3 October 2026: when the CLI cannot reach AdGuard to check the licence,
+    /// it logs `get_app_state: Failed to get application status: Unable to
+    /// connect, …` and from then on refuses **every** command with this
+    /// variant's sentence — for over two hours on 7 September, and for 37
+    /// minutes after its last failed attempt, with no further attempt logged.
+    /// Only `activate` brought it back, each of the three times. And each of
+    /// those three activations was followed by `start` failing with *No
+    /// certificate*, and by `cert` generating a new CA that no browser trusted.
+    ///
+    /// So the refusal is real — activation is the way out, and hiding it
+    /// would leave the user with a CLI that refuses everything — but the
+    /// reason is not a lapsed licence, and activating has a cost the user
+    /// should hear about first. `offline` is the CLI's own logged reason
+    /// ([`last_failed_licence_check`]) when the last check it logged could not
+    /// reach AdGuard; `None` when the log says nothing of the kind.
     #[error("{message}")]
-    Unlicensed { message: String },
+    Unlicensed {
+        message: String,
+        offline: Option<String>,
+    },
 
     /// The CLI could not reach AdGuard's servers to check the licence, so it
     /// refused the command without knowing the answer.
@@ -461,7 +483,10 @@ impl Cli {
             // is what contract §3 first assumed. Sort the cases apart before
             // blaming ourselves.
             if let Some(message) = licence_complaint(&stderr) {
-                return Err(Error::Unlicensed { message });
+                return Err(Error::Unlicensed {
+                    message,
+                    offline: self.offline_reason(),
+                });
             }
             // Nor is it our command line when the CLI could not ask AdGuard
             // about the licence at all. Its sentence is on stdout, with the
@@ -693,6 +718,22 @@ impl Cli {
             Some(home) => Some(paths::config_file_under(home)),
             None => paths::config_file(),
         }
+    }
+
+    /// Why the CLI last failed to check the licence, if the last check it
+    /// logged could not reach AdGuard — see [`Error::Unlicensed`].
+    ///
+    /// Reads the tail of AdGuard's own `app.log`, and only on the refusal:
+    /// nothing on a working install pays for it. A log that is missing, rotated
+    /// a moment ago or unreadable gives `None`, which is the answer this crate
+    /// gives for every fact it cannot see — the refusal is then reported as the
+    /// CLI worded it, exactly as before this was read at all.
+    fn offline_reason(&self) -> Option<String> {
+        let data_dir = match &self.xdg_data_home {
+            Some(home) => paths::data_dir_under(home),
+            None => paths::data_dir()?,
+        };
+        last_failed_licence_check(&crate::access::tail(&paths::app_log_in(&data_dir), LOG_TAIL))
     }
 
     /// Seed a data directory that has never been configured.
@@ -1592,8 +1633,9 @@ fn redact_error(err: Error, secret: &str) -> Error {
         },
         // Quotes no argument of ours today, but it carries a string the CLI
         // wrote and this match is the place that assumption gets checked.
-        Error::Unlicensed { message } => Error::Unlicensed {
+        Error::Unlicensed { message, offline } => Error::Unlicensed {
             message: redact(&message, secret),
+            offline: offline.map(|reason| redact(&reason, secret)),
         },
         // A sentence the CLI wrote, treated like `Unlicensed`'s for the same reason.
         Error::LicenceCheckFailed { message } => Error::LicenceCheckFailed {
@@ -1914,6 +1956,51 @@ fn licence_check_failure(stdout: &str, stderr: &str) -> Option<String> {
             .find(|line| line.to_ascii_lowercase().starts_with("error while checking licen"))
             .map(str::to_owned)
     })
+}
+
+/// How much of `app.log` [`Cli::offline_reason`] reads: enough to reach back
+/// past the refusals that follow a failed check.
+///
+/// Measured on 3 October 2026: between the last failed check at 07:38 and the
+/// activation at 07:47, the UI's two-second `status` poll added ~270 refused
+/// invocations, two lines and ~170 bytes each — ~46 KB. A quarter of a mebibyte
+/// is five times that, read only when the CLI has already refused.
+const LOG_TAIL: u64 = 256 * 1024;
+
+/// What `app.log` says when a licence check could not reach AdGuard, up to the
+/// reason. Measured on v1.4.13:
+///
+/// ```text
+/// 03.10.2026 07:38:21.468998 ERROR [8977] AUTH get_app_status: Failed to get app status: Unable to connect
+/// 03.10.2026 07:38:21.469004 ERROR [8977] AdGuardCli get_app_state: Failed to get application status: Unable to connect, please check your internet connection
+/// ```
+///
+/// The second line, because it carries the sentence written for a person.
+const FAILED_CHECK: &str = "get_app_state: Failed to get application status: ";
+
+/// The reason in the last failed licence check `log` records, unless the CLI
+/// has run a licensed command since — see [`Error::Unlicensed`].
+///
+/// Every command the CLI dispatches logs `<name>_command: ...`, and a refused
+/// one logs nothing between its start and stop lines (measured, `app.log` of
+/// 3 October). So a `_command:` line after the failure means a check passed
+/// since, and the failure no longer explains anything. `activate_command` is
+/// the exception: `activate` runs on an unlicensed install, so it says nothing
+/// about whether a check has passed.
+///
+/// Matched on the CLI's own prefix and the rest taken verbatim, so a reworded
+/// reason is still shown as AdGuard wrote it.
+pub fn last_failed_licence_check(log: &str) -> Option<String> {
+    let mut last = None;
+    for line in log.lines() {
+        if let Some((_, reason)) = line.split_once(FAILED_CHECK) {
+            let reason = reason.trim();
+            last = (!reason.is_empty()).then(|| reason.to_owned());
+        } else if line.contains("_command: ") && !line.contains("activate_command: ") {
+            last = None;
+        }
+    }
+    last
 }
 
 /// Read one of the child's pipes to exhaustion on a thread of its own.
@@ -2874,6 +2961,77 @@ mod tests {
         assert_eq!(licence_check_failure("", CHECK_FAILED).as_deref(), Some(CHECK_FAILED));
         assert_eq!(licence_check_failure("", UNLICENSED_FULL), None);
         assert_eq!(licence_check_failure("unknown setting: nonsense.key", ""), None);
+    }
+
+    /// `app.log` as v1.4.13 wrote it on 3 October 2026, cut down: a licensed
+    /// poll, the failed check, refused polls (start and stop and nothing
+    /// between), and the activation they led to.
+    const OFFLINE_LOG: &str = "\
+03.10.2026 07:38:19.402304 INFO  [8961] AdGuardCli status_command: ...
+03.10.2026 07:38:21.468998 ERROR [8977] AUTH get_app_status: Failed to get app status: Unable to connect
+03.10.2026 07:38:21.469004 ERROR [8977] AdGuardCli get_app_state: Failed to get application status: Unable to connect, please check your internet connection
+03.10.2026 07:47:05.951331 INFO  [33325] AdGuardCli AdGuardCli: Start AdGuard CLI App
+03.10.2026 07:47:05.955382 INFO  [33325] AdGuardCli ~AdGuardCli: Stop CLI App
+03.10.2026 07:47:06.796605 INFO  [33333] AdGuardCli activate_command: ...
+03.10.2026 07:47:06.796626 WARN  [33333] ConsoleMenu select_option: Non-interactive mode, cannot select option
+";
+
+    #[test]
+    fn a_failed_licence_check_is_read_from_the_log_through_an_activation() {
+        assert_eq!(
+            last_failed_licence_check(OFFLINE_LOG).as_deref(),
+            Some("Unable to connect, please check your internet connection"),
+        );
+    }
+
+    /// Once a licensed command has run, the failure before it explains nothing.
+    #[test]
+    fn a_licensed_command_after_the_failure_clears_it() {
+        let log = format!(
+            "{OFFLINE_LOG}03.10.2026 07:47:56.377697 INFO  [33862] AdGuardCli status_command: ...\n"
+        );
+        assert_eq!(last_failed_licence_check(&log), None);
+    }
+
+    #[test]
+    fn a_log_with_no_failed_check_says_nothing() {
+        assert_eq!(last_failed_licence_check(""), None);
+        assert_eq!(
+            last_failed_licence_check(
+                "03.10.2026 07:47:05.951331 INFO  [33325] AdGuardCli AdGuardCli: Start AdGuard CLI App\n"
+            ),
+            None,
+        );
+    }
+
+    /// A refusal on an install whose log names a failed check carries the
+    /// reason; the log is read from the `Cli`'s own data directory.
+    #[test]
+    fn an_unlicensed_refusal_after_a_failed_check_says_it_was_offline() {
+        let home = std::env::temp_dir().join(format!("adguard-ui-offline-{}", std::process::id()));
+        let logs = home.join("adguard-cli/logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        std::fs::write(logs.join("app.log"), OFFLINE_LOG).unwrap();
+
+        let err = cli_for("/bin/sh")
+            .with_xdg_data_home(&home)
+            .run_within(
+                &["-c", &format!("echo '{UNLICENSED}' >&2; exit 1")],
+                Duration::from_secs(10),
+            )
+            .expect_err("exit 1 is a failure");
+        let _ = std::fs::remove_dir_all(&home);
+
+        match err {
+            Error::Unlicensed { message, offline } => {
+                assert_eq!(message, UNLICENSED);
+                assert_eq!(
+                    offline.as_deref(),
+                    Some("Unable to connect, please check your internet connection"),
+                );
+            }
+            other => panic!("expected Unlicensed, got {other:?}"),
+        }
     }
 
     /// The other half of the same decision: a real malformed command line must

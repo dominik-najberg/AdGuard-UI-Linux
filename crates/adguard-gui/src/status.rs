@@ -58,6 +58,7 @@
 //! the outcome, not anything `activate` printed.
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::{Duration, Instant, SystemTime};
@@ -136,8 +137,16 @@ enum Licence {
     /// `license` refused because the install is not licensed — [`Error::Unlicensed`],
     /// carrying the CLI's own sentence.
     ///
+    /// `offline` is the reason the CLI logged when its last licence check could
+    /// not reach AdGuard. Activation is still offered then — measured, it is
+    /// the only thing that brings the CLI back — but not without saying what
+    /// went wrong and what activating has cost every time it has been done.
+    ///
     /// [`Error::Unlicensed`]: adguard_core::Error::Unlicensed
-    Inactive { message: String },
+    Inactive {
+        message: String,
+        offline: Option<String>,
+    },
     /// `license` failed for some other reason: a timeout, or output we could not
     /// parse. Says so and offers nothing.
     Unreadable { message: String },
@@ -240,6 +249,13 @@ pub struct StatusPage {
     /// *Fix certificate* has been pressed and the trust it was after has not yet
     /// been seen. Keeps the check going while the proxy is not (yet) running.
     trust_watch: Cell<bool>,
+    /// Browser stores being renewed for a regenerated CA, so the poll does not
+    /// start a second round over the first.
+    renewing: Cell<bool>,
+    /// Stores already tried for the CA they were tried for, by database and
+    /// certificate bytes. A failure is reported once, not every two seconds;
+    /// a CA regenerated again is a new attempt.
+    renew_tried: RefCell<HashSet<(PathBuf, Vec<u8>)>>,
     /// What the trust check takes from `proxy.yaml`: whether HTTPS filtering is
     /// on, and the certificate's name. Stashed by `reconcile`, like Protection's.
     trust_inputs: RefCell<(Option<bool>, String)>,
@@ -649,6 +665,8 @@ impl StatusPage {
             trust_label: trust_label.clone(),
             trust_fix: trust_fix.clone(),
             trust_watch: Cell::new(false),
+            renewing: Cell::new(false),
+            renew_tried: RefCell::new(HashSet::new()),
             trust_inputs: RefCell::new((None, adguard_core::trust::DEFAULT_CERTIFICATE_NAME.to_owned())),
             modules,
             web_filters,
@@ -768,7 +786,7 @@ impl StatusPage {
             let this = Rc::downgrade(&this);
             move |_| {
                 if let Some(this) = this.upgrade() {
-                    this.begin_activation();
+                    this.confirm_activation();
                 }
             }
         });
@@ -846,7 +864,7 @@ impl StatusPage {
                 this.settle_status(status, evidence);
                 match licence {
                     Ok(licence) => this.licence_read(licence),
-                    Err((unlicensed, message)) => this.licence_refused(unlicensed, message),
+                    Err(refused) => this.licence_refused(refused),
                 }
             },
         );
@@ -1049,12 +1067,90 @@ impl StatusPage {
         }
     }
 
+    /// Put the current CA in every browser store that held an earlier one.
+    ///
+    /// AdGuard CLI generates a new CA when it has lost the old one's key, and
+    /// every browser that trusted the old one then fails every filtered page —
+    /// with nothing on this machine saying why, since the system store is fixed
+    /// by the command the user was just given. A store still holding an earlier
+    /// AdGuard CA was given AdGuard's CA before, so it is renewed without asking
+    /// again (`nss` module docs); a store that never held one is left to *Add
+    /// to Browsers*.
+    ///
+    /// Under the same condition as the trust check, so it runs while filtering
+    /// matters and not on a stopped install. The reading is the certificate
+    /// view's — two read-only queries per store, measured at well under a
+    /// millisecond — and the writing goes to a worker.
+    fn renew_browsers(self: &Rc<Self>) {
+        let (https, name) = self.trust_inputs.borrow().clone();
+        let matters = matches!(&*self.runtime.borrow(), Runtime::Up) && https != Some(false);
+        if !(matters || self.trust_watch.get()) || self.renewing.get() {
+            return;
+        }
+        let Some(trust) = adguard_core::CaTrust::detect(&name).filter(|trust| trust.generated) else {
+            return;
+        };
+        let Some(der) = adguard_core::trust::der(&trust.certificate) else {
+            return;
+        };
+        let Some(stores) = adguard_core::BrowserStores::detect(&trust.certificate) else {
+            return;
+        };
+        let due: Vec<_> = {
+            let tried = self.renew_tried.borrow();
+            stores
+                .renewable()
+                .into_iter()
+                .filter(|store| !tried.contains(&(store.database.clone(), der.clone())))
+                .cloned()
+                .collect()
+        };
+        let Some(certutil) = adguard_core::nss::certutil() else {
+            return;
+        };
+        if due.is_empty() {
+            return;
+        }
+        self.renew_tried
+            .borrow_mut()
+            .extend(due.iter().map(|store| (store.database.clone(), der.clone())));
+        self.renewing.set(true);
+
+        let certificate = trust.certificate.clone();
+        let this = self.clone();
+        worker::run(
+            move || {
+                due.iter()
+                    .map(|store| (store.name(), adguard_core::nss::renew(store, &certutil, &certificate)))
+                    .collect::<Vec<_>>()
+            },
+            move |results: Vec<(String, Result<usize, String>)>| {
+                this.renewing.set(false);
+                let (done, failed): (Vec<_>, Vec<_>) =
+                    results.into_iter().partition(|(_, result)| result.is_ok());
+                if !done.is_empty() {
+                    let names: Vec<&str> = done.iter().map(|(name, _)| name.as_str()).collect();
+                    this.toasts.add_toast(toast(&format!(
+                        "Updated AdGuard's certificate in {}. Restart open browsers",
+                        crate::root_helper::join_with_and(&names)
+                    )));
+                }
+                if let Some((name, Err(why))) = failed.into_iter().next() {
+                    this.toasts.add_toast(toast(&format!(
+                        "Could not update AdGuard's new certificate in {name}: {why}"
+                    )));
+                }
+            },
+        );
+    }
+
     fn settle_status(
         self: &Rc<Self>,
         result: Result<ProxyStatus, (bool, String)>,
         evidence: Evidence,
     ) {
         self.recheck_trust();
+        self.renew_browsers();
         let (bypass, cached, read) = evidence;
         self.filtering.set(cached);
         if read {
@@ -1620,7 +1716,7 @@ impl StatusPage {
             move || read_licence(&cli),
             move |result| match result {
                 Ok(licence) => this.licence_read(licence),
-                Err((unlicensed, message)) => this.licence_refused(unlicensed, message),
+                Err(refused) => this.licence_refused(refused),
             },
         );
     }
@@ -1645,7 +1741,7 @@ impl StatusPage {
     }
 
     /// `license` would not answer.
-    fn licence_refused(&self, unlicensed: bool, message: String) {
+    fn licence_refused(&self, refused: Refused) {
         // A refusal while the user is still logging in is the expected answer,
         // not news — it is what "not activated yet" looks like. Keep the link
         // and the finish button rather than sending them back to the start.
@@ -1654,8 +1750,9 @@ impl StatusPage {
             return;
         }
 
+        let Refused { unlicensed, offline, message } = refused;
         self.set_licence(if unlicensed {
-            Licence::Inactive { message }
+            Licence::Inactive { message, offline }
         } else {
             Licence::Unreadable { message }
         });
@@ -1676,6 +1773,31 @@ impl StatusPage {
             Licence::AwaitingLogin { url } => Some(url.clone()),
             _ => None,
         }
+    }
+
+    /// Activate, after asking first when the licence was lost to the network.
+    fn confirm_activation(self: &Rc<Self>) {
+        let offline = matches!(
+            &*self.licence.borrow(),
+            Licence::Inactive { offline: Some(_), .. }
+        );
+        if !offline {
+            self.begin_activation();
+            return;
+        }
+
+        let dialog = adw::AlertDialog::new(Some("Activate AdGuard again?"), Some(OFFLINE_ACTIVATION));
+        dialog.add_response("cancel", "Cancel");
+        dialog.add_response("activate", "Activate");
+        dialog.set_default_response(Some("cancel"));
+        dialog.set_close_response("cancel");
+        let this = Rc::downgrade(self);
+        dialog.connect_response(None, move |_, response| {
+            if let (Some(this), "activate") = (this.upgrade(), response) {
+                this.begin_activation();
+            }
+        });
+        dialog.present(Some(&self.page));
     }
 
     /// Ask the CLI where to send the user, then send them there.
@@ -1760,7 +1882,7 @@ impl StatusPage {
     fn settle_activation(
         self: &Rc<Self>,
         attempt: Option<String>,
-        licence: Result<License, (bool, String)>,
+        licence: Result<License, Refused>,
     ) {
         self.busy.set(false);
         self.finish.set_sensitive(true);
@@ -1784,7 +1906,7 @@ impl StatusPage {
                 self.refresh();
                 return;
             }
-            Err((unlicensed, message)) => (unlicensed, message),
+            Err(Refused { unlicensed, message, .. }) => (unlicensed, message),
         };
 
         self.toasts.add_toast(toast(&match (attempt, refusal) {
@@ -1818,7 +1940,8 @@ impl StatusPage {
                 Some(licence.owner.clone()),
                 Some(licence.masked_key()),
             ),
-            Licence::Inactive { message } | Licence::Unreadable { message } => {
+            Licence::Inactive { offline: Some(reason), .. } => (offline_state(reason), None, None),
+            Licence::Inactive { message, .. } | Licence::Unreadable { message } => {
                 (message.clone(), None, None)
             }
             Licence::AwaitingLogin { .. } => (
@@ -1973,17 +2096,63 @@ fn redirects_traffic() -> bool {
 /// offering activation was safe.
 ///
 /// [`Error::Unlicensed`]: adguard_core::Error::Unlicensed
-fn read_licence(cli: &Cli) -> Result<License, (bool, String)> {
-    cli.license().map_err(classify)
+fn read_licence(cli: &Cli) -> Result<License, Refused> {
+    cli.license().map_err(|err| Refused {
+        unlicensed: matches!(err, adguard_core::Error::Unlicensed { .. }),
+        offline: offline_reason(&err),
+        message: err.to_string(),
+    })
+}
+
+/// A `license` that would not answer, kept as far apart as the licence group
+/// needs: whether it was the licence, and whether the CLI's last check of it
+/// could not reach AdGuard.
+struct Refused {
+    unlicensed: bool,
+    offline: Option<String>,
+    message: String,
 }
 
 /// Was this failure the licence, in the CLI's own words?
+///
+/// The words are the CLI's unless its last licence check could not reach
+/// AdGuard. The panel then says that instead: *"you need to activate"* every
+/// two seconds through a router restart is what sent this app's own author to
+/// `activate` three times (`Error::Unlicensed`).
 fn classify(err: adguard_core::Error) -> (bool, String) {
-    (
-        matches!(err, adguard_core::Error::Unlicensed { .. }),
-        err.to_string(),
+    let unlicensed = matches!(err, adguard_core::Error::Unlicensed { .. });
+    let message = match offline_reason(&err) {
+        Some(reason) => offline_state(&reason),
+        None => err.to_string(),
+    };
+    (unlicensed, message)
+}
+
+fn offline_reason(err: &adguard_core::Error) -> Option<String> {
+    match err {
+        adguard_core::Error::Unlicensed { offline, .. } => offline.clone(),
+        _ => None,
+    }
+}
+
+/// The licence state when the CLI's last check could not reach AdGuard.
+fn offline_state(reason: &str) -> String {
+    format!(
+        "AdGuard CLI could not reach AdGuard's servers to check the licence ({reason}), and \
+         refuses to run until it is activated again"
     )
 }
+
+/// Asked before activating an install whose last licence check was offline.
+///
+/// The second paragraph is measured, not feared: every one of the three
+/// activations in AdGuard's own logs (7 September, twice on 3 October 2026)
+/// was followed by `start` failing with *No certificate* and a new CA.
+const OFFLINE_ACTIVATION: &str = "AdGuard CLI could not reach AdGuard's servers the last time it \
+    checked your licence, and has refused to run since. Activating needs a working connection, so \
+    check it first.\n\nActivating again has so far always made AdGuard CLI generate a new HTTPS \
+    certificate. AdGuard UI updates the browsers that trusted the old one; the system will need \
+    Fix certificate, which asks for your password.";
 
 /// Run `command` in the first terminal emulator found, held open at the end so
 /// its output can be read. The command is AdGuard's own and prompts for the
