@@ -95,57 +95,116 @@ pub enum Details {
     Unread(String),
 }
 
-/// The confirmation's body, as Pango markup.
+/// What the confirmation shows, one field per row (`extensions.rs` lays it
+/// out).
 ///
-/// **The name never appears without the host.** The name, version and
+/// **The name never appears without the source.** Name, version and
 /// description are whatever the script's author wrote, and a hostile one can
-/// call itself anything; the host is the one thing on the page that says whose
-/// code this is, so it sits on the line directly under the name. Every
-/// author-written string is escaped — `&` and `<` are ordinary in a
-/// description, and unescaped they would fail the whole body.
-pub fn body(url: &str, details: &Details) -> String {
-    let esc = |text: &str| glib::markup_escape_text(text).to_string();
-    let host = preview::host(url).unwrap_or_else(|| url.to_owned());
-    let file = preview::file_name(url).unwrap_or_else(|| host.clone());
+/// call itself anything; the host is the one thing on the dialog that says
+/// whose code this is, so it has a row of its own right under them. Rows are
+/// plain text, never markup, so nothing an author writes can restyle them.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Summary {
+    /// The script's `@name`, or the decoded file name until — or unless — it
+    /// is read.
+    pub name: String,
+    /// The line under the name: the script's description, or what is
+    /// happening instead.
+    pub note: Option<String>,
+    pub version: Option<String>,
+    /// The host the script is fetched from.
+    pub source: String,
+    pub reach: Reach,
+}
 
-    let mut parts = Vec::new();
-    match details {
-        Details::Reading => {
-            parts.push(format!("<b>{}</b>\nfrom {}", esc(&file), esc(&host)));
-            parts.push("Reading what the script says about itself…".to_owned());
-        }
-        Details::Unread(why) => {
-            parts.push(format!("<b>{}</b>\nfrom {}", esc(&file), esc(&host)));
-            parts.push(format!(
-                "Its details could not be read — {} — so this is only the name of the file.",
-                esc(why)
-            ));
-        }
-        Details::Read(preview) => {
-            let name = preview.name.as_deref().unwrap_or(&file);
-            let origin = match &preview.version {
-                Some(version) => format!("version {} · from {}", esc(version), esc(&host)),
-                None => format!("from {}", esc(&host)),
-            };
-            parts.push(format!("<b>{}</b>\n{origin}", esc(name)));
-            if let Some(description) = &preview.description {
-                parts.push(esc(description));
-            }
-            parts.push(match &preview.runs_on {
-                RunsOn::Everywhere => "Runs on <b>every site</b>.".to_owned(),
-                RunsOn::Unstated => {
-                    "It names no sites, so it may run on <b>every site</b>.".to_owned()
-                }
-                sites => format!("Runs on {}.", esc(&sites.summary().unwrap_or_default())),
-            });
+/// Where the script runs, as far as is known.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Reach {
+    /// Still reading the script.
+    Reading,
+    /// These sites and no others, every one of them listed.
+    Sites(Vec<String>),
+    /// A pattern that matches every site.
+    Everywhere,
+    /// The script names no sites, which may mean every site.
+    Unstated,
+    /// The script could not be read, so nothing is known.
+    Unknown,
+}
+
+impl Reach {
+    /// The row's value: short enough to sit beside "Runs on".
+    pub fn value(&self) -> String {
+        match self {
+            Reach::Reading => "Reading…".to_owned(),
+            Reach::Sites(sites) if sites.len() == 1 => sites[0].clone(),
+            Reach::Sites(sites) => format!("{} sites", sites.len()),
+            Reach::Everywhere | Reach::Unstated => "Every site".to_owned(),
+            Reach::Unknown => "Unknown".to_owned(),
         }
     }
-    parts.push(
-        "It will be able to read and change what you see on the sites it runs on. Add it \
-         only if you just clicked an install link and trust where it came from."
-            .to_owned(),
-    );
-    parts.join("\n\n")
+
+    /// The line under "Runs on": the first few sites, or why the value is what
+    /// it is. The full list is the row's expansion.
+    pub fn note(&self) -> Option<String> {
+        const SHOWN: usize = 3;
+        match self {
+            Reach::Sites(sites) if sites.len() > 1 => {
+                let first = sites[..sites.len().min(SHOWN)].join(", ");
+                Some(if sites.len() > SHOWN { format!("{first}, …") } else { first })
+            }
+            Reach::Unstated => Some("The script names no sites".to_owned()),
+            Reach::Unknown => Some("It may run on every site".to_owned()),
+            _ => None,
+        }
+    }
+
+    /// Whether the row carries a warning: every site, or possibly every site.
+    pub fn warns(&self) -> bool {
+        matches!(self, Reach::Everywhere | Reach::Unstated | Reach::Unknown)
+    }
+
+    /// The sites to list when the row is expanded — empty when there is no
+    /// list to show.
+    pub fn sites(&self) -> &[String] {
+        match self {
+            Reach::Sites(sites) if sites.len() > 1 => sites,
+            _ => &[],
+        }
+    }
+}
+
+/// The rows for `url`, from what is known about it so far.
+pub fn summary(url: &str, details: &Details) -> Summary {
+    let source = preview::host(url).unwrap_or_else(|| url.to_owned());
+    let file = preview::file_name(url).unwrap_or_else(|| source.clone());
+    match details {
+        Details::Reading => Summary {
+            name: file,
+            note: Some("Reading what the script says about itself…".to_owned()),
+            version: None,
+            source,
+            reach: Reach::Reading,
+        },
+        Details::Unread(why) => Summary {
+            name: file,
+            note: Some(format!("Its details could not be read: {why}")),
+            version: None,
+            source,
+            reach: Reach::Unknown,
+        },
+        Details::Read(preview) => Summary {
+            name: preview.name.clone().unwrap_or(file),
+            note: preview.description.clone(),
+            version: preview.version.clone(),
+            source,
+            reach: match &preview.runs_on {
+                RunsOn::Everywhere => Reach::Everywhere,
+                RunsOn::Unstated => Reach::Unstated,
+                RunsOn::Sites(sites) => Reach::Sites(sites.clone()),
+            },
+        },
+    }
 }
 
 #[cfg(test)]
@@ -155,52 +214,59 @@ mod tests {
     const HIT_HIDER: &str = "https://update.greasyfork.org/scripts/1682/Google%20Hit%20Hider\
                              %20by%20Domain%20%28Search%20Filter%20%20Block%20Sites%29.user.js";
 
-    #[test]
-    fn a_read_script_is_shown_by_its_own_name_and_its_host() {
-        let details = Details::Read(Preview {
+    fn read(runs_on: RunsOn) -> Details {
+        Details::Read(Preview {
             name: Some("Google Hit Hider by Domain (Search Filter / Block Sites)".to_owned()),
             version: Some("2.4.1".to_owned()),
             description: Some("Block unwanted sites from your search results.".to_owned()),
-            runs_on: RunsOn::Sites(vec!["google.com".to_owned(), "bing.com".to_owned()]),
-        });
-        let body = body(HIT_HIDER, &details);
-        assert!(body.starts_with(
-            "<b>Google Hit Hider by Domain (Search Filter / Block Sites)</b>\n\
-             version 2.4.1 · from update.greasyfork.org\n\n\
-             Block unwanted sites from your search results.\n\n\
-             Runs on google.com, bing.com."
-        ), "{body}");
+            runs_on,
+        })
+    }
+
+    #[test]
+    fn a_read_script_is_shown_by_its_own_name_beside_its_source() {
+        let sites = ["google.com", "bing.com", "duckduckgo.com", "startpage.com"].map(String::from);
+        let summary = summary(HIT_HIDER, &read(RunsOn::Sites(sites.to_vec())));
+        assert_eq!(
+            summary,
+            Summary {
+                name: "Google Hit Hider by Domain (Search Filter / Block Sites)".to_owned(),
+                note: Some("Block unwanted sites from your search results.".to_owned()),
+                version: Some("2.4.1".to_owned()),
+                source: "update.greasyfork.org".to_owned(),
+                reach: Reach::Sites(sites.to_vec()),
+            }
+        );
+        assert_eq!(summary.reach.value(), "4 sites");
+        assert_eq!(summary.reach.note().as_deref(), Some("google.com, bing.com, duckduckgo.com, …"));
+        assert_eq!(summary.reach.sites().len(), 4, "every site is listed on expansion");
+        assert!(!summary.reach.warns());
     }
 
     /// Before the head arrives, and if it never does: the decoded file name,
-    /// never the escaped URL.
+    /// never the escaped URL — and an unread script is not assumed harmless.
     #[test]
-    fn otherwise_the_decoded_file_name_and_its_host() {
+    fn otherwise_the_decoded_file_name_and_its_source() {
         for details in [Details::Reading, Details::Unread("could not reach it".to_owned())] {
-            let body = body(HIT_HIDER, &details);
-            assert!(body.starts_with(
-                "<b>Google Hit Hider by Domain (Search Filter Block Sites).user.js</b>\n\
-                 from update.greasyfork.org"
-            ), "{body}");
-            assert!(!body.contains("%20"));
+            let summary = summary(HIT_HIDER, &details);
+            assert_eq!(summary.name, "Google Hit Hider by Domain (Search Filter Block Sites).user.js");
+            assert_eq!(summary.source, "update.greasyfork.org");
+            assert_eq!(summary.version, None);
         }
+        let unread = summary(HIT_HIDER, &Details::Unread("could not reach it".to_owned()));
+        assert_eq!(unread.note.as_deref(), Some("Its details could not be read: could not reach it"));
+        assert!(unread.reach.warns());
+        assert_eq!(unread.reach.value(), "Unknown");
     }
 
     #[test]
-    fn author_text_cannot_inject_markup() {
-        let details = Details::Read(Preview {
-            name: Some("<span size='xx-large'>AdGuard Extra</span> & co".to_owned()),
-            version: None,
-            description: Some("<a href='x'>click</a>".to_owned()),
-            runs_on: RunsOn::Everywhere,
-        });
-        let body = body("https://example.net/x.user.js", &details);
-        assert!(body.starts_with(
-            "<b>&lt;span size=&apos;xx-large&apos;&gt;AdGuard Extra&lt;/span&gt; &amp; co</b>\n\
-             from example.net"
-        ), "{body}");
-        assert!(body.contains("&lt;a href=&apos;x&apos;&gt;click&lt;/a&gt;"));
-        assert!(body.contains("Runs on <b>every site</b>."));
+    fn every_site_warns_and_one_site_is_named() {
+        assert!(summary(HIT_HIDER, &read(RunsOn::Everywhere)).reach.warns());
+        let unstated = summary(HIT_HIDER, &read(RunsOn::Unstated)).reach;
+        assert!(unstated.warns());
+        assert_eq!(unstated.value(), "Every site");
+        let one = summary(HIT_HIDER, &read(RunsOn::Sites(vec!["ted.com".to_owned()]))).reach;
+        assert_eq!((one.value().as_str(), one.note(), one.sites().len()), ("ted.com", None, 0));
     }
 
     /// What the userscript in `data/userscripts/` builds: the script URL

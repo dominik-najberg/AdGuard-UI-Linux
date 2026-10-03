@@ -36,7 +36,7 @@ use libadwaita as adw;
 
 use adguard_core::preview;
 
-use crate::install_link::{self, Details};
+use crate::install_link::{self, Details, Reach, Summary};
 use crate::{toast, worker};
 
 /// One read of everything the page renders.
@@ -973,12 +973,14 @@ impl ExtensionsPage {
     /// and Escape are Cancel throughout, and Add is a plain button rather than
     /// a highlighted one, so the eye does not land on it first.
     async fn confirm_install(&self, url: &str) -> bool {
-        let dialog = adw::AlertDialog::new(Some("Add this userscript?"), None);
-        // Markup for the bold name; `install_link::body` escapes everything the
-        // script's author wrote.
-        dialog.set_body_use_markup(true);
-        dialog.set_body(&install_link::body(url, &Details::Reading));
-        dialog.set_extra_child(Some(&full_address(url)));
+        let dialog = adw::AlertDialog::new(Some("Add this userscript?"), Some(INSTALL_BODY));
+        dialog.set_body_use_markup(false);
+        // Room for the rows to read as rows rather than as a column of
+        // wrapped fragments.
+        dialog.set_prefer_wide_layout(true);
+        let details = Rc::new(InstallDetails::new(url));
+        details.show(&install_link::summary(url, &Details::Reading));
+        dialog.set_extra_child(Some(&details.list));
         dialog.add_response("cancel", "Cancel");
         dialog.add_response("install", "Add");
         dialog.set_default_response(Some("cancel"));
@@ -992,8 +994,8 @@ impl ExtensionsPage {
         countdown.set_blocked(true);
         {
             let url = url.to_owned();
-            let dialog = dialog.downgrade();
             let countdown = countdown.clone();
+            let details_view = details.clone();
             glib::spawn_future_local(async move {
                 let fetched = {
                     let url = url.clone();
@@ -1004,9 +1006,9 @@ impl ExtensionsPage {
                     Some(Err(err)) => Details::Unread(err.to_string()),
                     None => Details::Unread("reading it failed".to_owned()),
                 };
-                if let Some(dialog) = dialog.upgrade() {
-                    dialog.set_body(&install_link::body(&url, &details));
-                }
+                // Into rows that may already be gone with the dialog — then
+                // this paints widgets nobody will see, which is harmless.
+                details_view.show(&install_link::summary(&url, &details));
                 countdown.set_blocked(false);
             });
         }
@@ -1115,27 +1117,192 @@ impl ExtensionsPage {
 }
 
 /// Read both sources, the way the page renders them.
-/// The install link's URL in full, folded away under the summary above it.
+/// The one line under an install link's question. Short, because the rows
+/// below carry the specifics and a long warning is the paragraph people skip.
+const INSTALL_BODY: &str = "Add only scripts from sources you trust. It can read and change \
+                            pages on the sites it runs on.";
+
+/// The rows under an install link's question (#29): what the script is, where
+/// it comes from, where it runs, and the address itself.
 ///
-/// Folded because the decoded name and the host are what a person decides on,
-/// and the escaped URL is mostly noise — but there, and selectable, for anyone
-/// who wants to check or copy exactly what AdGuard will fetch.
-fn full_address(url: &str) -> gtk::Expander {
-    let label = gtk::Label::builder()
-        .label(url)
+/// Built once with every row in place and filled in twice — the decoded file
+/// name while the script is read, then what it says about itself — so nothing
+/// jumps when the details arrive. Laid out as a boxed list, the way GNOME
+/// presents properties, and left-aligned: centred paragraphs are hard to scan,
+/// and this is read to make a decision.
+struct InstallDetails {
+    list: gtk::ListBox,
+    name: adw::ActionRow,
+    version: adw::ActionRow,
+    version_value: gtk::Label,
+    source_value: gtk::Label,
+    /// "Runs on" with nothing to list: one site, every site, unknown, or
+    /// still reading.
+    reach: adw::ActionRow,
+    reach_value: gtk::Label,
+    reach_warning: gtk::Image,
+    reach_spinner: adw::Spinner,
+    /// "Runs on" with a list, which it expands to show in full.
+    sites: adw::ExpanderRow,
+    sites_value: gtk::Label,
+    listed: RefCell<Vec<adw::ActionRow>>,
+}
+
+impl InstallDetails {
+    fn new(url: &str) -> Self {
+        let list = gtk::ListBox::builder()
+            .selection_mode(gtk::SelectionMode::None)
+            .build();
+        list.add_css_class("boxed-list");
+
+        let name = static_row("");
+        name.set_title_lines(3);
+        name.set_subtitle_lines(2);
+        list.append(&name);
+
+        let version = static_row("Version");
+        let version_value = value_label();
+        version.add_suffix(&version_value);
+        list.append(&version);
+
+        let source = static_row("Source");
+        let source_value = value_label();
+        source_value.set_label(&install_link::summary(url, &Details::Reading).source);
+        source.add_suffix(&source_value);
+        list.append(&source);
+
+        let reach = static_row("Runs on");
+        let reach_spinner = adw::Spinner::builder()
+            .width_request(16)
+            .height_request(16)
+            .valign(gtk::Align::Center)
+            .build();
+        let reach_warning = gtk::Image::from_icon_name("dialog-warning-symbolic");
+        reach_warning.add_css_class("warning");
+        reach_warning.set_tooltip_text(Some("Warning"));
+        let reach_value = value_label();
+        reach.add_suffix(&reach_spinner);
+        reach.add_suffix(&reach_warning);
+        reach.add_suffix(&reach_value);
+        list.append(&reach);
+
+        let sites = adw::ExpanderRow::builder().title("Runs on").build();
+        sites.set_use_markup(false);
+        let sites_value = value_label();
+        sites.add_suffix(&sites_value);
+        list.append(&sites);
+
+        list.append(&address_row(url));
+
+        Self {
+            list,
+            name,
+            version,
+            version_value,
+            source_value,
+            reach,
+            reach_value,
+            reach_warning,
+            reach_spinner,
+            sites,
+            sites_value,
+            listed: RefCell::new(Vec::new()),
+        }
+    }
+
+    fn show(&self, summary: &Summary) {
+        self.name.set_title(&summary.name);
+        let note = summary.note.as_deref().unwrap_or("");
+        self.name.set_subtitle(note);
+        // The description is cut to two lines on the row; all of it is here.
+        self.name.set_tooltip_text(summary.note.as_deref());
+
+        self.version.set_visible(summary.version.is_some());
+        self.version_value
+            .set_label(summary.version.as_deref().unwrap_or(""));
+        self.source_value.set_label(&summary.source);
+
+        let reach = &summary.reach;
+        let listing = !reach.sites().is_empty();
+        self.reach.set_visible(!listing);
+        self.sites.set_visible(listing);
+
+        self.reach_value.set_label(&reach.value());
+        self.reach.set_subtitle(reach.note().as_deref().unwrap_or(""));
+        self.reach_spinner.set_visible(matches!(reach, Reach::Reading));
+        // Icon and text both, so the warning does not rest on colour.
+        self.reach_warning.set_visible(reach.warns());
+        if reach.warns() {
+            self.reach_value.add_css_class("warning");
+        } else {
+            self.reach_value.remove_css_class("warning");
+        }
+
+        self.sites_value.set_label(&reach.value());
+        self.sites.set_subtitle(reach.note().as_deref().unwrap_or(""));
+        for row in self.listed.borrow_mut().drain(..) {
+            self.sites.remove(&row);
+        }
+        for site in reach.sites() {
+            let row = static_row(site);
+            self.sites.add_row(&row);
+            self.listed.borrow_mut().push(row);
+        }
+    }
+}
+
+/// A row that states something. Not activatable and not focusable, so the
+/// keyboard passes straight over it to the rows that do something and to the
+/// buttons — and author text in the title is never read as markup.
+fn static_row(title: &str) -> adw::ActionRow {
+    let row = adw::ActionRow::builder().title(title).build();
+    row.set_use_markup(false);
+    row.set_activatable(false);
+    row.set_focusable(false);
+    row
+}
+
+/// The value beside a row's title, right-aligned and wrapping rather than
+/// pushing the dialog wider.
+fn value_label() -> gtk::Label {
+    gtk::Label::builder()
         .use_markup(false)
-        .selectable(true)
         .wrap(true)
-        .wrap_mode(gtk::pango::WrapMode::Char)
-        .xalign(0.0)
-        .build();
-    label.add_css_class("caption");
-    // Selectable labels take focus, and the focus belongs on Cancel.
-    label.set_focusable(false);
-    gtk::Expander::builder()
-        .label("Full address")
-        .child(&label)
+        .wrap_mode(gtk::pango::WrapMode::WordChar)
+        .xalign(1.0)
+        .justify(gtk::Justification::Right)
+        .max_width_chars(28)
+        .valign(gtk::Align::Center)
         .build()
+}
+
+/// The URL in full, folded away: the name and source are what a person
+/// decides on, and the escaped URL is mostly noise — but it is there,
+/// selectable and copyable, for anyone checking exactly what AdGuard fetches.
+fn address_row(url: &str) -> adw::ExpanderRow {
+    let row = adw::ExpanderRow::builder().title("Full address").build();
+    row.set_use_markup(false);
+
+    let address = adw::ActionRow::builder().title(url).build();
+    address.set_use_markup(false);
+    address.set_title_lines(0);
+    address.set_title_selectable(true);
+    address.set_activatable(false);
+    address.add_css_class("caption");
+
+    let copy = gtk::Button::from_icon_name("edit-copy-symbolic");
+    copy.add_css_class("flat");
+    copy.set_valign(gtk::Align::Center);
+    copy.set_tooltip_text(Some("Copy address"));
+    let text = url.to_owned();
+    copy.connect_clicked(move |button| {
+        button.clipboard().set_text(&text);
+        button.set_tooltip_text(Some("Copied"));
+    });
+    address.add_suffix(&copy);
+
+    row.add_row(&address);
+    row
 }
 
 /// How long Add stays greyed out after an install link's dialog appears, or

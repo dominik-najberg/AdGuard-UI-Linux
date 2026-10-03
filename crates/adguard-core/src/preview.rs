@@ -30,9 +30,6 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 /// and its block ends inside the first 2 KB.
 pub const LIMIT: u64 = 64 * 1024;
 
-/// How many sites are named before the rest are counted instead.
-const SITES_SHOWN: usize = 6;
-
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum Error {
     #[error("could not reach {0}")]
@@ -65,20 +62,6 @@ pub enum RunsOn {
     /// that means, and the generous reading is *every site*, so it is not
     /// presented as *nowhere*.
     Unstated,
-}
-
-impl RunsOn {
-    /// The sites as one line: the first few, then how many more.
-    pub fn summary(&self) -> Option<String> {
-        let RunsOn::Sites(sites) = self else {
-            return None;
-        };
-        let shown = sites[..sites.len().min(SITES_SHOWN)].join(", ");
-        Some(match sites.len().saturating_sub(SITES_SHOWN) {
-            0 => shown,
-            more => format!("{shown} and {more} more"),
-        })
-    }
 }
 
 /// Fetch the head of the script at `url` and read its metadata block.
@@ -379,18 +362,6 @@ mod tests {
         let preview = parse(source).unwrap();
         assert_eq!(preview.name.as_deref(), Some("Cut"));
         assert_eq!(preview.version.as_deref(), Some("1"));
-    }
-
-    #[test]
-    fn a_long_list_of_sites_is_summarised() {
-        let sites: Vec<String> = (1..=9).map(|n| format!("site{n}.example")).collect();
-        let summary = RunsOn::Sites(sites).summary().unwrap();
-        assert_eq!(
-            summary,
-            "site1.example, site2.example, site3.example, site4.example, site5.example, \
-             site6.example and 3 more"
-        );
-        assert_eq!(RunsOn::Everywhere.summary(), None);
     }
 
     /// The text a hostile script could use to make its name read as something
