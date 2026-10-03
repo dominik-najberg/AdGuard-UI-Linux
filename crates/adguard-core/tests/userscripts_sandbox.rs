@@ -488,6 +488,9 @@ fn a_missing_url_and_a_non_userscript_are_both_refused() {
     };
     let server = Server::start();
     server.serve("/plain.txt", "this is not a userscript\n".to_owned());
+    // Counted rather than assumed: the sandbox is seeded from this machine's
+    // install, which may hold more than the AdGuard Extra a stock one ships.
+    let before = sandbox.read().len();
 
     for url in [server.url("/nothing-here.user.js"), server.url("/plain.txt")] {
         match sandbox.cli.userscripts_install(&url) {
@@ -498,7 +501,7 @@ fn a_missing_url_and_a_non_userscript_are_both_refused() {
             other => panic!("{url} should have been refused, got {other:?}"),
         }
     }
-    assert_eq!(sandbox.read().len(), 1, "only AdGuard Extra is installed");
+    assert_eq!(sandbox.read().len(), before, "a refused install adds nothing");
 }
 
 /// The boundary that forces this suite to run a server: a local file is not an
