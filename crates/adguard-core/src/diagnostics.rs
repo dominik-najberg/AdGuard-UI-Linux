@@ -1075,6 +1075,7 @@ pub(crate) mod tests {
             profile,
             database: PathBuf::from("/home/someone/.pki/nssdb/cert9.db"),
             state,
+            stale: 0,
         };
         let profile = |number, default| Profile {
             name: String::from("Jan Kowalski"),

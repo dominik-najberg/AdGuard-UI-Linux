@@ -100,6 +100,24 @@
 //! reports success only when that reading says trusted: a `certutil` that exits
 //! 0 is not taken as evidence, as no command's exit status is here.
 //!
+//! # Renewing: [`renew`], for a CA AdGuard regenerated
+//!
+//! AdGuard CLI generates a new CA whenever it has lost the old one's key —
+//! measured three times in its own logs, each after a licence activation
+//! (`cli::Error::Unlicensed`). Every store that trusted the old CA then fails
+//! every filtered page, and still holds the old certificate under the same
+//! nickname. That leftover is the evidence [`Store::stale`] counts: someone,
+//! the installer or this application at the user's request, put AdGuard's CA
+//! in this store before. So a store with a stale copy is renewed without
+//! asking again — the old copies out, the current one in with the installer's
+//! trust — while a store that never held AdGuard's CA is still only ever
+//! changed by the *Add to Browsers* button.
+//!
+//! `certutil -D -n` deletes by nickname, one certificate a call, and which of
+//! several same-named ones it takes is NSS's choice. So [`renew`] deletes them
+//! all, current one included, and adds the current one back: the only order
+//! that cannot leave a stale copy behind.
+//!
 //! [issue #21]: https://github.com/dominik-najberg/AdGuard-UI-Linux/issues/21
 
 use std::fs;
@@ -121,6 +139,16 @@ const TRUST: [u8; 4] = 0xCE53_4353_u32.to_be_bytes();
 
 /// `CKT_NSS_TRUSTED_DELEGATOR` — a CA trusted to issue for websites.
 const TRUSTED_DELEGATOR: [u8; 4] = 0xCE53_4352_u32.to_be_bytes();
+
+/// Certificates under the CA's nickname that are not the CA: earlier AdGuard
+/// CAs. `CKA_LABEL` is `a3`, measured on the reference machine's stores, where
+/// it holds the nickname as bytes — hence the cast, which makes a label stored
+/// as text compare the same.
+const STALE: &str = "
+    SELECT count(*)
+    FROM nssPublic
+    WHERE a0 = ?2 AND CAST(a3 AS BLOB) = ?3 AND a11 != ?1
+";
 
 /// The certificate by its bytes, and its server-auth trust when a trust row
 /// is there. One row per copy of the certificate; none when it is absent.
@@ -213,6 +241,10 @@ pub struct Store {
     /// The `cert9.db` that was read, so a row can name it.
     pub database: PathBuf,
     pub state: StoreState,
+    /// Certificates under the CA's nickname that are not the current CA —
+    /// AdGuard CAs from before a regeneration. Zero when none, or when the
+    /// store could not be read. See the module docs on renewing.
+    pub stale: usize,
 }
 
 impl Store {
@@ -284,7 +316,7 @@ impl BrowserStores {
     /// focus re-reads both.
     pub fn detect(certificate: &Path) -> Option<Self> {
         let der = crate::trust::der(certificate)?;
-        Some(Self::inspect(&crate::browser::home()?, &der))
+        Some(Self::inspect_as(&crate::browser::home()?, &der, &nickname(certificate)))
     }
 
     /// The same check against an explicit `$HOME` and certificate.
@@ -294,6 +326,11 @@ impl BrowserStores {
     /// are only reachable against stores built for the purpose — which a test
     /// may do in a temporary directory, and must never do to a real browser.
     pub fn inspect(home: &Path, der: &[u8]) -> Self {
+        Self::inspect_as(home, der, crate::trust::DEFAULT_CERTIFICATE_NAME)
+    }
+
+    /// [`Self::inspect`], counting stale copies under `nickname`.
+    pub fn inspect_as(home: &Path, der: &[u8], nickname: &str) -> Self {
         let mut stores = Vec::new();
 
         for (browser, root, scanned) in firefox_roots(home) {
@@ -320,6 +357,7 @@ impl BrowserStores {
                         dir,
                     }),
                     state: read_state(&database, der),
+                    stale: stale(&database, der, nickname),
                     database,
                 });
             }
@@ -333,6 +371,7 @@ impl BrowserStores {
                     scanned,
                     profile: None,
                     state: read_state(&database, der),
+                    stale: stale(&database, der, nickname),
                     database,
                 });
             }
@@ -348,6 +387,17 @@ impl BrowserStores {
         self.stores
             .iter()
             .filter(|store| matches!(store.state, StoreState::Missing | StoreState::Untrusted))
+            .collect()
+    }
+
+    /// Every store holding an earlier AdGuard CA — the ones [`renew`] may
+    /// change without asking, because AdGuard's CA was put there before.
+    /// Includes a store that already trusts the current CA beside the old
+    /// one, which renewing only tidies.
+    pub fn renewable(&self) -> Vec<&Store> {
+        self.stores
+            .iter()
+            .filter(|store| store.stale > 0 && !matches!(store.state, StoreState::Unreadable(_)))
             .collect()
     }
 }
@@ -402,12 +452,8 @@ pub fn certutil() -> Option<PathBuf> {
 pub fn add(store: &Store, certutil: &Path, certificate: &Path) -> Result<(), String> {
     let der = crate::trust::der(certificate)
         .ok_or_else(|| format!("{} holds no certificate", certificate.display()))?;
-    let nickname = certificate
-        .file_stem()
-        .map(|stem| stem.to_string_lossy().into_owned())
-        .unwrap_or_else(|| crate::trust::DEFAULT_CERTIFICATE_NAME.to_owned());
-    let mut target = std::ffi::OsString::from("sql:");
-    target.push(store.dir());
+    let nickname = nickname(certificate);
+    let target = target(store);
 
     let output = std::process::Command::new(certutil)
         .arg("-A")
@@ -437,6 +483,62 @@ pub fn add(store: &Store, certutil: &Path, certificate: &Path) -> Result<(), Str
             "certutil reported success, but the store still reads as {other:?}"
         )),
     }
+}
+
+/// Replace every certificate under the CA's nickname in `store` with the
+/// current CA, trusted as the installer trusts it, and check that it took.
+///
+/// Returns how many stale copies went. See the module docs for why the current
+/// one is deleted too, and why a store with stale copies is renewed unasked.
+pub fn renew(store: &Store, certutil: &Path, certificate: &Path) -> Result<usize, String> {
+    let der = crate::trust::der(certificate)
+        .ok_or_else(|| format!("{} holds no certificate", certificate.display()))?;
+    let nickname = nickname(certificate);
+    let target = target(store);
+
+    // Bounded: a `certutil` that reports success and deletes nothing must not
+    // spin. Each pass removes one; the reference machine had four.
+    for _ in 0..RENEW_LIMIT {
+        let deleted = std::process::Command::new(certutil)
+            .arg("-D")
+            .arg("-n")
+            .arg(&nickname)
+            .arg("-d")
+            .arg(&target)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map_err(|err| format!("could not run {}: {err}", certutil.display()))?;
+        if !deleted.success() {
+            break;
+        }
+    }
+    let left = stale(&store.database, &der, &nickname);
+    if left > 0 {
+        return Err(format!("{left} earlier AdGuard certificates are still in the store"));
+    }
+    add(store, certutil, certificate)?;
+    Ok(store.stale)
+}
+
+/// The most deletions [`renew`] attempts in one store.
+const RENEW_LIMIT: usize = 64;
+
+/// The nickname the installer gives the CA: the certificate's file name
+/// without its extension.
+fn nickname(certificate: &Path) -> String {
+    certificate
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_else(|| crate::trust::DEFAULT_CERTIFICATE_NAME.to_owned())
+}
+
+/// The store as `certutil -d` takes it.
+fn target(store: &Store) -> std::ffi::OsString {
+    let mut target = std::ffi::OsString::from("sql:");
+    target.push(store.dir());
+    target
 }
 
 /// One `[ProfileN]` section of `profiles.ini`.
@@ -508,6 +610,24 @@ fn read_state(database: &Path, der: &[u8]) -> StoreState {
         Ok(_) => StoreState::Untrusted,
         Err(err) => StoreState::Unreadable(err.to_string()),
     }
+}
+
+/// How many certificates under `nickname` in `database` are not `der`. Zero
+/// when the store cannot be read: an unreadable store is never changed.
+fn stale(database: &Path, der: &[u8], nickname: &str) -> usize {
+    let count = || -> rusqlite::Result<i64> {
+        let conn = Connection::open_with_flags(
+            database,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        conn.busy_timeout(Duration::from_millis(200))?;
+        conn.query_row(
+            STALE,
+            rusqlite::params![der, &CERTIFICATE[..], nickname.as_bytes()],
+            |row| row.get(0),
+        )
+    };
+    count().map_or(0, |n| usize::try_from(n).unwrap_or(0))
 }
 
 /// The server-auth trust of every copy of the certificate in `database`.
@@ -666,6 +786,44 @@ mod tests {
         );
         let check = BrowserStores::inspect(home.path(), OURS);
         assert_eq!(check.stores[0].state, StoreState::Trusted);
+    }
+
+    /// The older CA beside the current one is counted as stale, and the store
+    /// is renewable; a store with the current CA alone is not.
+    #[test]
+    fn an_older_certificate_of_the_same_name_is_stale() {
+        let home = Sandbox::new("stale");
+        store(
+            &home.path().join(".pki/nssdb"),
+            &[Entry::Trusted(OLD), Entry::Trusted(OURS)],
+        );
+        let check = BrowserStores::inspect(home.path(), OURS);
+        assert_eq!(check.stores[0].stale, 1);
+        assert_eq!(check.renewable().len(), 1);
+
+        let home = Sandbox::new("fresh");
+        store(&home.path().join(".pki/nssdb"), &[Entry::Trusted(OURS)]);
+        let check = BrowserStores::inspect(home.path(), OURS);
+        assert_eq!(check.stores[0].stale, 0);
+        assert!(check.renewable().is_empty());
+    }
+
+    /// The case renewing exists for: the old CA trusted, the current one absent.
+    /// And a store that never held AdGuard's CA is not renewable — only the
+    /// button adds to it.
+    #[test]
+    fn a_regenerated_ca_is_renewable_and_a_never_trusted_store_is_not() {
+        let home = Sandbox::new("regenerated");
+        store(&home.path().join(".pki/nssdb"), &[Entry::Trusted(OLD)]);
+        let check = BrowserStores::inspect(home.path(), OURS);
+        assert_eq!(check.stores[0].state, StoreState::Missing);
+        assert_eq!(check.renewable().len(), 1);
+
+        let home = Sandbox::new("never");
+        store(&home.path().join(".pki/nssdb"), &[]);
+        let check = BrowserStores::inspect(home.path(), OURS);
+        assert_eq!(check.unmet().len(), 1);
+        assert!(check.renewable().is_empty());
     }
 
     /// Present is not trusted. Each shape was produced with `certutil` on a
@@ -851,6 +1009,53 @@ mod tests {
 
         // And a second time changes nothing and still succeeds.
         add(&after.stores[0], &certutil, &certificate).expect("add again");
+    }
+
+    /// [`renew`] with the real `certutil`: a store holding a different
+    /// certificate under the CA's nickname — made here with `certutil -S`,
+    /// standing in for a CA from before a regeneration — ends up with the
+    /// current CA alone, trusted. Skips as [`add`]'s test does.
+    #[test]
+    fn renew_replaces_an_earlier_ca_with_the_current_one() {
+        let (Some(certutil), Some(certificate)) = (
+            certutil(),
+            crate::paths::certificate(crate::trust::DEFAULT_CERTIFICATE_NAME)
+                .filter(|path| path.is_file()),
+        ) else {
+            eprintln!("skipping: no certutil or no certificate on this machine");
+            return;
+        };
+        let home = Sandbox::new("renew");
+        let dir = home.path().join(".pki/nssdb");
+        fs::create_dir_all(&dir).unwrap();
+        let target = format!("sql:{}", dir.display());
+        let made = std::process::Command::new(&certutil)
+            .args(["-N", "--empty-password", "-d", &target])
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let noise = home.path().join("noise");
+        fs::write(&noise, [7u8; 64]).unwrap();
+        let old = std::process::Command::new(&certutil)
+            .args(["-S", "-x", "-n", &nickname(&certificate), "-s", "CN=Earlier AdGuard CA"])
+            .args(["-t", INSTALLER_TRUST, "-k", "rsa", "-g", "2048", "-z"])
+            .arg(&noise)
+            .args(["-d", &target])
+            .stdin(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(old.success());
+
+        let der = crate::trust::der(&certificate).unwrap();
+        let before = BrowserStores::inspect(home.path(), &der);
+        assert_eq!(before.stores[0].state, StoreState::Missing, "{before:?}");
+        assert_eq!(before.renewable().len(), 1, "{before:?}");
+
+        assert_eq!(renew(&before.stores[0], &certutil, &certificate), Ok(1));
+        let after = BrowserStores::inspect(home.path(), &der);
+        assert_eq!(after.stores[0].state, StoreState::Trusted);
+        assert_eq!(after.stores[0].stale, 0);
+        assert!(after.renewable().is_empty());
     }
 
     /// A `certutil` that exits 0 and does nothing is not believed.
