@@ -11,6 +11,39 @@ This file is the one changelog.
 
 ---
 
+## 1.7.1 — 3 October 2026
+
+### A failed start stays on screen, and says what to do
+
+When AdGuard refused to start protection, the application showed a toast that vanished in seconds and the Status page went on saying "Protection is off". The failure now stays on the main panel — **Protection could not start**, the reason AdGuard gave in its own words, and **Retry protection** — until the proxy is confirmed running. It lasts for the session and is not saved between launches.
+
+AdGuard CLI can report this refusal and still exit with success, and its message for a missing certificate, `Failed to start the AdGuard proxy server: No certificate`, was not recognised as a failure at all. It is now.
+
+### Fix certificate
+
+For a missing certificate the panel adds **Fix certificate** beside Retry protection. It opens a terminal running AdGuard's own `cert` command, so the password and the question about trusting the certificate on this computer are asked there, and this application never sees the password. If no terminal can be found, the command is copied instead.
+
+`cert` generates a new certificate **before** it asks about trusting it, so closing the terminal at that question leaves a certificate that exists and that the system does not trust: protection starts, and HTTPS sites in browsers that use the system store show warnings. The application now says so:
+
+- While the proxy is running with HTTPS filtering on, Status shows a **certificate is not trusted** panel until the system trusts it. It goes away by itself.
+- The tray icon turns to a warning triangle, its tooltip reads "certificate not trusted", and its menu offers **Fix certificate…**. That is the only place this is visible when the application starts hidden in the tray. A proxy that is serving nothing still takes priority and reads "not filtering".
+
+**`cert` cannot repair every untrusted certificate, and the panel says which kind it is.** When an older certificate of the same name is already installed in the system, AdGuard's `cert` and its installer both stop at the old file and report success, leaving the system exactly as it was. In that case the panel names the cause and its button reads **Show the fix**, which opens the Protection page, where the command that works — it removes the old certificate first — is shown with this computer's paths and a copy button. Nothing is run for you: that command needs `sudo` and deletes a file from the system's trust store.
+
+Only the system's store is checked here. Browsers' own stores are on the Protection page, as before.
+
+**Arriving at the fix is marked.** *Show the fix* scrolls the Protection page to the certificate group and pulses its edge twice in the warning colour. The group then stays tinted, with its copy button in the accent colour and keyboard focus on it, until you copy the command or the problem is gone. Copying says what comes next — run it in a terminal; the page updates when it has worked — and when the system does trust the certificate, a notice says so. With animations turned off in the system settings the pulse is skipped and the tint is what remains. The same happens from Diagnostics: a certificate problem, or a browser store missing the certificate, now leads to that group instead of to the top of the page. The group looks as before when you reach the page any other way.
+
+### No more "Settings reloaded" every few seconds
+
+AdGuard CLI rewrites `proxy.yaml` even while it is only being asked for its status, and a read at the wrong moment saw an empty or half-written file. The application took that for an edit of every setting, cleared and restored them, and showed "Settings reloaded — proxy.yaml changed" again and again. An empty or non-mapping file is now ignored, and a changed file is read a second time 25 ms later before it is believed. This guards against partial writes; it does not make AdGuard's writes atomic.
+
+### What this release does not do
+
+It does not find out why a certificate or licence went missing in the first place, and it does not reset, regenerate or trust anything by itself. The only thing that touches the certificate is the command you choose to run from **Fix certificate**, in your own terminal.
+
+---
+
 ## 1.7.0 — 1 October 2026
 
 ### An Activity page

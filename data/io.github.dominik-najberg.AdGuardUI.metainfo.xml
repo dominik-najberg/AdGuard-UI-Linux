@@ -53,6 +53,18 @@
     application is its first release.
   -->
   <releases>
+    <release version="1.7.1" type="stable" date="2026-10-03">
+      <url type="details">https://github.com/dominik-najberg/AdGuard-UI-Linux/releases/tag/v1.7.1</url>
+      <description>
+        <p>A failed start is no longer easy to miss, and a missing certificate has a way to fix it:</p>
+        <ul>
+          <li>When AdGuard refuses to start protection, the Status page keeps the reason and a Retry protection button until the proxy is running, instead of a toast that disappears.</li>
+          <li>A missing certificate adds Fix certificate, which opens a terminal running AdGuard's own certificate command. Your password is asked there, not by this application.</li>
+          <li>A certificate the system does not trust now shows a warning on the Status page, and as a warning icon and a menu entry in the tray. When an older certificate of the same name is in the way, which AdGuard's own command cannot fix, the warning says so and points to the Protection page for the command that can.</li>
+          <li>Settings no longer reload again and again with "proxy.yaml changed" when AdGuard rewrites its file while reporting its status.</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.7.0" type="stable" date="2026-10-01">
       <url type="details">https://github.com/dominik-najberg/AdGuard-UI-Linux/releases/tag/v1.7.0</url>
       <description>
