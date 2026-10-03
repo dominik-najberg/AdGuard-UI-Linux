@@ -729,7 +729,7 @@ Three decisions in it are this section's rather than the page's.
 
 The issue's other three items were not scoped by this entry. All three are built now; the last entry of this section says how.
 
-**The Activity page** (§5), built 30 September 2026 for the first item of [issue #21](https://github.com/dominik-najberg/AdGuard-UI-Linux/issues/21) — the item this section kept out of v2 as *its own milestone, behind a spike*. The spike's read-only half is contract §9. Its other half — what `log_level` changes, whether a second CLI version keeps the shape — needs the owner's permission and is still not taken; what field 11 counts was narrowed on 3 October 2026 by reading alone (contract §9). The page is built so that it does not need those answers: it reads only the columns §9 measured, and a line in any other shape is counted as unread and reported on the page rather than guessed at.
+**The Activity page** (§5), built 30 September 2026 for the first item of [issue #21](https://github.com/dominik-najberg/AdGuard-UI-Linux/issues/21) — the item this section kept out of v2 as *its own milestone, behind a spike*. The spike's read-only half is contract §9. Its other half was taken on 3 October 2026 in a sandbox (what `log_level` changes, what field 11 counts); only whether a second CLI version keeps the shape is still open. The page is built so that it does not need those answers: it reads only the columns §9 measured, and a line in any other shape is counted as unread and reported on the page rather than guessed at.
 
 Three decisions in it are this section's rather than the page's.
 
@@ -757,7 +757,7 @@ Three decisions in it are this section's rather than the module's.
 - **HTTP/3** gets one machine-wide line in Diagnostics, the share of the log that went over QUIC and how much of it was logged with no action. What that `-` action means is still not measured (contract §9), so the line states counts and draws no conclusion from them.
 - **The report can be saved to a file** as well as copied, with the same text.
 
-What is still open from the issue is the other half of the stats spike (contract §9): what `trace` changes (`debug` was measured for a minute on 3 October 2026 and left the shape alone, contract §9) and whether a second CLI version keeps the log's shape. Each needs the owner's permission, because each changes a running install. Field 11 was narrowed by reading the existing log (contract §9) and needed none.
+What is still open from the issue is the other half of the stats spike (contract §9): whether a second CLI version keeps the log's shape. `log_level` and field 11 were measured in a sandbox on 3 October 2026 (contract §9): neither `debug` nor `trace` changes the shape, `trace` aborts the proxy on an HTML-filtering rule, and field 11 is not a count of rules.
 
 The command was run end to end against a scratch `$HOME` holding a real store in each state. With the system already trusted, the installer printed "Certificate already exists in system trust store", never reached its `sudo`, and left every store trusted; `-f` with an absolute profile path reached the non-default profile. That is the measurement behind the Protection page saying the command needs no password in that state.
 
