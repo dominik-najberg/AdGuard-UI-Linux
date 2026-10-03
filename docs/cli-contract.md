@@ -2164,3 +2164,13 @@ re-derives it from the rule rather than trusting the observation.
 two commands for the two that ship off — install, then disable.
 
 **None of these is proof of anything**, as everywhere in this file. `remove` reports success and the caller confirms by the pair of files being gone and the entry having left `proxy.yaml`; a switch confirms against `proxy.yaml`; an install confirms against the directory. The re-read is the verdict, and the sentence is only a hint about which re-read to expect.
+
+### The proxy does not catch an install link, and an escaped filename keeps its escapes
+
+Two measurements behind install links from the browser ([issue #29](https://github.com/dominik-najberg/AdGuard-UI-Linux/issues/29)), taken 3 October 2026 on v1.4.13.
+
+**A `.user.js` response passes through untouched.** AdGuard for Windows and Android replace the response for a userscript URL with an install prompt. AdGuard CLI does not. Fetched through `127.0.0.1:3129` with AdGuard's certificate, a Greasy Fork script came back byte-identical to a direct fetch — `text/javascript`, 162,053 bytes both ways — with a browser's `Accept: text/html` and without. The listing page that links to it, fetched the same way, *did* carry AdGuard Extra's injected `<script>`, and the access log records it as `MODIFIED_CONTENT`. So userscripts reach HTML pages and nothing else, which is why the click is caught on the listing page by a userscript of this application's own rather than on the script's URL, and why opening a `.user.js` address directly still shows it as text.
+
+Do not look for the injected scripts in the page's DOM to tell whether that happened: they remove their own `<script>` elements once they have run, and the page's resource timings show no request for them either. The access log's `MODIFIED_CONTENT` is the evidence, or the behaviour of the script itself.
+
+**An install's id is the URL's filename stem exactly as written, escapes included.** Greasy Fork serves every script under its title, percent-encoded, so a script installed from it lands under an id like `Google%20Hit%20Hider%20by%20Domain%20%28Search%20Filter%20%20Block%20Sites%29`. Nothing decodes it. The id looks odd and the row never shows it — the row shows the `@name` — and it works like any other: `enable`, `disable` and `remove` all accept it, measured against a loopback server in `an_escaped_filename_keeps_its_escapes_and_can_be_named`. A link is therefore passed to `install` exactly as the page wrote it, and not decoded first, which would put spaces and parentheses into a URL the CLI then has to fetch.

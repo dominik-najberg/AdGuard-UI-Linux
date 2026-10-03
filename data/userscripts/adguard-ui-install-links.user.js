@@ -1,9 +1,11 @@
 // ==UserScript==
 // @name         AdGuard UI install links
 // @namespace    https://github.com/dominik-najberg/AdGuard-UI-Linux
-// @version      0.1.0
+// @version      1.0.0
 // @description  Sends clicks on userscript install links to AdGuard UI, which asks before adding them to AdGuard.
-// @homepage     https://github.com/dominik-najberg/AdGuard-UI-Linux/issues/29
+// @homepage     https://github.com/dominik-najberg/AdGuard-UI-Linux#installing-userscripts-from-the-browser
+// @downloadURL  https://raw.githubusercontent.com/dominik-najberg/AdGuard-UI-Linux/main/data/userscripts/adguard-ui-install-links.user.js
+// @updateURL    https://raw.githubusercontent.com/dominik-najberg/AdGuard-UI-Linux/main/data/userscripts/adguard-ui-install-links.user.js
 // @match        https://greasyfork.org/*
 // @match        https://sleazyfork.org/*
 // @match        https://openuserjs.org/*

@@ -123,6 +123,31 @@ mod tests {
         assert_eq!(parse("adguard-ui://install-userscript?other=1"), Err(Refused::NoUrl));
     }
 
+    /// The launcher entry is what registers the scheme, and `%u` is what makes
+    /// the link an argument at all. Without either, a click does nothing and
+    /// nothing says why.
+    #[test]
+    fn the_desktop_entry_registers_the_scheme() {
+        let entry = include_str!("../../../data/io.github.dominik-najberg.AdGuardUI.desktop");
+        let key = |name: &str| {
+            entry
+                .lines()
+                .find_map(|line| line.strip_prefix(&format!("{name}=")))
+                .unwrap_or_else(|| panic!("no {name}= line"))
+        };
+        assert!(key("MimeType").split(';').any(|t| t == format!("x-scheme-handler/{SCHEME}")));
+        assert_eq!(key("Exec"), "adguard-ui %u");
+    }
+
+    /// The browser half builds exactly the link this half reads.
+    #[test]
+    fn the_userscript_builds_a_link_this_parses() {
+        let script =
+            include_str!("../../../data/userscripts/adguard-ui-install-links.user.js");
+        let prefix = format!("'{SCHEME}://{INSTALL}?url=' + encodeURIComponent(");
+        assert!(script.contains(&prefix), "the userscript no longer builds {prefix}");
+    }
+
     /// The CLI refuses these too, but with a sentence that explains nothing,
     /// and only after the user has said yes to a dialog naming them.
     #[test]

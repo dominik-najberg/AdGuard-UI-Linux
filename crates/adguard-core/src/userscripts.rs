@@ -39,7 +39,7 @@ use std::path::Path;
 use yaml_rust2::{Yaml, YamlLoader};
 
 use crate::locale::Locale;
-use crate::model::{Recommended, Userscript, RECOMMENDED};
+use crate::model::{Recommended, Userscript, INSTALL_LINKS, RECOMMENDED};
 
 /// The suffix a metadata file carries, after the id.
 const META_SUFFIX: &str = ".meta.json";
@@ -85,6 +85,14 @@ pub fn recommended(installed: &[Userscript]) -> Vec<&'static Recommended> {
         .iter()
         .filter(|entry| !installed.iter().any(|script| script.id == entry.id))
         .collect()
+}
+
+/// [`INSTALL_LINKS`], unless it is installed already.
+///
+/// Matched on the id, as [`recommended`] is and for its reason.
+pub fn install_links(installed: &[Userscript]) -> Option<&'static Recommended> {
+    let have = installed.iter().any(|script| script.id == INSTALL_LINKS.id);
+    (!have).then_some(&INSTALL_LINKS)
 }
 
 /// The ids installed in `dir`, from the metadata files present.
@@ -578,6 +586,63 @@ mod tests {
                 entry.url
             );
         }
+    }
+
+    /// The script this repository ships for install links (#29).
+    const INSTALL_LINKS_SOURCE: &str =
+        include_str!("../../../data/userscripts/adguard-ui-install-links.user.js");
+
+    /// The one-click address is this repository's own file, on `main`, and
+    /// lands under the id the catalogue expects — the same two pins
+    /// [`RECOMMENDED`] has, for the same reasons.
+    #[test]
+    fn install_links_is_this_repositorys_file() {
+        let prefix =
+            "https://raw.githubusercontent.com/dominik-najberg/AdGuard-UI-Linux/main/data/userscripts/";
+        let file = INSTALL_LINKS
+            .url
+            .strip_prefix(prefix)
+            .unwrap_or_else(|| panic!("points somewhere else: {}", INSTALL_LINKS.url));
+        assert_eq!(file, format!("{}.user.js", INSTALL_LINKS.id));
+    }
+
+    /// The row offered before installation says what the installed one will:
+    /// the name and description come from the script's own metadata block.
+    #[test]
+    fn install_links_matches_its_metadata_block() {
+        let tag = |key: &str| {
+            INSTALL_LINKS_SOURCE
+                .lines()
+                .find_map(|line| line.strip_prefix(&format!("// @{key}")))
+                .map(str::trim)
+                .unwrap_or_else(|| panic!("no @{key}"))
+        };
+        assert_eq!(tag("name"), INSTALL_LINKS.name);
+        assert_eq!(tag("description"), INSTALL_LINKS.description);
+        // Where AdGuard re-fetches it from, which has to be where it was
+        // installed from or an update would come from somewhere else.
+        assert_eq!(tag("downloadURL"), INSTALL_LINKS.url);
+        assert_eq!(tag("updateURL"), INSTALL_LINKS.url);
+    }
+
+    /// Installed next to all four of AdGuard's scripts, every one of the five
+    /// can still be switched and removed: no id is a substring of another's id
+    /// or title (see [`mark_ambiguous`]).
+    #[test]
+    fn install_links_collides_with_nothing_in_the_catalogue() {
+        let entries = RECOMMENDED.iter().chain(std::iter::once(&INSTALL_LINKS));
+        let mut scripts: Vec<Userscript> = entries
+            .map(|entry| script(entry.id, entry.name))
+            .collect();
+        mark_ambiguous(&mut scripts);
+        assert!(scripts.iter().all(|script| !script.ambiguous));
+    }
+
+    #[test]
+    fn install_links_is_offered_until_installed() {
+        assert_eq!(install_links(&[]).map(|entry| entry.id), Some(INSTALL_LINKS.id));
+        let installed = script(INSTALL_LINKS.id, INSTALL_LINKS.name);
+        assert!(install_links(&[installed]).is_none());
     }
 
     /// The four AdGuard's own applications ship, in the state they ship them.

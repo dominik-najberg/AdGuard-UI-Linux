@@ -184,6 +184,9 @@ struct Instance {
     /// it settles, the application being told to quit, is reached from
     /// [`main`], which has no window in hand and finds it through here.
     geometry: Rc<geometry::Saver>,
+    /// Install links that arrived while the first-run assistant had the window,
+    /// held for the Extensions page that finishing it builds (#29).
+    pending: RefCell<Vec<String>>,
 }
 
 impl Instance {
@@ -198,15 +201,19 @@ impl Instance {
 
     /// Hand an install link's URL to the Extensions page.
     ///
-    /// With no pages — the CLI missing, or the first-run assistant still owning
-    /// the window — there is nothing to install with, and the window already on
-    /// screen says why; the link is dropped with a line on stderr rather than
-    /// kept for a page that may never exist.
+    /// While the first-run assistant owns the window there is no page yet, but
+    /// there will be one the moment it finishes, so the link waits for it —
+    /// someone who clicked *Install* before setting AdGuard up still meant it.
+    /// With the CLI missing there will never be a page, and the window already
+    /// says why; the link is dropped with a line on stderr.
     fn offer_install(&self, url: String) {
         self.present();
-        match &self.view {
-            Some(view) => view.offer_install(url),
-            None => eprintln!("adguard-ui: cannot install {url} until AdGuard CLI is set up"),
+        match (&self.view, &self.setup) {
+            (Some(view), _) => view.offer_install(url),
+            (None, Some(_)) => self.pending.borrow_mut().push(url),
+            (None, None) => {
+                eprintln!("adguard-ui: cannot install {url} without AdGuard CLI")
+            }
         }
     }
 }
@@ -307,6 +314,7 @@ fn start(
             view: None,
             setup: Some(assistant.clone()),
             geometry: saver,
+            pending: RefCell::new(Vec::new()),
         }));
 
         assistant.connect_finished({
@@ -380,6 +388,7 @@ fn start(
         view: view.ok(),
         setup: None,
         geometry: saver,
+        pending: RefCell::new(Vec::new()),
     }));
     Ok(())
 }
@@ -408,6 +417,9 @@ fn install_main_view(
     }
 
     if let Some(instance) = ui.borrow_mut().as_mut() {
+        for url in instance.pending.take() {
+            view.offer_install(url);
+        }
         instance.view = Some(view);
         // The assistant's last strong reference. Dropping it here rather than
         // leaving it parked is what keeps a finished wizard from holding its
