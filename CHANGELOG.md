@@ -11,7 +11,7 @@ This file is the one changelog.
 
 ---
 
-## Unreleased
+## 1.8.1 — 3 October 2026
 
 ### A network that is down no longer reads as a bug in the application
 

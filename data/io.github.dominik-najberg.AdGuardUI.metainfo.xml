@@ -53,6 +53,15 @@
     application is its first release.
   -->
   <releases>
+    <release version="1.8.1" type="stable" date="2026-10-03">
+      <url type="details">https://github.com/dominik-najberg/AdGuard-UI-Linux/releases/tag/v1.8.1</url>
+      <description>
+        <p>A network that is down no longer reads as a bug in the application:</p>
+        <ul>
+          <li>When AdGuard CLI cannot reach AdGuard's servers to check the licence, the Status page now shows the CLI's own sentence instead of its usage listing under "rejected status", and does not offer activation.</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.8.0" type="stable" date="2026-10-03">
       <url type="details">https://github.com/dominik-najberg/AdGuard-UI-Linux/releases/tag/v1.8.0</url>
       <description>
