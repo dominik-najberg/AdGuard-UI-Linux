@@ -1147,7 +1147,7 @@ impl Watch {
     /// `None` covers four cases that all mean "nothing to repaint from":
     /// unchanged, unreadable, absent, and unparseable.
     ///
-    /// The snapshot advances **only on a successful parse**. The CLI rewrites
+    /// The snapshot advances **only on a stable, non-empty mapping**. The CLI rewrites
     /// this file in place, so a read can catch it half-written; storing that
     /// text would mean the completed write — differing from the torn read —
     /// looked like just another change, but storing *nothing* means the next
@@ -1159,8 +1159,19 @@ impl Watch {
             return None;
         }
 
-        // Parse before storing: see above.
+        // The CLI truncates before rewriting. Empty and partially written files
+        // can be valid YAML, so parsing alone cannot certify a complete write.
+        // Keep the last good snapshot during that window. This runs on the
+        // watch worker, never the GTK main loop; events during this read request
+        // another look after it finishes.
         let config = Config::parse(&text, &self.path).ok()?;
+        if !matches!(&config.root, Yaml::Hash(mapping) if !mapping.is_empty()) {
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        if std::fs::read_to_string(&self.path).ok()? != text {
+            return None;
+        }
         self.seen = Some(text);
         Some(config)
     }
@@ -1697,6 +1708,22 @@ stealthmode:
 
         std::fs::write(&path, format!("# a note to self\n{SAMPLE}")).expect("edit");
         assert!(watch.changed().is_some());
+    }
+
+    #[test]
+    fn truncated_rewrites_do_not_clear_rows_or_announce_restoration() {
+        let path = scratch("truncated", SAMPLE);
+        let mut watch = Watch::new(&path);
+        watch.prime();
+
+        for transient in ["", "\n", "# rewriting\n", "null\n", "{}\n", "proxy_mode"] {
+            std::fs::write(&path, transient).unwrap();
+            assert!(watch.changed().is_none(), "transient: {transient:?}");
+            std::fs::write(&path, SAMPLE).unwrap();
+            assert!(watch.changed().is_none(), "restoration is not an edit");
+        }
+        std::fs::write(&path, SAMPLE.replace("proxy_mode: 'manual'", "proxy_mode: 'auto'")).unwrap();
+        assert_eq!(watch.changed().unwrap().proxy_mode(), Some("auto"));
     }
 
     /// A torn read must not become the baseline: the completed write would then

@@ -228,6 +228,21 @@ pub struct StatusPage {
     primary_content: adw::ButtonContent,
     restart: gtk::Button,
     runtime: RefCell<Runtime>,
+    // Polling a stopped proxy must not erase the reason its last start failed.
+    start_failure: RefCell<Option<String>>,
+    certificate_command: gtk::Button,
+    /// The CLI's own words for a failed start, set apart from our guidance.
+    failure_reason: gtk::Label,
+    /// Shown after *Fix certificate* while the new CA is still not trusted.
+    trust_banner: gtk::Box,
+    trust_label: gtk::Label,
+    trust_fix: gtk::Button,
+    /// *Fix certificate* has been pressed and the trust it was after has not yet
+    /// been seen. Keeps the check going while the proxy is not (yet) running.
+    trust_watch: Cell<bool>,
+    /// What the trust check takes from `proxy.yaml`: whether HTTPS filtering is
+    /// on, and the certificate's name. Stashed by `reconcile`, like Protection's.
+    trust_inputs: RefCell<(Option<bool>, String)>,
 
     /// The three at-a-glance figures. Read from files, never from the CLI.
     modules: gtk::Label,
@@ -300,6 +315,10 @@ pub struct StatusPage {
     /// it gets it — rather than polling `status` itself, which is what a second
     /// process had to do.
     observer: RefCell<Option<Box<dyn Fn(&ProxyStatus, bool)>>>,
+    /// Told when "the system does not trust AdGuard's CA" changes, for the tray.
+    trust_observer: RefCell<Option<Box<dyn Fn(bool)>>>,
+    /// What `trust_observer` was last told, so it hears changes only.
+    trust_reported: Cell<Option<bool>>,
 
     /// Notified when a figure or a row here is clicked to go somewhere else.
     ///
@@ -359,6 +378,17 @@ impl StatusPage {
             .build();
         hero_buttons.append(&primary);
         hero_buttons.append(&restart);
+        // Beside Retry, not under it: the two are one decision — fix it, then
+        // try again — and a second row made the panel read as a stack of
+        // unrelated controls.
+        let certificate_command = gtk::Button::with_label("Fix certificate");
+        certificate_command.add_css_class("pill");
+        certificate_command.set_tooltip_text(Some(
+            "Open a terminal running AdGuard's certificate command. It asks for your \
+             password there; this app never sees it.",
+        ));
+        certificate_command.set_visible(false);
+        hero_buttons.append(&certificate_command);
 
         let hero_text = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
@@ -369,6 +399,19 @@ impl StatusPage {
         hero_text.append(&badge);
         hero_text.append(&headline);
         hero_text.append(&detail);
+        // What the CLI actually said, in a box of its own so it cannot be taken
+        // for part of our advice, and selectable so it can be pasted into a
+        // bug report.
+        let failure_reason = gtk::Label::builder()
+            .halign(gtk::Align::Start)
+            .xalign(0.0)
+            .wrap(true)
+            .selectable(true)
+            .margin_top(6)
+            .visible(false)
+            .build();
+        failure_reason.add_css_class(style::FAILURE_REASON);
+        hero_text.append(&failure_reason);
         hero_text.append(&hero_buttons);
 
         let hero = gtk::Box::builder()
@@ -380,8 +423,33 @@ impl StatusPage {
         hero.append(&shield);
         hero.append(&hero_text);
 
+        // `cert` generates a new CA *before* it asks for a password to trust it,
+        // so a terminal closed at the prompt leaves protection startable and the
+        // certificate untrusted. Nothing else on this page would say so.
+        let trust_label = gtk::Label::builder()
+            .label("AdGuard's certificate is not trusted by this system. HTTPS sites may show warnings.")
+            .xalign(0.0)
+            .wrap(true)
+            .hexpand(true)
+            .valign(gtk::Align::Center)
+            .build();
+        let trust_fix = gtk::Button::with_label("Fix certificate");
+        trust_fix.add_css_class("pill");
+        trust_fix.set_valign(gtk::Align::Center);
+        let trust_banner = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(16)
+            .margin_top(12)
+            .visible(false)
+            .build();
+        trust_banner.add_css_class("card");
+        trust_banner.add_css_class(style::TRUST_BANNER);
+        trust_banner.append(&trust_label);
+        trust_banner.append(&trust_fix);
+
         let hero_group = adw::PreferencesGroup::new();
         hero_group.add(&hero);
+        hero_group.add(&trust_banner);
 
         // ---- the three figures ----
 
@@ -574,6 +642,14 @@ impl StatusPage {
             primary_content,
             restart: restart.clone(),
             runtime: RefCell::new(Runtime::Unknown),
+            start_failure: RefCell::new(None),
+            certificate_command: certificate_command.clone(),
+            failure_reason: failure_reason.clone(),
+            trust_banner: trust_banner.clone(),
+            trust_label: trust_label.clone(),
+            trust_fix: trust_fix.clone(),
+            trust_watch: Cell::new(false),
+            trust_inputs: RefCell::new((None, adguard_core::trust::DEFAULT_CERTIFICATE_NAME.to_owned())),
             modules,
             web_filters,
             dns_filters,
@@ -602,6 +678,8 @@ impl StatusPage {
             window_visible: Cell::new(true),
             ticks: Cell::new(0),
             observer: RefCell::new(None),
+            trust_observer: RefCell::new(None),
+            trust_reported: Cell::new(None),
             navigate: RefCell::new(None),
         });
 
@@ -614,6 +692,23 @@ impl StatusPage {
                 let Some(this) = this.upgrade() else { return };
                 if let Some(action) = this.primary_action() {
                     this.act(action);
+                }
+            }
+        });
+
+        certificate_command.connect_clicked({
+            let this = Rc::downgrade(&this);
+            move |_| {
+                if let Some(this) = this.upgrade() {
+                    this.run_cert();
+                }
+            }
+        });
+        trust_fix.connect_clicked({
+            let this = Rc::downgrade(&this);
+            move |_| {
+                if let Some(this) = this.upgrade() {
+                    let _ = this.fix_certificate();
                 }
             }
         });
@@ -824,6 +919,10 @@ impl StatusPage {
     /// moving too — there is no edit that would go unreported because of this.
     pub fn reconcile(&self, config: &Config) {
         self.set_modules(Some(module_count(config)));
+        self.trust_inputs.replace((
+            config.toggle(Toggle::HttpsFiltering),
+            config.certificate_name().to_string(),
+        ));
     }
 
     /// Re-read the runtime status alone. What the 2 s poll calls, and what
@@ -861,11 +960,101 @@ impl StatusPage {
     }
 
     /// Render one `status` reading, and notice when it contradicts the licence.
+    /// The remedy for an untrusted certificate, which depends on *why* it is
+    /// untrusted. Returns whether it took the user to another page, so the
+    /// tray can raise a window that may be hidden.
+    ///
+    /// With no certificate at all the remedy is AdGuard's `cert`, run in a
+    /// terminal. With one that exists, it is not: `cert` and the installer both
+    /// stop when the anchor *path* exists, so a stale anchor — a regenerated CA
+    /// beside the old one — is left exactly as it was and the command reports
+    /// success (`architecture.md` §7, contract §8). Measured on 3 October 2026:
+    /// `cert` rewrote the CA, the anchor and the bundle did not move. The
+    /// command that does work removes the old anchor first, and the Protection
+    /// page already shows it with the machine's paths in it.
+    pub fn fix_certificate(&self) -> bool {
+        self.trust_watch.set(true);
+        let name = self.trust_inputs.borrow().1.clone();
+        let stale_or_untrusted = adguard_core::CaTrust::detect(&name)
+            .is_some_and(|trust| trust.generated && !trust.is_trusted());
+        if stale_or_untrusted {
+            self.go(Destination::Certificate);
+            return true;
+        }
+        self.run_cert();
+        false
+    }
+
+    /// Run AdGuard's `cert` in a terminal. What the failed-start panel offers
+    /// for "No certificate", where there may be a file `cert` has to replace.
+    fn run_cert(&self) {
+        self.trust_watch.set(true);
+        let command = format!("{} cert", glib::shell_quote(self.cli.binary()).to_string_lossy());
+        if open_in_terminal(&command) {
+            self.toasts.add_toast(toast("Answer yes in the terminal, then retry protection"));
+        } else {
+            // No terminal we know how to drive: the command is still the fix,
+            // so hand it over to be pasted into one.
+            self.hero.clipboard().set_text(&command);
+            self.toasts.add_toast(toast("No terminal found — command copied, run it yourself"));
+        }
+    }
+
+    /// Say whether the system trusts AdGuard's CA while it matters: with the
+    /// proxy running and HTTPS filtering on, or after *Fix certificate* until it
+    /// has been answered. Three stats per poll.
+    ///
+    /// Without the first half, the page would say "Protection is on" over a
+    /// certificate no browser will accept — which is what `cert` leaves behind
+    /// when its terminal is closed at the password prompt.
+    fn recheck_trust(&self) {
+        let (https, name) = self.trust_inputs.borrow().clone();
+        let matters = matches!(&*self.runtime.borrow(), Runtime::Up) && https != Some(false);
+        let checking = matters || self.trust_watch.get();
+        let untrusted = checking
+            && !adguard_core::CaTrust::detect(&name).is_none_or(|trust| trust.is_trusted());
+        self.trust_banner.set_visible(untrusted);
+        if untrusted {
+            // `generated` and `unmet` come from the same reading as `untrusted`.
+            let reading = adguard_core::CaTrust::detect(&name);
+            match reading.as_ref().filter(|trust| trust.generated) {
+                Some(trust) => {
+                    let why = trust.unmet().first().copied().unwrap_or("it is not trusted");
+                    self.trust_label.set_label(&format!(
+                        "AdGuard's certificate is not trusted by this system: {why}. HTTPS sites may \
+                         show warnings. AdGuard's cert command cannot repair this; the Protection page has the command \
+                         that can."
+                    ));
+                    self.trust_fix.set_label("Show the fix");
+                }
+                None => {
+                    self.trust_label.set_label(
+                        "AdGuard's certificate is not trusted by this system. HTTPS sites may show warnings.",
+                    );
+                    self.trust_fix.set_label("Fix certificate");
+                }
+            }
+        }
+        if checking && !untrusted {
+            // The step the user left to take is done, and nothing else on this
+            // page would say so: the panel simply goes.
+            if self.trust_watch.replace(false) && self.trust_reported.get() == Some(true) {
+                self.toasts.add_toast(toast("AdGuard's certificate is now trusted"));
+            }
+        }
+        if self.trust_reported.replace(Some(untrusted)) != Some(untrusted) {
+            if let Some(observer) = self.trust_observer.borrow().as_ref() {
+                observer(untrusted);
+            }
+        }
+    }
+
     fn settle_status(
         self: &Rc<Self>,
         result: Result<ProxyStatus, (bool, String)>,
         evidence: Evidence,
     ) {
+        self.recheck_trust();
         let (bypass, cached, read) = evidence;
         self.filtering.set(cached);
         if read {
@@ -912,6 +1101,12 @@ impl StatusPage {
     /// for the whole session.
     pub fn connect_status(&self, observer: impl Fn(&ProxyStatus, bool) + 'static) {
         self.observer.replace(Some(Box::new(observer)));
+    }
+
+    /// Report whether the system distrusts AdGuard's certificate to `observer` —
+    /// the tray's warning icon. Only on a change.
+    pub fn connect_trust(&self, observer: impl Fn(bool) + 'static) {
+        self.trust_observer.replace(Some(Box::new(observer)));
     }
 
     /// Where a click on a figure or a row here should take the user.
@@ -1050,7 +1245,12 @@ impl StatusPage {
                     this.toasts.add_toast(toast(&note));
                 }
                 if let Err(err) = result {
-                    this.toasts.add_toast(toast(&err));
+                    if action.expects_running() {
+                        this.start_failure.replace(Some(err));
+                        this.render_runtime();
+                    } else {
+                        this.toasts.add_toast(toast(&err));
+                    }
                 }
                 // act -> re-read -> reconcile: the command's own output is not
                 // evidence that it worked (see docs/cli-contract.md §3).
@@ -1104,6 +1304,9 @@ impl StatusPage {
         //
         // `bypass` is `None` unless `status.running`, so the pairing is already
         // made by the time it arrives; see [`read_evidence`].
+        if status.running {
+            self.start_failure.replace(None);
+        }
         self.set_runtime(match (status.running, bypass) {
             (true, Some(bypass)) => Runtime::Bypassed(bypass),
             (true, None) => Runtime::Up,
@@ -1183,6 +1386,11 @@ impl StatusPage {
     /// cannot end up half-rendered by one call site that forgot a field.
     fn render_runtime(&self) {
         let runtime = self.runtime.borrow();
+        let failure = self.start_failure.borrow();
+        let failed_start = matches!(&*runtime, Runtime::Down) && failure.is_some();
+        self.certificate_command.set_visible(
+            failed_start && failure.as_deref().is_some_and(missing_certificate),
+        );
 
         // (icon, tint, badge text, badge class, headline, detail, button)
         let (icon, tint, badge, badge_class, headline, detail, button) = match &*runtime {
@@ -1209,6 +1417,15 @@ impl StatusPage {
                 "The local proxy is running and your enabled modules are filtering traffic."
                     .to_owned(),
                 Some(STOP_BUTTON),
+            ),
+            Runtime::Down if failure.is_some() => (
+                "dialog-warning-symbolic",
+                Some(style::HERO_UNKNOWN),
+                Some("ACTION REQUIRED"),
+                Some(style::BADGE_UNKNOWN),
+                "Protection could not start",
+                start_failure_detail(failure.as_deref().unwrap()),
+                Some(("Retry protection", START_BUTTON.1, START_BUTTON.2)),
             ),
             Runtime::Down => (
                 "security-low-symbolic",
@@ -1309,6 +1526,7 @@ impl StatusPage {
             match &*runtime {
                 Runtime::Unknown => Some("dim-label"),
                 Runtime::Up => Some("success"),
+                Runtime::Down if failed_start => Some("error"),
                 Runtime::Down => Some("warning"),
                 // Red rather than the amber a deliberate stop gets. This one is
                 // not a state the user chose.
@@ -1336,6 +1554,17 @@ impl StatusPage {
 
         self.headline.set_label(headline);
         self.detail.set_label(&detail);
+        // Full-strength text for the one state that asks the user to do
+        // something: `dim-label` over the red tint is too faint to read as
+        // instructions.
+        swap_class(&self.detail, &["dim-label"], if failed_start { None } else { Some("dim-label") });
+        match failure.as_deref().filter(|_| failed_start) {
+            Some(message) => {
+                self.failure_reason.set_label(message.trim());
+                self.failure_reason.set_visible(true);
+            }
+            None => self.failure_reason.set_visible(false),
+        }
 
         match button {
             Some((label, icon, class)) => {
@@ -1754,6 +1983,60 @@ fn classify(err: adguard_core::Error) -> (bool, String) {
         matches!(err, adguard_core::Error::Unlicensed { .. }),
         err.to_string(),
     )
+}
+
+/// Run `command` in the first terminal emulator found, held open at the end so
+/// its output can be read. The command is AdGuard's own and prompts for the
+/// password itself; this only gives it a terminal to do that in.
+///
+/// Each emulator has its own way of being told what to run, so they are tried
+/// in turn rather than guessed at through `x-terminal-emulator`'s `-e`, which
+/// several of them treat as deprecated or as taking a single word.
+fn open_in_terminal(command: &str) -> bool {
+    use std::process::Command;
+
+    let script = format!("{command}; printf '\\nPress Enter to close. '; read _");
+    const TERMINALS: &[(&str, &[&str])] = &[
+        ("gnome-terminal", &["--", "sh", "-c"]),
+        ("kgx", &["-e", "sh", "-c"]),
+        ("konsole", &["-e", "sh", "-c"]),
+        ("xfce4-terminal", &["-x", "sh", "-c"]),
+        ("alacritty", &["-e", "sh", "-c"]),
+        ("kitty", &["sh", "-c"]),
+        ("foot", &["sh", "-c"]),
+        ("x-terminal-emulator", &["-e", "sh", "-c"]),
+        ("xterm", &["-e", "sh", "-c"]),
+    ];
+    for (binary, args) in TERMINALS {
+        if let Ok(mut child) = Command::new(binary).args(*args).arg(&script).spawn() {
+            // Reaped on a thread of its own so a closed terminal does not
+            // linger as a zombie for the life of the app.
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+            return true;
+        }
+    }
+    false
+}
+
+fn missing_certificate(message: &str) -> bool {
+    message.lines().any(|line| line.trim().ends_with(": No certificate"))
+}
+
+/// Our advice for a failed start. The CLI's own message is shown separately,
+/// under it, so it is deliberately not repeated here.
+fn start_failure_detail(message: &str) -> String {
+    if missing_certificate(message) {
+        "Nothing is being filtered because AdGuard cannot use its HTTPS certificate. \
+         Press Fix certificate and follow the instructions in the terminal to generate and \
+         trust it, then retry protection. A certificate file on disk is not enough on \
+         its own."
+            .to_owned()
+    } else {
+        "Nothing is being filtered. Resolve the problem AdGuard reported, then retry protection."
+            .to_owned()
+    }
 }
 
 #[derive(Copy, Clone)]
@@ -2215,6 +2498,53 @@ fn row(title: &str, subtitle: &str) -> adw::ActionRow {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+
+    #[test]
+    fn certificate_guidance_is_specific_to_the_reported_failure() {
+        let missing = "Failed to start the AdGuard proxy server: No certificate";
+        assert!(missing_certificate(missing));
+        assert!(start_failure_detail(missing).contains("generate and"));
+        let other = "Failed to start proxy server: Address already in use";
+        assert!(!missing_certificate(other));
+        assert!(!start_failure_detail(other).contains("certificate"));
+    }
+
+    /// Run in an isolated display with ADGUARD_CLI=/bin/false and temporary
+    /// XDG directories. No real AdGuard command or activation is needed.
+    #[test]
+    #[ignore = "requires GTK display and ADGUARD_CLI=/bin/false"]
+    fn start_failure_survives_polls_and_clears_when_running() {
+        let cli = Cli::discover().unwrap();
+        assert_eq!(cli.binary(), &PathBuf::from("/bin/false"));
+        adw::init().unwrap();
+        let page = StatusPage::new(cli, adw::ToastOverlay::new());
+        page.start_failure.replace(Some(
+            "Failed to start the AdGuard proxy server: No certificate".into(),
+        ));
+        let mut status = ProxyStatus::default();
+        for _ in 0..3 {
+            page.apply(&status, None);
+            assert_eq!(page.headline.label(), "Protection could not start");
+            assert!(page.detail.label().contains("generate and"));
+            assert!(page.failure_reason.label().contains("No certificate"));
+            assert!(page.failure_reason.is_visible());
+            assert!(page.certificate_command.is_visible());
+            assert_eq!(page.primary_content.label(), "Retry protection");
+        }
+        page.start_failure.replace(Some("Address already in use".into()));
+        page.apply(&status, None);
+        assert!(!page.certificate_command.is_visible());
+        assert!(page.failure_reason.label().contains("Address already in use"));
+        status.running = true;
+        page.apply(&status, None);
+        assert!(page.start_failure.borrow().is_none());
+        assert!(!page.certificate_command.is_visible());
+        assert!(!page.failure_reason.is_visible());
+        status.running = false;
+        page.apply(&status, None);
+        assert_eq!(page.headline.label(), "Protection is off");
+    }
 
     /// The rule `StateRow` is written to: the word carries the fact, so the row
     /// still reads correctly with every style class stripped off it.

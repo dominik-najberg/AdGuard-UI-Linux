@@ -101,6 +101,12 @@ pub struct State {
     /// install whose process tree this application does not recognise, or whose
     /// log it can no longer parse, raises nothing.
     pub bypassed: bool,
+    /// Running, and the system does not trust AdGuard's CA, so HTTPS sites will
+    /// warn. What `cert` leaves behind when its terminal is closed at the
+    /// password prompt — and in `--background` the tray is the only place this
+    /// could be seen. Lower priority than [`Self::bypassed`]: a proxy serving
+    /// nothing is the worse news.
+    pub untrusted: bool,
     /// One entry per [`Toggle::ALL`], in that order.
     pub toggles: Vec<Option<bool>>,
 }
@@ -112,10 +118,11 @@ impl State {
 
     /// The three words the tray has room for.
     fn description(&self) -> &'static str {
-        match (self.running, self.bypassed) {
-            (true, true) => "not filtering",
-            (true, false) => "running",
-            (false, _) => "stopped",
+        match (self.running, self.bypassed, self.untrusted) {
+            (true, true, _) => "not filtering",
+            (true, false, true) => "certificate not trusted",
+            (true, false, false) => "running",
+            (false, _, _) => "stopped",
         }
     }
 }
@@ -132,6 +139,8 @@ pub enum Command {
     /// and telling a user their protection has stopped without offering the fix
     /// would be a notification rather than a control.
     RestartProxy,
+    /// Open a terminal running AdGuard's `cert`, as the Status page's button does.
+    FixCertificate,
     SetToggle { toggle: Toggle, on: bool },
     /// Quit the application outright — the only way out once closing the window
     /// merely hides it.
@@ -219,10 +228,10 @@ impl KsniTray for Indicator {
     /// what a deliberate stop looks like — this is neither, and the icon is
     /// most of what anyone actually reads off a tray.
     fn icon_name(&self) -> String {
-        match (self.state.running, self.state.bypassed) {
-            (true, true) => "dialog-warning-symbolic".to_owned(),
-            (true, false) => "security-high-symbolic".to_owned(),
-            (false, _) => "security-low-symbolic".to_owned(),
+        match (self.state.running, self.state.bypassed, self.state.untrusted) {
+            (true, true, _) | (true, false, true) => "dialog-warning-symbolic".to_owned(),
+            (true, false, false) => "security-high-symbolic".to_owned(),
+            (false, _, _) => "security-low-symbolic".to_owned(),
         }
     }
 
@@ -264,6 +273,18 @@ impl KsniTray for Indicator {
                 StandardItem {
                     label: "Restart proxy".into(),
                     activate: Box::new(|this: &mut Self| this.send(Command::RestartProxy)),
+                    ..Default::default()
+                }
+                .into(),
+            );
+            items.push(MenuItem::Separator);
+        }
+
+        if self.state.running && self.state.untrusted {
+            items.push(
+                StandardItem {
+                    label: "Fix certificate…".into(),
+                    activate: Box::new(|this: &mut Self| this.send(Command::FixCertificate)),
                     ..Default::default()
                 }
                 .into(),
@@ -387,21 +408,21 @@ mod tests {
     use super::*;
 
     fn state(running: bool, toggles: Vec<Option<bool>>) -> State {
-        State { running, bypassed: false, toggles }
+        State { running, bypassed: false, untrusted: false, toggles }
     }
 
     /// The tray's whole vocabulary, and the one word that must not appear in
     /// the bypassed state.
     #[test]
     fn a_bypassed_proxy_never_describes_itself_as_running() {
-        let bypassed = State { running: true, bypassed: true, toggles: vec![] };
+        let bypassed = State { running: true, bypassed: true, untrusted: false, toggles: vec![] };
         assert_eq!(bypassed.description(), "not filtering");
 
         assert_eq!(state(true, vec![]).description(), "running");
         assert_eq!(state(false, vec![]).description(), "stopped");
         // A stopped proxy has no helper to have died, and must read as the
         // ordinary stop it is however the flag arrives.
-        let odd = State { running: false, bypassed: true, toggles: vec![] };
+        let odd = State { running: false, bypassed: true, untrusted: false, toggles: vec![] };
         assert_eq!(odd.description(), "stopped");
     }
 
@@ -412,6 +433,19 @@ mod tests {
         let healthy = state(true, vec![Some(true)]);
         let bypassed = State { bypassed: true, ..healthy.clone() };
         assert_ne!(healthy, bypassed);
+    }
+
+    /// An untrusted CA must not read as plain "running", and a bypass outranks it.
+    #[test]
+    fn an_untrusted_certificate_is_not_plain_running() {
+        let untrusted = State { untrusted: true, ..state(true, vec![]) };
+        assert_eq!(untrusted.description(), "certificate not trusted");
+        assert_ne!(untrusted, state(true, vec![]));
+        let both = State { bypassed: true, ..untrusted.clone() };
+        assert_eq!(both.description(), "not filtering");
+        // A stopped proxy needs no certificate to be trusted yet.
+        let stopped = State { untrusted: true, ..state(false, vec![]) };
+        assert_eq!(stopped.description(), "stopped");
     }
 
     /// `toggles` is positional against `Toggle::ALL`, so a short or empty vector

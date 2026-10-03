@@ -34,11 +34,12 @@ use std::rc::Rc;
 use adguard_core::nss::{self, BrowserStores, Store, StoreState};
 use adguard_core::trust::{self, CaTrust};
 use adw::prelude::*;
+use gtk::glib;
 use gtk4 as gtk;
 use libadwaita as adw;
 
 use crate::root_helper::join_with_and;
-use crate::{abbreviate, toast, worker};
+use crate::{abbreviate, style, toast, worker};
 
 /// A group of up to three rows: what the system store says, what the browsers'
 /// own stores say, and what to run about it.
@@ -56,6 +57,9 @@ pub struct CertificateView {
     /// Shown only with a `certutil` to run.
     add: gtk::Button,
     command: adw::ActionRow,
+    /// The command row's copy button, which becomes the step to take while the
+    /// group is asking for one.
+    copy: gtk::Button,
     /// What the last paint was given, so the view can paint itself again once
     /// the button's work is done.
     last: RefCell<Option<(Option<bool>, String)>>,
@@ -129,13 +133,27 @@ impl CertificateView {
         copy.connect_clicked({
             let toasts = toasts.downgrade();
             let command = command.downgrade();
-            move |_| {
+            move |button| {
                 let (Some(command), Some(toasts)) = (command.upgrade(), toasts.upgrade()) else {
                     return;
                 };
                 let text = command.subtitle().unwrap_or_default();
                 command.clipboard().set_text(&text);
-                toasts.add_toast(toast("Command copied"));
+                // While the group is asking for this step, say what the next
+                // one is: the page is left for a terminal and comes back
+                // changed, so the toast is the last thing it can say.
+                let asking = button.has_css_class("suggested-action");
+                toasts.add_toast(toast(if asking {
+                    "Command copied. Run it in a terminal; this page updates when it has worked"
+                } else {
+                    "Command copied"
+                }));
+                if asking {
+                    calm_copy(button);
+                    if let Some(group) = command.ancestor(adw::PreferencesGroup::static_type()) {
+                        group.remove_css_class(style::NEEDS_ACTION);
+                    }
+                }
             }
         });
         command.add_suffix(&copy);
@@ -147,6 +165,7 @@ impl CertificateView {
             browsers,
             add,
             command,
+            copy: copy.clone(),
             last: RefCell::new(None),
             pending: RefCell::new(None),
             adding: Cell::new(false),
@@ -225,6 +244,45 @@ impl CertificateView {
         &self.group
     }
 
+    /// Point the user at this group: bring it to the top of the view, mark it
+    /// as the step to take, pulse it twice, and put the copy button forward as
+    /// the thing to press.
+    ///
+    /// The way in from the Status page's *Show the fix*. It does nothing when
+    /// the group is hidden — there is then nothing to do here, and a pulse over
+    /// an empty page would be the wrong answer to a click that promised a fix.
+    ///
+    /// The marking outlasts the pulse on purpose, and leaves when the step is
+    /// done: on the first copy, or when the check next finds nothing to report.
+    pub fn attend(&self) {
+        if !self.group.is_visible() {
+            return;
+        }
+        self.group.add_css_class(style::NEEDS_ACTION);
+        self.copy.add_css_class("suggested-action");
+        self.copy.remove_css_class("flat");
+        let group = self.group.clone();
+        let copy = self.copy.clone();
+        crate::once_allocated(&self.group, move |widget| {
+            crate::scroll_into_view(widget);
+            group.add_css_class(style::ATTENTION);
+            // 2 × 700 ms and a little over, so the class is gone only once the
+            // animation has played out.
+            glib::timeout_add_local_once(std::time::Duration::from_millis(1500), {
+                let group = group.clone();
+                move || group.remove_css_class(style::ATTENTION)
+            });
+            copy.grab_focus();
+        });
+    }
+
+    /// The marking off again: the group is hidden, or has nothing left to ask.
+    fn settle(&self) {
+        self.group.remove_css_class(style::NEEDS_ACTION);
+        self.group.remove_css_class(style::ATTENTION);
+        calm_copy(&self.copy);
+    }
+
     /// Re-read the check and render it.
     ///
     /// `filtering` is whether HTTPS filtering is switched on — `None` when that
@@ -275,11 +333,13 @@ impl CertificateView {
         // not be located — which the window is already explaining elsewhere.
         let Some(trust) = check else {
             self.group.set_visible(false);
+            self.settle();
             return;
         };
 
         if trust.is_trusted() && unmet.is_empty() {
             self.group.set_visible(false);
+            self.settle();
             return;
         }
 
@@ -698,6 +758,12 @@ const UNSHOWABLE: &str = "Filtered connections are signed by a certificate this 
                           this application shows none. The certificate's name comes from \
                           https_filtering.root_certificate_name, and a Firefox profile's from \
                           Firefox's profile manager.";
+
+/// The copy button as it is when nothing is asking for it: an icon, flat.
+fn calm_copy(button: &gtk::Button) {
+    button.remove_css_class("suggested-action");
+    button.add_css_class("flat");
+}
 
 #[cfg(test)]
 mod tests {

@@ -428,6 +428,16 @@ fn connect_tray(
         }
     });
 
+    view.status.connect_trust({
+        let tray = tray.clone();
+        let state = state.clone();
+        move |untrusted| {
+            state.borrow_mut().untrusted = untrusted;
+            let snapshot = state.borrow().clone();
+            tray.set_state(snapshot);
+        }
+    });
+
     view.protection.connect_config({
         let tray = tray.clone();
         let state = state.clone();
@@ -475,6 +485,13 @@ fn connect_tray(
                     Command::StartProxy => status.start_proxy(),
                     Command::StopProxy => status.stop_proxy(),
                     Command::RestartProxy => status.restart_proxy(),
+                    Command::FixCertificate => {
+                        // Raised only when the fix is a page, not a terminal.
+                        if status.fix_certificate() {
+                            window.present();
+                            status.set_window_visible(true);
+                        }
+                    }
                     Command::SetToggle { toggle, on } => protection.request(toggle, on),
                     Command::Quit => {
                         app.quit();
@@ -597,6 +614,9 @@ pub enum Destination {
     Status,
     /// The six protection modules.
     Protection,
+    /// The Protection page, at the group that says what is wrong with AdGuard's
+    /// certificate and carries the command that fixes it.
+    Certificate,
     /// The HTTP/HTTPS filter catalogue.
     WebFilters,
     /// The DNS page, for its catalogue.
@@ -622,7 +642,7 @@ impl Destination {
     fn page(self) -> &'static str {
         match self {
             Self::Status => "status",
-            Self::Protection => "protection",
+            Self::Protection | Self::Certificate => "protection",
             Self::WebFilters => "filters",
             Self::DnsFilters | Self::DnsProxy => "dns",
             Self::Advanced(_) | Self::Autostart => "advanced",
@@ -875,6 +895,7 @@ fn main_view(cli: &Cli) -> MainView {
         let advanced = Rc::downgrade(&advanced);
         let dns = Rc::downgrade(&dns);
         let filters = Rc::downgrade(&filters);
+        let protection = Rc::downgrade(&protection);
         move |destination: Destination| {
             let Some(sidebar) = sidebar.upgrade() else { return };
             if let Some(index) = destination.page_index() {
@@ -920,6 +941,13 @@ fn main_view(cli: &Cli) -> MainView {
                 }
                 // The whole page is the answer: the six modules are all of it,
                 // and on Status the actions are at the top.
+                // The page is long enough that the group can be below the fold,
+                // and it is the whole point of the link, so it is asked for.
+                Destination::Certificate => {
+                    if let Some(protection) = protection.upgrade() {
+                        protection.reveal_certificate();
+                    }
+                }
                 Destination::Protection | Destination::Status | Destination::Activity => {}
             }
         }
@@ -1192,6 +1220,7 @@ mod tests {
         for destination in [
             Destination::Status,
             Destination::Protection,
+            Destination::Certificate,
             Destination::WebFilters,
             Destination::DnsFilters,
             Destination::DnsProxy,

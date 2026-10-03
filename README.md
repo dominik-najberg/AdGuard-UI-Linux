@@ -24,7 +24,7 @@ AdGuard CLI is a third-party install under `$HOME`, so no package can declare a 
 Every release carries a `.deb` and a tarball for `~/.local`, built in a clean `ubuntu:26.04` container and listed with their checksums in `SHA256SUMS`:
 
 ```bash
-sudo apt-get install ./adguard-ui_1.7.0_amd64.deb
+sudo apt-get install ./adguard-ui_1.7.1_amd64.deb
 ```
 
 [**Releases**](https://github.com/dominik-najberg/AdGuard-UI-Linux/releases) · [`CHANGELOG.md`](CHANGELOG.md). `apt-get install ./file.deb` rather than `dpkg -i`, because apt resolves the dependencies the package declares; the path has to start with `./` or apt looks the name up in the archive instead. The tarball is the unprivileged route: extract it and run its `install.sh`, which writes under `~/.local` and never asks for a password.
@@ -67,7 +67,15 @@ While the tray is present, closing the window only hides it and *Quit* in the tr
 
 ## The pages
 
-**Status** — runtime state, start/stop/restart, the proxy endpoints, and the licence. Polled every 2 seconds while the window is up, every 10 when only the tray is showing.
+**Status** — runtime state, start/stop/restart, the proxy endpoints, and the licence. Polled every 2 seconds while the window is up, every 10 when only the tray is showing. A start or restart that AdGuard refuses keeps its reason on the main panel, in AdGuard's own words, with a *Retry protection* button, until the proxy is confirmed running; it lasts for the session and is not saved between launches.
+
+![A start that failed because AdGuard has no certificate, with Retry protection and Fix certificate side by side](docs/screenshots/status-failed-start.png)
+
+For a missing certificate *Fix certificate* sits beside *Retry protection*. It opens a terminal running AdGuard's `cert` command, which asks for the password there; this application never sees it. If no terminal is found, the command is copied instead. `cert` generates the certificate before it asks to trust it, so closing the terminal at that question leaves protection startable and the certificate untrusted. While the proxy is running with HTTPS filtering on and the system does not trust the certificate, the page says so, and the tray icon becomes a warning triangle with a *Fix certificate…* menu entry. When the cause is an older certificate of the same name already installed — a state `cert` and AdGuard's installer both leave untouched while reporting success — the notice says that and its button, *Show the fix*, opens the Protection page, which shows the command that works. That command needs `sudo` and removes a file from the system's trust store, so it is shown and never run from here. The button scrolls to the certificate group on the Protection page, pulses it, and keeps it tinted with the copy button highlighted until the command is copied or the problem is gone:
+
+![The Status panel with protection on and a notice that an older certificate of the same name blocks AdGuard's](docs/screenshots/status-certificate-untrusted.png)
+
+> Both frames are cropped to the panel, so no licence details are in them, and the states were forced in a sandbox rather than caused on a real machine. The tray icon is not pictured: a headless session has no tray.
 
 **Activity** — what AdGuard has done with this computer's traffic: requests, how many were blocked or modified, and how much data moved, for today, the last 7 days or the last 30. A chart per hour or per day, and the sites blocked most, the sites requested most, the rules that matched most and the apps behind the traffic. It is counted from AdGuard's own access log, in the background while AdGuard UI runs, because AdGuard deletes that log after a few days. **Only counts are kept**, on this computer and readable only by you: never the address of a page, what was searched, or when in a day a site was visited. Counts older than 90 days are deleted, or older than the 7 days, 30 days or year you choose instead, and **Clear History** deletes the rest. Below the lists, **Requests** searches single requests by site, address, app or rule. It reads AdGuard's own log in place and keeps nothing, so it reaches back only as far as AdGuard does. Clicking an entry in a list searches for it.
 

@@ -31,6 +31,12 @@ pub const BADGE_ON: &str = "state-badge-on";
 pub const BADGE_OFF: &str = "state-badge-off";
 pub const BADGE_UNKNOWN: &str = "state-badge-unknown";
 
+/// The CLI's own words for a failed start, boxed under the hero's advice.
+pub const FAILURE_REASON: &str = "failure-reason";
+
+/// The warning under the hero while AdGuard's certificate is not yet trusted.
+pub const TRUST_BANNER: &str = "trust-banner";
+
 /// The row of figures under the hero, and one figure in it.
 pub const STATS: &str = "stat-row";
 pub const STAT: &str = "stat-tile";
@@ -42,6 +48,12 @@ pub const STAT_BUTTON: &str = "stat-button";
 /// the tint back off it.
 pub const REVEAL_TARGET: &str = "reveal-target";
 pub const REVEALED: &str = "revealed";
+
+/// A group that asks the user to do something, and the one-off pulse that
+/// points at it on arrival. The first stays until the thing is done; the second
+/// is taken off again when it has played.
+pub const NEEDS_ACTION: &str = "needs-action";
+pub const ATTENTION: &str = "attention";
 
 /// The panel that holds one website check's results on Diagnostics.
 pub const SITE_RESULTS: &str = "site-results";
@@ -65,6 +77,22 @@ const CSS: &str = "
 
 .hero-unknown {
   background-color: alpha(@error_color, 0.08);
+}
+
+/* Monospace on a darker tint of the same red, so the CLI's verbatim message
+   reads as quoted output rather than as more of our prose. */
+.failure-reason {
+  padding: 8px 12px;
+  border-radius: 8px;
+  background-color: alpha(@error_color, 0.10);
+  font-family: monospace;
+  font-size: 0.9em;
+}
+
+/* A card of its own in the warning tint, set apart from the hero above it. */
+.trust-banner {
+  padding: 14px 20px;
+  background-color: alpha(@warning_color, 0.10);
 }
 
 .state-badge {
@@ -133,6 +161,32 @@ const CSS: &str = "
 .reveal-target.revealed {
   background-color: alpha(@accent_color, 0.13);
   transition: none;
+}
+
+/* A group the user has been sent to in order to *do* something, which is not the
+   same job as `.revealed`: that tint says you arrived here, and is gone in two
+   seconds, and this has to still be saying this is the step when the user
+   comes back from a terminal. A warning tint with an edge, as on `.site-results`
+   — the edge is what is left in high contrast, and with the warning icon in the
+   rows it means colour is never the only signal. */
+.needs-action {
+  padding: 14px 16px;
+  border-radius: 12px;
+  background-color: alpha(@warning_color, 0.10);
+  border: 1px solid alpha(@warning_color, 0.45);
+}
+
+/* Two pulses and then still: motion that says look here once, not a beacon
+   that keeps asking. GTK drops CSS animations when the user has turned
+   animations off, which is the reduced-motion case, and the panel above is
+   what is left. */
+.needs-action.attention {
+  animation: attention-pulse 700ms ease-out 2;
+}
+
+@keyframes attention-pulse {
+  from { box-shadow: 0 0 0 0 alpha(@warning_color, 0.55); }
+  to   { box-shadow: 0 0 0 12px alpha(@warning_color, 0); }
 }
 
 /* One website's results, set apart from the machine-wide sections below them,

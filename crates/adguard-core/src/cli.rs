@@ -1784,7 +1784,10 @@ fn start_refusal(stdout: &str) -> Option<String> {
     stdout
         .lines()
         .map(str::trim)
-        .find(|line| line.starts_with(START_FAILED))
+        .find(|line| {
+            line.starts_with(START_FAILED)
+                || line.starts_with("Failed to start the AdGuard proxy server:")
+        })
         .map(str::to_owned)
 }
 
@@ -2192,6 +2195,15 @@ mod tests {
             start_refusal(START_FAILED_OUTPUT).as_deref(),
             Some("Failed to start proxy server: An unknown error has occurred")
         );
+    }
+
+    #[test]
+    fn missing_certificate_is_a_start_failure_despite_exit_zero() {
+        let output = "Failed to start the AdGuard proxy server: No certificate\n\
+            You can generate a certificate by running `/home/user/.local/bin/adguard-cli cert`\n";
+        assert_eq!(start_refusal(output).as_deref(),
+            Some("Failed to start the AdGuard proxy server: No certificate"));
+        assert_eq!(start_refusal("log: Failed to start the AdGuard proxy server: No certificate"), None);
     }
 
     /// The whole point of defining *failure* positively: anything else, known

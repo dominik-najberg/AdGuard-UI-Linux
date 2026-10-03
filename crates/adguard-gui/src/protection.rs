@@ -161,6 +161,18 @@ impl ProtectionPage {
         view.paint(*filtering, name);
     }
 
+    /// Send the user to the certificate group, if there is one to be sent to.
+    ///
+    /// Re-read first: the link is followed from a page that decided there was a
+    /// problem a moment ago, and this one should be showing what the machine
+    /// says now.
+    pub fn reveal_certificate(&self) {
+        self.recheck_certificate();
+        if let Some(view) = self.certificate.borrow().as_ref() {
+            view.attend();
+        }
+    }
+
     /// Re-read the browser-integration check and repaint the rows that report
     /// it.
     ///

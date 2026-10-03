@@ -99,8 +99,12 @@ impl Level {
 pub enum FixedOn {
     /// Start, stop, restart, and licence activation.
     Status,
-    /// The certificate and browser-integration commands.
+    /// The browser-integration command.
     Protection,
+    /// The certificate group on the Protection page: the system's trust, the
+    /// browsers' own stores, and the command that repairs either. Its own
+    /// target so the window can scroll to the group and mark it.
+    Certificate,
     /// The root helper's setup command, under the proxy-mode setting.
     AdvancedProxyMode,
     /// The local DNS proxy's listen port.
@@ -610,7 +614,7 @@ fn https_section(inputs: &Inputs, config: Option<&Config>) -> Section {
                 None => Finding::new("Certificate", "Trusted by the system", Level::Healthy),
                 Some(unmet) if failing == Level::Problem => {
                     Finding::new("Certificate", capitalise(unmet), failing)
-                        .fixed(certificate_fix(ca), Some(FixedOn::Protection))
+                        .fixed(certificate_fix(ca), Some(FixedOn::Certificate))
                 }
                 Some(unmet) => Finding::new("Certificate", capitalise(unmet), failing),
             });
@@ -704,7 +708,7 @@ fn store_finding(store: &Store, failing: Level) -> Finding {
     } else {
         INSTALL_IN_BROWSERS
     };
-    finding.fixed(hint, Some(FixedOn::Protection))
+    finding.fixed(hint, Some(FixedOn::Certificate))
 }
 
 fn browser_section(inputs: &Inputs) -> Section {
@@ -1047,7 +1051,7 @@ pub(crate) mod tests {
         let found = finding(&report, "HTTPS filtering", "Certificate");
         assert_eq!(found.level, Level::Problem);
         assert_eq!(found.value, "No certificate has been generated");
-        assert_eq!(found.remedy.map(|r| r.page), Some(Some(FixedOn::Protection)));
+        assert_eq!(found.remedy.map(|r| r.page), Some(Some(FixedOn::Certificate)));
 
         inputs.config = Ok(config("https_filtering:\n  enabled: false\n"));
         let report = Report::build(&inputs);

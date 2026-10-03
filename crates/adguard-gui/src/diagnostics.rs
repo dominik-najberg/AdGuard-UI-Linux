@@ -586,6 +586,7 @@ fn destination(page: FixedOn) -> Destination {
     match page {
         FixedOn::Status => Destination::Status,
         FixedOn::Protection => Destination::Protection,
+        FixedOn::Certificate => Destination::Certificate,
         FixedOn::AdvancedProxyMode => Destination::Advanced(key::PROXY_MODE),
         FixedOn::DnsProxy => Destination::DnsProxy,
         FixedOn::WebFilters => Destination::WebFilters,
