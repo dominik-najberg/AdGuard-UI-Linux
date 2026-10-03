@@ -28,7 +28,7 @@ use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 use std::time::Duration;
 
-use adguard_core::{userscripts, Cli, Config, Locale, Userscript};
+use adguard_core::{userscripts, Cli, Config, Locale, Userscript, INSTALL_LINKS};
 use adw::prelude::*;
 use gtk::glib;
 use gtk4 as gtk;
@@ -121,6 +121,8 @@ pub struct ExtensionsPage {
     offers: RefCell<VecDeque<String>>,
     /// The link whose dialog — or install — is under way, if any.
     asking: RefCell<Option<String>>,
+    /// Whether this run has already suggested the browser helper.
+    hinted: Cell<bool>,
 }
 
 impl ExtensionsPage {
@@ -134,6 +136,7 @@ impl ExtensionsPage {
             reconciling: Cell::new(false),
             offers: RefCell::new(VecDeque::new()),
             asking: RefCell::new(None),
+            hinted: Cell::new(false),
         });
         this.reload();
         this
@@ -224,10 +227,12 @@ impl ExtensionsPage {
 
         let page = adw::PreferencesPage::new();
         page.add(&self.add_group());
-        if let Some(group) = self.offered_group(&loaded.offered) {
+        // Directly under the address field: the two are ways of doing the same
+        // thing, and the helper is the one that saves typing the address.
+        if let Some(group) = self.install_links_group(loaded.install_links) {
             page.add(&group);
         }
-        if let Some(group) = self.install_links_group(loaded.install_links) {
+        if let Some(group) = self.offered_group(&loaded.offered) {
             page.add(&group);
         }
 
@@ -1053,6 +1058,7 @@ impl ExtensionsPage {
     /// `None` when it arrived as an install link (`crate::install_link`) — that
     /// row is rebuilt with the page, so it cannot be held across a dialog.
     async fn install(self: &Rc<Self>, url: String, field: Option<(adw::EntryRow, adw::Spinner)>) {
+        let typed = field.is_some();
         let set_busy = |busy: bool, clear: bool| {
             if let Some((entry, spinner)) = &field {
                 entry.set_sensitive(!busy);
@@ -1089,8 +1095,13 @@ impl ExtensionsPage {
         match after.iter().find(|s| !before.contains(&s.id)) {
             Some(new) => {
                 set_busy(false, true);
-                self.toasts
-                    .add_toast(toast(&format!("Added {}", new.display_name())));
+                let added = format!("Added {}", new.display_name());
+                let helper_missing = userscripts::install_links(&after).is_some();
+                if typed && helper_missing && !self.hinted.replace(true) {
+                    self.toasts.add_toast(self.helper_hint(&added));
+                } else {
+                    self.toasts.add_toast(toast(&added));
+                }
             }
             // Nothing new. Either it was refused, or the URL was one already
             // installed and this was an update in place — which the CLI
@@ -1104,6 +1115,30 @@ impl ExtensionsPage {
             }
         }
         self.reload();
+    }
+
+    /// The toast after an address was typed in, telling the user the browser
+    /// could have done it (#29).
+    ///
+    /// This is the moment the helper is worth mentioning: someone has just
+    /// copied a script's address out of a browser and pasted it here, which is
+    /// exactly what it saves. Once per run of the application, and only while
+    /// the helper is not installed — a reminder, not a campaign. The button
+    /// adds it the way the *From your browser* row does.
+    fn helper_hint(self: &Rc<Self>, added: &str) -> adw::Toast {
+        let hint = adw::Toast::builder()
+            .use_markup(false)
+            .title(format!("{added}. Next time, add scripts straight from your browser"))
+            .button_label("Add Helper")
+            .timeout(10)
+            .build();
+        let this = Rc::downgrade(self);
+        hint.connect_button_clicked(move |_| {
+            if let Some(this) = this.upgrade() {
+                this.add_recommended(&INSTALL_LINKS);
+            }
+        });
+        hint
     }
 
     /// The display name for a row, for a message about it.
