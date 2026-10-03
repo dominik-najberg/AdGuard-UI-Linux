@@ -15,19 +15,28 @@ It is a plain user-session application: no daemon, no background service of its 
 | **AdGuard CLI** | Installed and licensed. Not bundled here, and nothing works without it — measured against 1.4.13. |
 | **GTK4 / libadwaita** | GTK 4.10+, libadwaita 1.7+. Developed against GTK 4.22 and libadwaita 1.9 on Ubuntu 26.04, GNOME 50, Wayland. |
 | **Rust** | 1.85+ to build from source. |
-| **A tray icon** | Needs an AppIndicator extension — GNOME has no native tray. Without one the app prints a line to stderr and runs windowed. |
+| **A tray icon** | KDE Plasma has one built in. GNOME needs an AppIndicator extension — it has no native tray. Without one the app prints a line to stderr and runs windowed. |
+| **Distribution** | A `.deb` for Ubuntu and Debian, an `.rpm` for Fedora 43 and later, and a tarball for anything else that meets the toolkit versions above. |
 
 AdGuard CLI is a third-party install under `$HOME`, so no package can declare a dependency on it. The application looks for `adguard-cli` on `$PATH`, then in `~/.local/bin` and `~/.local/opt/adguard-cli`, and renders an explanation rather than failing if it finds none.
 
 ## Install
 
-Every release carries a `.deb` and a tarball for `~/.local`, built in a clean `ubuntu:26.04` container and listed with their checksums in `SHA256SUMS`:
+Every release carries a `.deb`, an `.rpm` and a tarball for `~/.local`, each built in a clean container of its own distribution and listed with their checksums in `SHA256SUMS`.
+
+On Ubuntu and Debian:
 
 ```bash
 sudo apt-get install ./adguard-ui_1.7.1_amd64.deb
 ```
 
-[**Releases**](https://github.com/dominik-najberg/AdGuard-UI-Linux/releases) · [`CHANGELOG.md`](CHANGELOG.md). `apt-get install ./file.deb` rather than `dpkg -i`, because apt resolves the dependencies the package declares; the path has to start with `./` or apt looks the name up in the archive instead. The tarball is the unprivileged route: extract it and run its `install.sh`, which writes under `~/.local` and never asks for a password.
+On Fedora:
+
+```bash
+sudo dnf install ./adguard-ui-1.7.1-1.x86_64.rpm
+```
+
+[**Releases**](https://github.com/dominik-najberg/AdGuard-UI-Linux/releases) · [`CHANGELOG.md`](CHANGELOG.md). `apt-get install` and `dnf install` rather than `dpkg -i` or `rpm -i`, because they resolve the dependencies the package declares; the path has to start with `./` or they look the name up in the distribution's repositories instead. The tarball is the unprivileged route: extract it and run its `install.sh`, which writes under `~/.local` and never asks for a password.
 
 Or build the package yourself — building needs no root, only the install step does:
 
@@ -35,7 +44,7 @@ Or build the package yourself — building needs no root, only the install step 
 make install
 ```
 
-That builds `target/package/adguard-ui_<version>_<arch>.deb` and installs it with `apt`. To build the packages without installing anything, `make package` writes both the `.deb` and a tarball for `~/.local`; the tarball carries an `install.sh` that never asks for a password, and `--list` prints the files it would write without writing any. Removal is `sudo apt-get remove adguard-ui`.
+That builds `target/package/adguard-ui_<version>_<arch>.deb` and installs it with `apt` — or, on Fedora, `adguard-ui-<version>-1.<arch>.rpm` with `dnf`. To build the packages without installing anything, `make package` writes the `.deb` and a tarball for `~/.local`, and `make rpm` the `.rpm`; the tarball carries an `install.sh` that never asks for a password, and `--list` prints the files it would write without writing any. Removal is `sudo apt-get remove adguard-ui` or `sudo dnf remove adguard-ui`.
 
 From source:
 
