@@ -19,6 +19,7 @@ pub mod model;
 pub mod nss;
 pub mod orphan;
 pub mod paths;
+pub mod preview;
 // Private: a `/proc` parse two modules here share, and nothing outside needs.
 mod proc;
 pub mod release;

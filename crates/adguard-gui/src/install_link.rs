@@ -18,6 +18,7 @@
 //! never acted on: it fills in a confirmation that names the URL in full, and
 //! defaults to *Cancel*.
 
+use adguard_core::preview::{self, Preview, RunsOn};
 use gtk4::glib;
 
 /// The scheme registered in the `.desktop` file as `x-scheme-handler/…`.
@@ -84,9 +85,123 @@ pub fn parse(link: &str) -> Result<String, Refused> {
     }
 }
 
+/// How much the confirmation knows about the script so far.
+pub enum Details {
+    /// The head of the script is being fetched.
+    Reading,
+    /// Its metadata block (`adguard_core::preview`).
+    Read(Preview),
+    /// It could not be read, and why — the dialog falls back to the file name.
+    Unread(String),
+}
+
+/// The confirmation's body, as Pango markup.
+///
+/// **The name never appears without the host.** The name, version and
+/// description are whatever the script's author wrote, and a hostile one can
+/// call itself anything; the host is the one thing on the page that says whose
+/// code this is, so it sits on the line directly under the name. Every
+/// author-written string is escaped — `&` and `<` are ordinary in a
+/// description, and unescaped they would fail the whole body.
+pub fn body(url: &str, details: &Details) -> String {
+    let esc = |text: &str| glib::markup_escape_text(text).to_string();
+    let host = preview::host(url).unwrap_or_else(|| url.to_owned());
+    let file = preview::file_name(url).unwrap_or_else(|| host.clone());
+
+    let mut parts = Vec::new();
+    match details {
+        Details::Reading => {
+            parts.push(format!("<b>{}</b>\nfrom {}", esc(&file), esc(&host)));
+            parts.push("Reading what the script says about itself…".to_owned());
+        }
+        Details::Unread(why) => {
+            parts.push(format!("<b>{}</b>\nfrom {}", esc(&file), esc(&host)));
+            parts.push(format!(
+                "Its details could not be read — {} — so this is only the name of the file.",
+                esc(why)
+            ));
+        }
+        Details::Read(preview) => {
+            let name = preview.name.as_deref().unwrap_or(&file);
+            let origin = match &preview.version {
+                Some(version) => format!("version {} · from {}", esc(version), esc(&host)),
+                None => format!("from {}", esc(&host)),
+            };
+            parts.push(format!("<b>{}</b>\n{origin}", esc(name)));
+            if let Some(description) = &preview.description {
+                parts.push(esc(description));
+            }
+            parts.push(match &preview.runs_on {
+                RunsOn::Everywhere => "Runs on <b>every site</b>.".to_owned(),
+                RunsOn::Unstated => {
+                    "It names no sites, so it may run on <b>every site</b>.".to_owned()
+                }
+                sites => format!("Runs on {}.", esc(&sites.summary().unwrap_or_default())),
+            });
+        }
+    }
+    parts.push(
+        "It will be able to read and change what you see on the sites it runs on. Add it \
+         only if you just clicked an install link and trust where it came from."
+            .to_owned(),
+    );
+    parts.join("\n\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const HIT_HIDER: &str = "https://update.greasyfork.org/scripts/1682/Google%20Hit%20Hider\
+                             %20by%20Domain%20%28Search%20Filter%20%20Block%20Sites%29.user.js";
+
+    #[test]
+    fn a_read_script_is_shown_by_its_own_name_and_its_host() {
+        let details = Details::Read(Preview {
+            name: Some("Google Hit Hider by Domain (Search Filter / Block Sites)".to_owned()),
+            version: Some("2.4.1".to_owned()),
+            description: Some("Block unwanted sites from your search results.".to_owned()),
+            runs_on: RunsOn::Sites(vec!["google.com".to_owned(), "bing.com".to_owned()]),
+        });
+        let body = body(HIT_HIDER, &details);
+        assert!(body.starts_with(
+            "<b>Google Hit Hider by Domain (Search Filter / Block Sites)</b>\n\
+             version 2.4.1 · from update.greasyfork.org\n\n\
+             Block unwanted sites from your search results.\n\n\
+             Runs on google.com, bing.com."
+        ), "{body}");
+    }
+
+    /// Before the head arrives, and if it never does: the decoded file name,
+    /// never the escaped URL.
+    #[test]
+    fn otherwise_the_decoded_file_name_and_its_host() {
+        for details in [Details::Reading, Details::Unread("could not reach it".to_owned())] {
+            let body = body(HIT_HIDER, &details);
+            assert!(body.starts_with(
+                "<b>Google Hit Hider by Domain (Search Filter Block Sites).user.js</b>\n\
+                 from update.greasyfork.org"
+            ), "{body}");
+            assert!(!body.contains("%20"));
+        }
+    }
+
+    #[test]
+    fn author_text_cannot_inject_markup() {
+        let details = Details::Read(Preview {
+            name: Some("<span size='xx-large'>AdGuard Extra</span> & co".to_owned()),
+            version: None,
+            description: Some("<a href='x'>click</a>".to_owned()),
+            runs_on: RunsOn::Everywhere,
+        });
+        let body = body("https://example.net/x.user.js", &details);
+        assert!(body.starts_with(
+            "<b>&lt;span size=&apos;xx-large&apos;&gt;AdGuard Extra&lt;/span&gt; &amp; co</b>\n\
+             from example.net"
+        ), "{body}");
+        assert!(body.contains("&lt;a href=&apos;x&apos;&gt;click&lt;/a&gt;"));
+        assert!(body.contains("Runs on <b>every site</b>."));
+    }
 
     /// What the userscript in `data/userscripts/` builds: the script URL
     /// through `encodeURIComponent`.

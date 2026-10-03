@@ -15,9 +15,9 @@ This file is the one changelog.
 
 ### Install userscripts from the browser
 
-The *Install* button on Greasy Fork, Sleazy Fork, OpenUserJS and GitHub can now bring a userscript to AdGuard UI instead of opening it as text, as AdGuard for Windows and Android do ([#29](https://github.com/dominik-najberg/AdGuard-UI-Linux/issues/29)). AdGuard CLI's proxy does not catch those clicks itself, so it takes a small userscript of this application's own, offered on the Extensions page under *From your browser* and added with one press. With it in place, a click opens AdGuard UI at the Extensions page and asks *Add this userscript?*, naming the address in full.
+The *Install* button on Greasy Fork, Sleazy Fork, OpenUserJS and GitHub can now bring a userscript to AdGuard UI instead of opening it as text, as AdGuard for Windows and Android do ([#29](https://github.com/dominik-najberg/AdGuard-UI-Linux/issues/29)). AdGuard CLI's proxy does not catch those clicks itself, so it takes a small userscript of this application's own, offered on the Extensions page under *From your browser* and added with one press. With it in place, a click opens AdGuard UI at the Extensions page and asks *Add this userscript?*, showing what the script says about itself — its name, version, description and the sites it runs on — beside the host it comes from, rather than an address full of `%20`.
 
-Any web page can send such a link, so nothing is installed without a yes. Cancel is the default answer, and *Add* stays greyed out for two seconds after the question appears, counting down, and again whenever the window loses focus, so a click aimed at the browser cannot land on it by accident. Several links in a row are asked about one at a time. The browser asks once whether to open AdGuard UI, and the script needs HTTPS filtering for the browser to be on.
+Any web page can send such a link, so nothing is installed without a yes. Cancel is the default answer, and *Add* stays greyed out until the script has been read and for two seconds after the question appears, counting down, and again whenever the window loses focus, so a click aimed at the browser cannot land on it by accident. Several links in a row are asked about one at a time. The browser asks once whether to open AdGuard UI, and the script needs HTTPS filtering for the browser to be on.
 
 ---
 

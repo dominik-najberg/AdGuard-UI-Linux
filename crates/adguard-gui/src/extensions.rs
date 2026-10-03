@@ -34,6 +34,9 @@ use gtk::glib;
 use gtk4 as gtk;
 use libadwaita as adw;
 
+use adguard_core::preview;
+
+use crate::install_link::{self, Details};
 use crate::{toast, worker};
 
 /// One read of everything the page renders.
@@ -954,9 +957,11 @@ impl ExtensionsPage {
         });
     }
 
-    /// The link's only gate. Anything on the web can open one, so the URL is
-    /// shown whole — the host is the part that says whose code this is — and
-    /// the safe answer is the default one.
+    /// The link's only gate. Anything on the web can open one, so the dialog
+    /// says what the script is — its own name, version, description and the
+    /// sites it runs on, read from its metadata block — always beside the host
+    /// it comes from, which is the part that says whose code this is. The
+    /// whole URL is one click away. The safe answer is the default one.
     ///
     /// **Add cannot be pressed for the first [`ADD_DELAY`].** The dialog comes
     /// up because of a click in another window, often right under the pointer,
@@ -968,20 +973,43 @@ impl ExtensionsPage {
     /// and Escape are Cancel throughout, and Add is a plain button rather than
     /// a highlighted one, so the eye does not land on it first.
     async fn confirm_install(&self, url: &str) -> bool {
-        let body = format!(
-            "A web page asked to add the userscript at\n\n{url}\n\nIt will run on every site \
-             it names, able to read and change what you see there. Add it only if you just \
-             clicked an install link and trust where it came from."
-        );
-
-        let dialog = adw::AlertDialog::new(Some("Add this userscript?"), Some(&body));
-        dialog.set_body_use_markup(false);
+        let dialog = adw::AlertDialog::new(Some("Add this userscript?"), None);
+        // Markup for the bold name; `install_link::body` escapes everything the
+        // script's author wrote.
+        dialog.set_body_use_markup(true);
+        dialog.set_body(&install_link::body(url, &Details::Reading));
+        dialog.set_extra_child(Some(&full_address(url)));
         dialog.add_response("cancel", "Cancel");
         dialog.add_response("install", "Add");
         dialog.set_default_response(Some("cancel"));
         dialog.set_close_response("cancel");
 
+        // *Add* waits for the script's own account of itself as well as for the
+        // countdown: the point of reading it is that the answer is given with
+        // it on screen. A fetch that fails unblocks it too — the dialog then
+        // says so and shows the file name, and the choice is still the user's.
         let countdown = Countdown::new(&dialog, "install", "Add");
+        countdown.set_blocked(true);
+        {
+            let url = url.to_owned();
+            let dialog = dialog.downgrade();
+            let countdown = countdown.clone();
+            glib::spawn_future_local(async move {
+                let fetched = {
+                    let url = url.clone();
+                    worker::job(move || preview::fetch(&url)).await
+                };
+                let details = match fetched {
+                    Some(Ok(preview)) => Details::Read(preview),
+                    Some(Err(err)) => Details::Unread(err.to_string()),
+                    None => Details::Unread("reading it failed".to_owned()),
+                };
+                if let Some(dialog) = dialog.upgrade() {
+                    dialog.set_body(&install_link::body(&url, &details));
+                }
+                countdown.set_blocked(false);
+            });
+        }
         let window = self.bin.root().and_downcast::<gtk::Window>();
         let focus = window.as_ref().map(|window| {
             let countdown = countdown.clone();
@@ -1087,6 +1115,29 @@ impl ExtensionsPage {
 }
 
 /// Read both sources, the way the page renders them.
+/// The install link's URL in full, folded away under the summary above it.
+///
+/// Folded because the decoded name and the host are what a person decides on,
+/// and the escaped URL is mostly noise — but there, and selectable, for anyone
+/// who wants to check or copy exactly what AdGuard will fetch.
+fn full_address(url: &str) -> gtk::Expander {
+    let label = gtk::Label::builder()
+        .label(url)
+        .use_markup(false)
+        .selectable(true)
+        .wrap(true)
+        .wrap_mode(gtk::pango::WrapMode::Char)
+        .xalign(0.0)
+        .build();
+    label.add_css_class("caption");
+    // Selectable labels take focus, and the focus belongs on Cancel.
+    label.set_focusable(false);
+    gtk::Expander::builder()
+        .label("Full address")
+        .child(&label)
+        .build()
+}
+
 /// How long Add stays greyed out after an install link's dialog appears, or
 /// after its window comes back into focus.
 const ADD_DELAY: u32 = 2;
@@ -1104,6 +1155,8 @@ struct CountdownInner {
     label: &'static str,
     remaining: Cell<u32>,
     timer: RefCell<Option<glib::SourceId>>,
+    /// Held off for a reason other than time — the script still being read.
+    blocked: Cell<bool>,
 }
 
 impl Countdown {
@@ -1114,7 +1167,14 @@ impl Countdown {
             label,
             remaining: Cell::new(ADD_DELAY),
             timer: RefCell::new(None),
+            blocked: Cell::new(false),
         }))
+    }
+
+    /// Keep the response greyed out whatever the count says, or stop doing so.
+    fn set_blocked(&self, blocked: bool) {
+        self.0.blocked.set(blocked);
+        self.paint();
     }
 
     /// Grey the response out and count down from the top.
@@ -1149,7 +1209,7 @@ impl Countdown {
             return;
         };
         let left = self.0.remaining.get();
-        dialog.set_response_enabled(self.0.response, left == 0);
+        dialog.set_response_enabled(self.0.response, left == 0 && !self.0.blocked.get());
         let label = match left {
             0 => self.0.label.to_owned(),
             left => format!("{} ({left})", self.0.label),
