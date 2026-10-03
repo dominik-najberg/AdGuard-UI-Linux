@@ -1,4 +1,4 @@
-# Turn a `v*` tag into a GitHub release carrying the two packages
+# Turn a `v*` tag into a GitHub release carrying the three packages
 # `docs/building.md` §5 describes, built somewhere clean rather than on the
 # maintainer's machine.
 #
@@ -8,11 +8,18 @@
 # `adguard-cli` and two of them mutate the configuration of the machine they run
 # on (docs/building.md §3), which is not a thing to do on a runner.
 #
-# Two jobs, and the split is not decoration:
+# Three jobs, and the split is not decoration:
 #
 #   * `package` runs in an `ubuntu:26.04` container, because this workspace takes
 #     libadwaita's `v1_7` feature and the runner's own image is older — the same
-#     reason `ci.yml` gives.
+#     reason `ci.yml` gives. It builds the .deb and the tarball.
+#   * `rpm` runs in a `fedora:43` container, because rpmbuild's dependency
+#     generator reads the libraries it finds installed, and an .rpm whose
+#     requirements were derived on Ubuntu would name Ubuntu's sonames and
+#     symbol versions. Fedora 43 is the oldest Fedora still supported when this
+#     was written, and the oldest glibc is what keeps the generated
+#     `GLIBC_2.xx` floor low enough for every supported release to install it.
+#     Move it forward when 43 reaches end of life, not before.
 #   * `publish` runs on the runner itself, because that is where `gh` is
 #     installed. Doing it that way costs one artifact round trip and saves
 #     depending on a third-party action to attach a file to a release.
@@ -115,10 +122,80 @@ jobs:
           path: target/package/*.*
           if-no-files-found: error
 
-  publish:
-    needs: package
+  rpm:
     runs-on: ubuntu-latest
-    # Only a tag gets published. A `workflow_dispatch` run stops at the artifact
+    container: fedora:43
+
+    steps:
+      # Before checkout, for `package`'s reason: the image has no git, and
+      # rpm.sh reads the maintainer out of it. `rpm-build` is the one package
+      # this job exists for; `binutils` for the `strip` the script runs, and
+      # `make` named because with weak dependencies off nothing else brings it.
+      - name: Install build dependencies
+        run: |
+          dnf install -y --setopt=install_weak_deps=False \
+            gcc pkgconf-pkg-config gtk4-devel libadwaita-devel \
+            rpm-build binutils make git curl
+          pkg-config --modversion gtk4 libadwaita-1
+
+      - uses: actions/checkout@v4
+
+      - name: Trust the checkout
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      # The same check as `package`'s, and it has to be in both: either job can
+      # fail without the other, and `publish` only needs one artifact missing
+      # to ship a release with a package named for the wrong version.
+      - name: Check the tag against Cargo.toml
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)"
+          tag="${GITHUB_REF#refs/tags/}"
+          [ "v$version" = "$tag" ] || {
+              echo "release.yml: tag $tag does not match version $version in Cargo.toml" >&2
+              exit 1
+          }
+
+      # No `cargo test` here: `package` runs the suite, and `ci.yml` runs it on
+      # Fedora as well. This job's question is only whether the package is right.
+      - name: Package
+        run: make rpm
+
+      - name: Describe what was built
+        run: |
+          ls -l target/package/
+          rpm -qpi target/package/*.rpm
+          rpm -qpR target/package/*.rpm
+          rpm -qpl target/package/*.rpm
+
+      # Installed, in the container that built it, because that is the one
+      # check the generated requirements get before a user's dnf reads them: a
+      # requirement no Fedora package provides fails here, by name, instead of
+      # on a download. `rpm -V` then compares every installed file against the
+      # package's own digests, and `ldd` is the last word on whether the
+      # binary's libraries all resolve.
+      - name: Install what was built
+        run: |
+          dnf install -y ./target/package/*.rpm
+          rpm -V adguard-ui
+          ! ldd /usr/bin/adguard-ui | grep 'not found'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rpm
+          path: target/package/*.rpm
+          if-no-files-found: error
+
+  publish:
+    needs: [package, rpm]
+    runs-on: ubuntu-latest
+    # Only a tag gets published. A `workflow_dispatch` run stops at the artifacts
     # above, which is the whole point of allowing it.
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
@@ -135,13 +212,18 @@ jobs:
           name: packages
           path: packages
 
+      - uses: actions/download-artifact@v4
+        with:
+          name: rpm
+          path: packages
+
       # Beside the packages, not instead of them: a checksum file is what makes
       # a download from a release page checkable at all, and `sha256sum -c`
       # wants exactly this format.
       - name: Checksums
         working-directory: packages
         run: |
-          sha256sum ./*.deb ./*.tar.gz | sed 's| \./| |' > SHA256SUMS
+          sha256sum ./*.deb ./*.rpm ./*.tar.gz | sed 's| \./| |' > SHA256SUMS
           cat SHA256SUMS
 
       # The section for this version, from `## <version> — ` up to the next
@@ -179,4 +261,4 @@ jobs:
               --title "AdGuard UI $tag" \
               --notes-file notes.md ${{ steps.notes.outputs.generate }} \
               --verify-tag \
-              packages/*.deb packages/*.tar.gz packages/SHA256SUMS
+              packages/*.deb packages/*.rpm packages/*.tar.gz packages/SHA256SUMS
