@@ -103,15 +103,15 @@
 //! # Renewing: [`renew`], for a CA AdGuard regenerated
 //!
 //! AdGuard CLI generates a new CA whenever it has lost the old one's key —
-//! measured three times in its own logs, each after a licence activation
-//! (`cli::Error::Unlicensed`). Every store that trusted the old CA then fails
-//! every filtered page, and still holds the old certificate under the same
-//! nickname. That leftover is the evidence [`Store::stale`] counts: someone,
-//! the installer or this application at the user's request, put AdGuard's CA
-//! in this store before. So a store with a stale copy is renewed without
-//! asking again — the old copies out, the current one in with the installer's
-//! trust — while a store that never held AdGuard's CA is still only ever
-//! changed by the *Add to Browsers* button.
+//! measured four times in its own logs, each after a licence activation
+//! (`cli::Error::Unlicensed`), though not after every one. Every store that
+//! trusted the old CA then fails every filtered page, and still holds the old
+//! certificate under the same nickname. That leftover is the evidence
+//! [`Store::stale`] counts: someone, the installer or this application at the
+//! user's request, put AdGuard's CA in this store before. So a store with a
+//! stale copy is renewed without asking again — the old copies out, the
+//! current one in with the installer's trust — while a store that never held
+//! AdGuard's CA is still only ever changed by the *Add to Browsers* button.
 //!
 //! `certutil -D -n` deletes by nickname, one certificate a call, and which of
 //! several same-named ones it takes is NSS's choice. So [`renew`] deletes them

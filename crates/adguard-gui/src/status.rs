@@ -2145,13 +2145,15 @@ fn offline_state(reason: &str) -> String {
 
 /// Asked before activating an install whose last licence check was offline.
 ///
-/// The second paragraph is measured, not feared: every one of the three
-/// activations in AdGuard's own logs (7 September, twice on 3 October 2026)
-/// was followed by `start` failing with *No certificate* and a new CA.
+/// The second paragraph is measured, not feared: four of the six activations
+/// in AdGuard's own logs (7 September, twice on 3 October, and 08:38 on
+/// 4 October 2026) were followed by `start` failing with *No certificate* and
+/// a new CA. The other two, at 23:34 and 23:52 on 4 October, started cleanly
+/// on the old one — hence *often*, not *always*.
 const OFFLINE_ACTIVATION: &str = "AdGuard CLI could not reach AdGuard's servers the last time it \
     checked your licence, and has refused to run since. Activating needs a working connection, so \
-    check it first.\n\nActivating again has so far always made AdGuard CLI generate a new HTTPS \
-    certificate. AdGuard UI updates the browsers that trusted the old one; the system will need \
+    check it first.\n\nActivating again often makes AdGuard CLI generate a new HTTPS certificate. \
+    If it does, AdGuard UI updates the browsers that trusted the old one; the system will need \
     Fix certificate, which asks for your password.";
 
 /// Run `command` in the first terminal emulator found, held open at the end so

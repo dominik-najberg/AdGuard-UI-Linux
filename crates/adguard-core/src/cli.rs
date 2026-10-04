@@ -152,9 +152,15 @@ pub enum Error {
     /// those three activations was followed by `start` failing with *No
     /// certificate*, and by `cert` generating a new CA that no browser trusted.
     ///
+    /// Not every activation pays that, though. Of three more on 4 October, the
+    /// one at 08:38 was followed by `cert` and a new CA just as before; the two
+    /// at 23:34 and 23:52, after a licence lost the same way, were followed by
+    /// a `start` that simply worked, and the CA file kept its 08:39 date. So
+    /// the cost is a risk the user should hear about, not a certainty.
+    ///
     /// So the refusal is real — activation is the way out, and hiding it
     /// would leave the user with a CLI that refuses everything — but the
-    /// reason is not a lapsed licence, and activating has a cost the user
+    /// reason is not a lapsed licence, and activating can have a cost the user
     /// should hear about first. `offline` is the CLI's own logged reason
     /// ([`last_failed_licence_check`]) when the last check it logged could not
     /// reach AdGuard; `None` when the log says nothing of the kind.
