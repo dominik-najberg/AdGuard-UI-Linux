@@ -11,11 +11,15 @@ This file is the one changelog.
 
 ---
 
-## Unreleased
+## 1.9.1 — 10 October 2026
 
 ### Userscripts behind a redirect install
 
 AdGuard CLI does not follow redirects, so a userscript whose *Install* link passes through an install counter or a short link — answering `302` with the script's real address — was shown in the *Add this userscript?* question and then failed on *Add*, with AdGuard's log reading `Download failed with status code: 302` ([#29](https://github.com/dominik-najberg/AdGuard-UI-Linux/issues/29)). The question already follows the redirect to read the script; *Add* now gives AdGuard the address it was read from, and the *Source* row names that host — whose code it is — with *Redirected from* and the link's own host beneath it. An address pasted by hand that AdGuard refuses is followed the same way and tried once more if it leads somewhere else.
+
+### Activating after a lost licence may, not will, bring a new certificate
+
+1.9.0's *Activate…* question said activating had, every time so far, made AdGuard CLI generate a new HTTPS certificate. Later activations on 4 October 2026 started cleanly on the old one, so the question now says it often does, and what it says about browsers applies only if it happens.
 
 ---
 

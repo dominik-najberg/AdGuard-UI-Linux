@@ -53,6 +53,16 @@
     application is its first release.
   -->
   <releases>
+    <release version="1.9.1" type="stable" date="2026-10-10">
+      <url type="details">https://github.com/dominik-najberg/AdGuard-UI-Linux/releases/tag/v1.9.1</url>
+      <description>
+        <p>Fixes for userscript installs and the activation question:</p>
+        <ul>
+          <li>Userscripts whose Install link redirects, through an install counter or a short link, now install. The question names the host the script really comes from, and the host that redirected to it.</li>
+          <li>The Activate question no longer says activating always brings a new HTTPS certificate: it often does, not always.</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.9.0" type="stable" date="2026-10-04">
       <url type="details">https://github.com/dominik-najberg/AdGuard-UI-Linux/releases/tag/v1.9.0</url>
       <description>
