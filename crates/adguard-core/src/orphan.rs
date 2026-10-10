@@ -95,7 +95,7 @@ const DAEMON_ARGS: [&str; 2] = ["start", "--no-fork"];
 /// — finding it, and signalling it — are separated by a `start` that can take a
 /// minute, and a pid is only unique among *live* processes. See
 /// [`Self::alive`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Daemon {
     pid: i32,
     /// Field 22 of `/proc/<pid>/stat`: the process's start time, in clock ticks

@@ -11,8 +11,8 @@
 //!
 //! The three figures under the panel come from files this page can read
 //! directly — `proxy.yaml` and the two filter catalogues — never from
-//! `adguard-cli`. That is not an optimisation: `status` is on a 2 s timer and
-//! two concurrent `adguard-cli` invocations against one data directory is the
+//! `adguard-cli`. That is not an optimisation: `status` can run on any 2 s tick
+//! and two concurrent `adguard-cli` invocations against one data directory is the
 //! shape measured to make one of them fail (contract §3), so a figure that
 //! needed the CLI could not be refreshed as freely as this one is.
 //!
@@ -35,27 +35,34 @@
 //! shortcut here that flipped `proxy_mode` would be a second writer for a key
 //! the Advanced page owns, and the two would reconcile over each other.
 //!
-//! # Activation is user-driven, and that is the only shape the CLI supports
+//! # Activation completes on AdGuard's schedule, not on a button
 //!
-//! The obvious design — open the activation URL, then poll `license` until it
-//! reports `APP_ACTIVE` — cannot be written. Two measured facts rule it out
-//! (contract §7): `license` is itself licence-gated, so while unlicensed it
-//! refuses rather than reporting a status to poll for; and the CLI's own
-//! message says the flow is completed by running `activate` **again**, not by
-//! waiting. A poll would have no readable exit condition and might never see
-//! one.
+//! Run `activate`, take the log-in URL out of its no-TTY message, open it with
+//! `gtk::UriLauncher`, and then wait for the CLI to notice the log-in. The CLI's
+//! own message says to run `activate` **again** to complete it, and this page
+//! used to: a *finish activation* button re-ran it and then read `license`.
+//! Measured on the author's machine across three real activations (4, 9 and
+//! 10 October 2026), that second run does nothing of the kind. All fourteen
+//! took 10–15 ms, none reached AdGuard, and every one was followed by `license`
+//! still refusing (contract §7).
 //!
-//! So the flow is: run `activate`, take the log-in URL out of its no-TTY
-//! message, open it with `gtk::UriLauncher`, and offer a *finish activation*
-//! button that runs `activate` once more and then reads `license`. The button
-//! is not a lesser version of the poll; it is the only shape there is. What
-//! makes it work rather than merely defensible is that the link is stable —
-//! measured, the `appid` in it belongs to the data directory, so running
-//! `activate` again asks after the same pending activation the user was sent to
-//! log into.
+//! What brought the licence back each time was the CLI's own check. While it
+//! is unlicensed, whichever command runs next after roughly seventy seconds
+//! asks AdGuard's servers again, and the `status` poll on this page is that
+//! command. The log-in was picked up 20, 44 and 55 seconds after it, with
+//! `status` running every 2 s. It now runs every [`STATUS_FAILING_EVERY`]
+//! while refused, which can add up to that much to the wait.
 //!
-//! Everything after that follows this app's usual discipline: `license` decides
-//! the outcome, not anything `activate` printed.
+//! So the page follows the poll. A `status` that succeeds after being refused
+//! for want of a licence triggers one `license` read (see
+//! [`StatusPage::settle_status`]), and that read ends the wait. The button that
+//! remains only reads `license`. It never runs `activate` a second time: that
+//! run did nothing, and a licence that came back between the log-in and the
+//! press would put `activate` against a working install, which this page must
+//! never do.
+//!
+//! As everywhere in this app, `license` decides the outcome, not anything
+//! `activate` printed.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
@@ -66,7 +73,7 @@ use std::time::{Duration, Instant, SystemTime};
 use adguard_core::config::key;
 use adguard_core::{
     access, helper, orphan, Activation, Autostart, Catalogue, Cli, Config, Daemon, FilterSet,
-    Filtering, HelperProcess, License, ProxyStatus, RootHelper, Toggle,
+    Filtering, HelperProcess, License, ProxyStatus, RootHelper, StatusInputs, Toggle,
 };
 use adw::prelude::*;
 use gtk::glib;
@@ -75,9 +82,44 @@ use libadwaita as adw;
 
 use crate::{style, toast, worker, Destination};
 
-/// `status` costs ~10 ms and there is no event mechanism to subscribe to, so
-/// polling is the only way to notice the proxy going down underneath us.
+/// There is no event mechanism to subscribe to, so polling is the only way to
+/// notice the proxy going down underneath us.
+///
+/// **The tick is local; `status` is not run on it.** Each tick compares
+/// [`Cli::status_inputs`] — `proxy.yaml`'s content and the live daemons in
+/// `/proc` — against the last reading, and runs `adguard-cli status` only when
+/// they moved or the reading is older than [`STATUS_HEARTBEAT`]. Every
+/// invocation rewrites `adguard.conf`, where the licence lives, and
+/// `proxy.yaml`. A `status` on every tick was 26,698 of those on 9 October
+/// 2026, and a reseeded `adguard.conf` is the leading suspect for the licence
+/// losses in AdGuard's log.
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
+
+/// How long a successful `status` reading is reused while nothing it depends
+/// on has moved.
+///
+/// The backstop for what [`Cli::status_inputs`] cannot see: a licence that
+/// lapsed, or anything else that changes `status`'s answer without touching
+/// `proxy.yaml` or the process list. A minute is how late such news can be,
+/// against thirty invocations a minute saved.
+const STATUS_HEARTBEAT: Duration = Duration::from_secs(60);
+
+/// How long a *failed* reading is reused.
+///
+/// Shorter than the heartbeat, because the way out of a refusal is on the
+/// CLI's side and is only taken when the CLI runs. While unlicensed, it checks
+/// with AdGuard's servers on the first invocation after about seventy seconds,
+/// and that check is what completes an activation (see the module docs). Ten
+/// seconds keeps the wait for it within a minute and a half.
+const STATUS_FAILING_EVERY: Duration = Duration::from_secs(10);
+
+/// How long after the inputs move `status` is run on every tick regardless.
+///
+/// A daemon appears before it binds its ports, and `start` has been measured
+/// taking a minute when it had to recover. The first reading after the process
+/// shows up can be a half-started proxy; this follows it until it settles
+/// instead of reporting that for a whole heartbeat.
+const STATUS_SETTLE: Duration = Duration::from_secs(10);
 
 /// With the window hidden and only the tray showing, poll one tick in five —
 /// `architecture.md` §3's "~10 s when only the tray is visible".
@@ -150,8 +192,9 @@ enum Licence {
     /// `license` failed for some other reason: a timeout, or output we could not
     /// parse. Says so and offers nothing.
     Unreadable { message: String },
-    /// `activate` handed us a log-in URL and it has been opened. Held until the
-    /// user says they are done, because nothing polls for them.
+    /// `activate` handed us a log-in URL and it has been opened. Held until a
+    /// `license` read says the licence is active — after `status` comes back,
+    /// or when the user asks.
     AwaitingLogin { url: String },
 }
 
@@ -296,6 +339,16 @@ pub struct StatusPage {
     activate: gtk::Button,
     finish: gtk::Button,
     licence: RefCell<Licence>,
+    /// Whether the last `status` was refused for want of a licence.
+    ///
+    /// Kept so that the one `status` that succeeds afterwards can be told apart
+    /// from all the others. That is the moment the CLI picked the licence up
+    /// again — after a log-in, or after a check that had failed to reach
+    /// AdGuard — and the licence group should hear about it once.
+    status_unlicensed: Cell<bool>,
+    /// The last `status` reading and what it was taken against. What lets a
+    /// poll tick reuse it instead of running the CLI (see [`POLL_INTERVAL`]).
+    last_status: RefCell<Option<StatusReading>>,
 
     /// Set while a lifecycle command — or an activation — is in flight.
     ///
@@ -586,8 +639,10 @@ impl StatusPage {
 
         let activate = gtk::Button::with_label("Activate…");
         activate.add_css_class("suggested-action");
-        let finish = gtk::Button::with_label("Finish activation");
-        finish.add_css_class("suggested-action");
+        // Not "Finish activation": nothing this button runs finishes it (see
+        // the module docs). It asks where things stand, and the page would have
+        // found out by itself within a couple of minutes.
+        let finish = gtk::Button::with_label("Check now");
         // Keep each action inside the row whose state it changes. Only one is
         // visible at a time, and centring vertically preserves a compact button
         // when the explanatory subtitle wraps.
@@ -690,6 +745,8 @@ impl StatusPage {
             activate: activate.clone(),
             finish: finish.clone(),
             licence: RefCell::new(Licence::Unknown),
+            status_unlicensed: Cell::new(false),
+            last_status: RefCell::new(None),
             busy: Cell::new(false),
             filtering: Cell::new(None),
             filtering_read: Cell::new(None),
@@ -795,7 +852,7 @@ impl StatusPage {
             let this = Rc::downgrade(&this);
             move |_| {
                 if let Some(this) = this.upgrade() {
-                    this.finish_activation();
+                    this.check_activation();
                 }
             }
         });
@@ -943,19 +1000,35 @@ impl StatusPage {
         ));
     }
 
-    /// Re-read the runtime status alone. What the 2 s poll calls, and what
-    /// every lifecycle command calls after acting.
+    /// Re-read the runtime status from `adguard-cli`. What every lifecycle
+    /// command calls after acting: a command's own output is not evidence, and
+    /// a reading taken before it is not either.
     pub fn refresh(self: &Rc<Self>) {
+        self.read_status(true);
+    }
+
+    /// What the 2 s poll calls: the same, but `status` runs only when what it
+    /// reads has moved (see [`POLL_INTERVAL`]).
+    fn poll(self: &Rc<Self>) {
+        self.read_status(false);
+    }
+
+    fn read_status(self: &Rc<Self>, force: bool) {
         let cli = self.cli.clone();
         let (log_due, cached) = self.access_log_due();
+        let previous = self.last_status.borrow().clone();
         let this = self.clone();
         worker::run(
             move || {
-                let status = read_status(&cli);
-                let evidence = read_evidence(&cli, &status, log_due, cached);
-                (status, evidence)
+                let reading = StatusReading::take(&cli, previous, force);
+                let evidence = read_evidence(&cli, &reading.result, log_due, cached);
+                (reading, evidence)
             },
-            move |(status, evidence)| this.settle_status(status, evidence),
+            move |(reading, evidence): (StatusReading, Evidence)| {
+                let status = reading.result.clone();
+                this.last_status.replace(Some(reading));
+                this.settle_status(status, evidence);
+            },
         );
     }
 
@@ -1157,8 +1230,28 @@ impl StatusPage {
             self.filtering_read.set(Some(Instant::now()));
         }
         match result {
-            Ok(status) => self.apply(&status, bypass),
+            Ok(status) => {
+                self.apply(&status, bypass);
+
+                // The other direction: `status` was refused for want of a
+                // licence and now is not, so the CLI has the licence back. This
+                // is how an activation completes (see the module docs). It is
+                // also how a licence lost to the network returns once AdGuard
+                // can be reached again. Either way the group below is still
+                // showing the wait or the refusal. Re-read it, once, on the
+                // change. A reading that still says "not active" leaves the flag
+                // down, so this cannot turn into a `license` poll.
+                if self.status_unlicensed.replace(false) && !self.claims_active_licence() {
+                    self.read_licence();
+                }
+            }
             Err((unlicensed, message)) => {
+                // Raised only, never lowered here: a check that fails to reach
+                // AdGuard in the middle of the wait says nothing about whether
+                // the licence is back, and must not hide its return.
+                if unlicensed {
+                    self.status_unlicensed.set(true);
+                }
                 // Kept in the panel rather than a toast: a failing `status`
                 // repeats every two seconds and would bury the UI in toasts.
                 // The panel is where it belongs anyway — it is the answer to the
@@ -1312,7 +1405,7 @@ impl StatusPage {
 
             let due = this.window_visible.get() || tick % HIDDEN_POLL_EVERY == 0;
             if due && !this.busy.get() {
-                this.refresh();
+                this.poll();
             }
             glib::ControlFlow::Continue
         });
@@ -1726,7 +1819,7 @@ impl StatusPage {
         // An activation the user has not finished is not overwritten by a
         // reading that says what we already knew. Pressing the refresh button
         // to ask "did it work?" is the natural gesture at exactly that moment,
-        // and it would otherwise take the log-in link and the finish button off
+        // and it would otherwise take the log-in link and the check button off
         // the screen and put the user back at the start of a flow they are in
         // the middle of.
         //
@@ -1738,13 +1831,18 @@ impl StatusPage {
         }
 
         self.set_licence(Licence::Read(licence));
+        // Usually reached from the `status` poll, not from a press, so nothing
+        // else tells the user the wait is over.
+        if awaiting {
+            self.toasts.add_toast(toast("AdGuard is activated"));
+        }
     }
 
     /// `license` would not answer.
     fn licence_refused(&self, refused: Refused) {
         // A refusal while the user is still logging in is the expected answer,
         // not news — it is what "not activated yet" looks like. Keep the link
-        // and the finish button rather than sending them back to the start.
+        // and the check button rather than sending them back to the start.
         let awaiting = matches!(*self.licence.borrow(), Licence::AwaitingLogin { .. });
         if awaiting {
             return;
@@ -1803,13 +1901,12 @@ impl StatusPage {
     /// Ask the CLI where to send the user, then send them there.
     fn begin_activation(self: &Rc<Self>) {
         self.activate.set_sensitive(false);
-        // The poll stands down for the same reason it does for start/stop, and
-        // more urgently: `activate` is allowed 120 s for its completion leg
-        // (`NETWORK_TIMEOUT`), and left running the poll would put up to sixty
-        // `status` invocations into the same data directory alongside the one
-        // command in this app that changes AdGuard's licensing state. Two
+        // The poll stands down for the same reason it does for start/stop.
+        // `activate` is the one command in this app that changes AdGuard's
+        // licensing state, and it stops a running proxy on the way. Two
         // concurrent invocations are exactly the shape measured to make one of
-        // them fail (contract §3).
+        // them fail (contract §3), and this is the last command to risk that
+        // alongside.
         self.busy.set(true);
         let cli = self.cli.clone();
         let this = self.clone();
@@ -1854,36 +1951,27 @@ impl StatusPage {
         });
     }
 
-    /// The user says they have logged in.
-    fn finish_activation(self: &Rc<Self>) {
+    /// The user asks whether the log-in has been picked up yet.
+    ///
+    /// Only `license`. Not `activate` a second time, though the CLI's own
+    /// message asks for it: measured, that run neither reaches AdGuard nor
+    /// completes anything (see the module docs). And by the time of the press
+    /// the CLI may have picked the licence up by itself, which would put
+    /// `activate` against a working install.
+    fn check_activation(self: &Rc<Self>) {
         self.finish.set_sensitive(false);
-        // As in `begin_activation`, and this is the leg that actually reaches
-        // AdGuard's servers.
+        // As in `begin_activation`: one invocation at a time.
         self.busy.set(true);
         let cli = self.cli.clone();
         let this = self.clone();
         worker::run(
-            move || {
-                // Once, and then the question is put to `license` instead.
-                // `activate`'s own failure is kept only to explain a `license`
-                // that still refuses: a timeout reaching AdGuard is worth more
-                // to the user than "not activated yet".
-                let attempt = cli.activate().err().map(|err| err.to_string());
-                (attempt, read_licence(&cli))
-            },
-            move |(attempt, licence)| this.settle_activation(attempt, licence),
+            move || read_licence(&cli),
+            move |licence| this.settle_check(licence),
         );
     }
 
     /// Reconcile the page against what `license` now says.
-    ///
-    /// The same discipline as every write in this app: the command's own output
-    /// is not evidence, so the state that decides is read back afterwards.
-    fn settle_activation(
-        self: &Rc<Self>,
-        attempt: Option<String>,
-        licence: Result<License, Refused>,
-    ) {
+    fn settle_check(self: &Rc<Self>, licence: Result<License, Refused>) {
         self.busy.set(false);
         self.finish.set_sensitive(true);
 
@@ -1909,16 +1997,11 @@ impl StatusPage {
             Err(Refused { unlicensed, message, .. }) => (unlicensed, message),
         };
 
-        self.toasts.add_toast(toast(&match (attempt, refusal) {
-            // `activate` itself failed. That names something the user can act
-            // on — a network problem — where our own sentence would not.
-            (Some(failure), _) => failure,
-            (None, (true, _)) => "Not activated yet. Log in with the link below, then \
-                                  choose Finish activation again"
-                .to_owned(),
+        self.toasts.add_toast(toast(&match refusal {
+            (true, _) => NOT_YET.to_owned(),
             // `license` failed for some reason other than the licence, which is
             // the CLI's to explain.
-            (None, (false, message)) => message,
+            (false, message) => message,
         }));
     }
 
@@ -1944,12 +2027,7 @@ impl StatusPage {
             Licence::Inactive { message, .. } | Licence::Unreadable { message } => {
                 (message.clone(), None, None)
             }
-            Licence::AwaitingLogin { .. } => (
-                "Waiting for you to log in. Choose Finish activation once you have"
-                    .to_owned(),
-                None,
-                None,
-            ),
+            Licence::AwaitingLogin { .. } => (WAITING.to_owned(), None, None),
         };
 
         self.licence_state.set_subtitle(&state);
@@ -1979,6 +2057,49 @@ impl StatusPage {
         self.activate.set_visible(inactive);
         self.finish
             .set_visible(matches!(&*licence, Licence::AwaitingLogin { .. }));
+    }
+}
+
+/// One `status` reading, kept so a poll tick can reuse it.
+#[derive(Clone)]
+struct StatusReading {
+    result: Result<ProxyStatus, (bool, String)>,
+    /// What the CLI's answer depended on when it was read. `None` when
+    /// `proxy.yaml` could not be read, which never matches, so the next tick
+    /// asks the CLI again.
+    inputs: Option<StatusInputs>,
+    read_at: Instant,
+    /// When `inputs` last differed from the reading before. Kept apart from
+    /// `read_at` for [`STATUS_SETTLE`].
+    moved_at: Instant,
+}
+
+impl StatusReading {
+    /// Reuse `previous` if nothing `status` depends on has moved and it is
+    /// young enough, or run `status`. `force` always runs it. Blocking: call it
+    /// on the worker.
+    fn take(cli: &Cli, previous: Option<Self>, force: bool) -> Self {
+        let inputs = cli.status_inputs();
+        let now = Instant::now();
+        let Some(previous) = previous else {
+            // The first reading is not a change: nothing was seen before it.
+            let settled = now.checked_sub(STATUS_SETTLE).unwrap_or(now);
+            return Self { result: read_status(cli), inputs, read_at: now, moved_at: settled };
+        };
+
+        let moved = inputs.is_none() || inputs != previous.inputs;
+        let moved_at = if moved { now } else { previous.moved_at };
+        let max_age = if previous.result.is_ok() {
+            STATUS_HEARTBEAT
+        } else {
+            STATUS_FAILING_EVERY
+        };
+        let fresh = previous.read_at.elapsed() < max_age;
+        let settled = moved_at.elapsed() >= STATUS_SETTLE;
+        if !force && !moved && fresh && settled {
+            return previous;
+        }
+        Self { result: read_status(cli), inputs, read_at: now, moved_at }
     }
 }
 
@@ -2142,6 +2263,23 @@ fn offline_state(reason: &str) -> String {
          refuses to run until it is activated again"
     )
 }
+
+/// The licence row while the log-in is outstanding.
+///
+/// "About once a minute" is the CLI's own cadence, measured from its log: while
+/// unlicensed, a command that reached AdGuard every 70 seconds or so. A
+/// refused `status` is re-run every [`STATUS_FAILING_EVERY`], so the page
+/// follows within that of it.
+const WAITING: &str = "Waiting for you to log in with the link below. AdGuard checks about once a \
+    minute, and this updates by itself when it sees the log-in";
+
+/// Said when `license` still refuses after the user asked.
+///
+/// No advice to run anything again: nothing the page can run makes AdGuard
+/// check sooner. The 20–55 s it took on the three activations measured is the
+/// wait being described.
+const NOT_YET: &str = "AdGuard has not seen the log-in yet. It checks about once a minute, and \
+    this page updates by itself when it does";
 
 /// Asked before activating an install whose last licence check was offline.
 ///
