@@ -604,7 +604,7 @@ A release is a tag. Everything else — building the three packages in clean con
 Four things happen before the tag, and all four are on the machine, not on the runner:
 
 ```bash
-cargo test --workspace --locked                 # 588 pass, 69 ignored
+cargo test --workspace --locked                 # 590 pass, 69 ignored
 make package                                    # the .deb and tarball build here first
 git status --porcelain                          # must be empty
 git log --oneline -1
