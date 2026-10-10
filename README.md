@@ -76,7 +76,7 @@ While the tray is present, closing the window only hides it and *Quit* in the tr
 
 ## The pages
 
-**Status** — runtime state, start/stop/restart, the proxy endpoints, and the licence. Polled every 2 seconds while the window is up, every 10 when only the tray is showing. A start or restart that AdGuard refuses keeps its reason on the main panel, in AdGuard's own words, with a *Retry protection* button, until the proxy is confirmed running; it lasts for the session and is not saved between launches.
+**Status** — runtime state, start/stop/restart, the proxy endpoints, and the licence. Checked every 2 seconds while the window is up, every 10 when only the tray is showing — locally, from `proxy.yaml` and the process list. `adguard-cli status` itself runs only when those change, and otherwise once a minute (every 10 seconds while AdGuard refuses it), because every `adguard-cli` invocation rewrites AdGuard's config files, including the one holding the licence. A start or restart that AdGuard refuses keeps its reason on the main panel, in AdGuard's own words, with a *Retry protection* button, until the proxy is confirmed running; it lasts for the session and is not saved between launches.
 
 ![A start that failed because AdGuard has no certificate, with Retry protection and Fix certificate side by side](docs/screenshots/status-failed-start.png)
 

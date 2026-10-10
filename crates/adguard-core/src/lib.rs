@@ -34,7 +34,7 @@ pub use access::Filtering;
 pub use autostart::Autostart;
 pub use browser::BrowserIntegration;
 pub use nss::BrowserStores;
-pub use cli::{Activation, Applied, Cli, Error};
+pub use cli::{Activation, Applied, Cli, Error, StatusInputs};
 pub use diagnostics::Report;
 pub use config::{AddressPlan, AuthState, Config, DnsListenPort, Watch};
 pub use helper::{HelperProcess, RootHelper};

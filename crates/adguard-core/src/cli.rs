@@ -70,12 +70,12 @@ const EXPORT_TIMEOUT: Duration = Duration::from_secs(300);
 /// `check-update`, `update` (`architecture.md` §4), and [`Cli::activate`].
 ///
 /// `activate` is the one wired up so far, and it is a mixed case worth stating.
-/// Measured, its *first* leg is entirely local: 0.14 s in a fresh data
+/// Measured with stdin closed, it is entirely local: 0.14 s in a fresh data
 /// directory, which it seeds, and 0.01–0.02 s every time after — the log-in URL
-/// it prints is derived on this machine, not fetched. The second leg is the
-/// network one, because completing an activation means asking AdGuard whether
-/// the log-in happened. One command, two very different costs, so it takes the
-/// generous deadline.
+/// it prints is derived on this machine, not fetched. It was expected to have a
+/// network leg, the one that completes an activation, and in that mode it does
+/// not (contract §7). It keeps the generous deadline anyway, because it also
+/// stops a running proxy on the way, and `stop` is not a local read.
 pub const NETWORK_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// How often the deadline is checked while a child runs.
@@ -669,11 +669,9 @@ impl Cli {
         })
     }
 
-    /// Begin — or complete — licence activation.
+    /// Begin licence activation: get the link the user logs in with.
     ///
-    /// The same command does both, which is what makes the flow work without a
-    /// TTY. Measured on v1.4.13 with stdin closed, against an unlicensed
-    /// sandbox:
+    /// Measured on v1.4.13 with stdin closed, against an unlicensed sandbox:
     ///
     /// ```text
     /// $ adguard-cli activate
@@ -685,15 +683,27 @@ impl Cli {
     /// Exit 0, on stdout, no ANSI. The first line is a menu prompt that never
     /// got asked; the second is the one worth acting on.
     ///
-    /// # Why running it twice is not a poll
+    /// # "Run `adguard-cli activate` again" does not complete it
     ///
-    /// Measured: the `appid` in that URL is **stable for a given data
-    /// directory** — three invocations produced the identical link, and a
-    /// second sandbox produced a different one. So "run `activate` again" does
-    /// not start a fresh attempt that races the first; it asks after the one the
-    /// user was already sent to log into. That is what makes a *finish* button
-    /// the honest shape for this flow, rather than a lesser version of a poll
-    /// nobody can write (`architecture.md` §5).
+    /// Not without a TTY. Measured on the author's install across three real
+    /// activations (4, 9 and 10 October 2026): every second run, fourteen in
+    /// all, took 10–15 ms, reached nothing, and was followed by `license` still
+    /// refusing. The licence came back 20–55 s after the log-in, each time
+    /// through whatever command happened to run when the CLI's own roughly
+    /// seventy-second check fell due. A caller waits for that and does not call
+    /// this again (contract §7).
+    ///
+    /// The `appid` in the URL is **stable for a given data directory** — three
+    /// invocations produced the identical link, and a second sandbox produced a
+    /// different one. So calling this twice does no harm to a log-in already in
+    /// progress. It is simply no use.
+    ///
+    /// # It stops the proxy
+    ///
+    /// When the proxy is running, the first run stops it: AdGuard's log has a
+    /// `stop_command` right after `activate_command`, in the same process, on
+    /// 4 and 10 October 2026. Nothing starts it again, so protection stays off
+    /// after the licence is back until something runs `start`.
     ///
     /// # Only reached while the licence is not active
     ///
@@ -724,6 +734,47 @@ impl Cli {
             Some(home) => Some(paths::config_file_under(home)),
             None => paths::config_file(),
         }
+    }
+
+    /// What `status` reads, taken from this machine without running the CLI.
+    ///
+    /// # Why this exists
+    ///
+    /// Every invocation rewrites `proxy.yaml` (contract §5) and `adguard.conf`,
+    /// the file the licence lives in, in place, even when no byte changes. A
+    /// `status` every two seconds was 26,698 invocations on 9 October 2026,
+    /// against about fifteen for everything else together. And a reseeded
+    /// `adguard.conf` is the leading suspect for the licence losses in
+    /// AdGuard's log. So the poll asks this first and runs `status` only when
+    /// the answer moves (`StatusPage` in the GUI decides how often otherwise).
+    ///
+    /// # What it covers
+    ///
+    /// `status` reports whether the proxy runs, the two endpoints it listens
+    /// on, and three switches. The switches and the endpoints' configuration
+    /// are in `proxy.yaml`, compared by **content**, because its mtime moves on
+    /// every invocation whatever happens. The running proxy is the set of live
+    /// daemons, by pid *and* start time, so a restart reads as a change even
+    /// when the pid is reused.
+    ///
+    /// Not covered, and the reason the caller still runs `status` on a slow
+    /// heartbeat: a proxy that binds its ports some time after its process
+    /// appears, and a licence that lapses. Neither shows up here.
+    ///
+    /// `None` when `proxy.yaml` cannot be read. The caller then has nothing to
+    /// compare and must ask the CLI.
+    pub fn status_inputs(&self) -> Option<StatusInputs> {
+        use std::hash::{Hash, Hasher};
+
+        let config = std::fs::read(self.config_path()?).ok()?;
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        config.hash(&mut hasher);
+        // Sorted, because `/proc` promises no order and the same processes
+        // listed differently are not a change.
+        let mut daemons = crate::orphan::daemons(&self.binary);
+        daemons.sort();
+        daemons.hash(&mut hasher);
+        Some(StatusInputs(hasher.finish()))
     }
 
     /// Why the CLI last failed to check the licence, if the last check it
@@ -1682,6 +1733,14 @@ pub struct Applied {
     pub restart_required: bool,
 }
 
+/// A digest of what `adguard-cli status` would read, from [`Cli::status_inputs`].
+///
+/// Opaque on purpose: it is good for one thing, telling whether anything
+/// `status` depends on has moved since the last reading, and nothing should be
+/// read out of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StatusInputs(u64);
+
 /// What [`Cli::activate`] came back with.
 ///
 /// Two variants rather than a `Result`, because neither of these is a failure:
@@ -1689,8 +1748,9 @@ pub struct Applied {
 /// interesting part.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Activation {
-    /// Log in at this URL, then run `activate` again. The measured no-TTY path,
-    /// and the only one the UI has a flow for.
+    /// Log in at this URL. The CLI's message adds "then run `activate` again",
+    /// which does nothing without a TTY (see [`Cli::activate`]). The measured
+    /// no-TTY path, and the only one the UI has a flow for.
     NeedsLogin { url: String },
 
     /// Something else — an install that is already activated, or a shape that
@@ -3038,6 +3098,32 @@ mod tests {
             }
             other => panic!("expected Unlicensed, got {other:?}"),
         }
+    }
+
+    /// The poll's fingerprint follows `proxy.yaml`'s content and nothing else
+    /// about the file: the same bytes written again are no change, which is
+    /// exactly what every CLI invocation does to it.
+    #[test]
+    fn status_inputs_move_with_the_config_content_only() {
+        let home = std::env::temp_dir().join(format!("adguard-ui-inputs-{}", std::process::id()));
+        let config = paths::config_file_under(&home);
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        // A binary no daemon runs as, so the process half stays empty.
+        let cli = cli_for("/bin/sh").with_xdg_data_home(&home);
+
+        let missing = cli.status_inputs();
+        std::fs::write(&config, "proxy_mode: manual\n").unwrap();
+        let first = cli.status_inputs();
+        std::fs::write(&config, "proxy_mode: manual\n").unwrap();
+        let rewritten = cli.status_inputs();
+        std::fs::write(&config, "proxy_mode: auto\n").unwrap();
+        let edited = cli.status_inputs();
+        let _ = std::fs::remove_dir_all(&home);
+
+        assert_eq!(missing, None, "nothing to compare without the file");
+        assert!(first.is_some());
+        assert_eq!(first, rewritten, "the same bytes again are not a change");
+        assert_ne!(first, edited, "an edit is");
     }
 
     /// The other half of the same decision: a real malformed command line must
