@@ -17,6 +17,10 @@ This file is the one changelog.
 
 Every `adguard-cli` command rewrites AdGuard's configuration files, including `adguard.conf`, which holds the licence, even when nothing in them changes. The Status page ran `adguard-cli status` every two seconds, which came to about 27,000 rewrites a day. Each time AdGuard CLI lost its licence, its own log shows it rebuilding that file from scratch, so the application now checks locally whenever it can. Every two seconds it compares `proxy.yaml` and the running AdGuard processes with the last reading. It runs `status` only when one of them changes, after its own start, stop and restart, every ten seconds while AdGuard refuses it, and otherwise once a minute. A proxy that stops or starts is still noticed within two seconds. A licence that lapses while the proxy runs can take up to a minute to show.
 
+### Long notifications wrap instead of being cut off
+
+A notification at the bottom of the window showed one line and cut the rest off with "…", so a sentence such as the one *Check now* gives while AdGuard has not yet seen the log-in ended mid-word. They now wrap onto as many lines as they need. That includes the error messages passed on from AdGuard CLI.
+
 ### Activation finishes by itself once AdGuard sees the log-in
 
 After you logged in with the activation link, often replacing a device on the way, the licence row went on saying *Waiting for you to log in*, and *Finish activation* answered *Not activated yet* however often it was pressed. That button ran `adguard-cli activate` a second time, as the CLI's own message asks. Measured across three real activations, that run never completes anything. AdGuard CLI picks the log-in up by itself when it next checks with AdGuard's servers, which it does about once a minute while it has no licence. The page now notices that moment from its regular `status` read, turns the licence row to *Active* and says *AdGuard is activated*, usually within a minute of the log-in. A licence lost to the network comes back the same way once AdGuard can be reached. The button is now *Check now*. It only reads the licence, and never runs `activate` again.

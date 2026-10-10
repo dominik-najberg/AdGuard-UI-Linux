@@ -1152,8 +1152,21 @@ fn sidebar_row(page: &Page) -> gtk::ListBoxRow {
 /// `AdwToast:use-markup` defaults to true — left on, Pango fails to parse the
 /// string and the message renders mangled. `use_markup` comes first for the
 /// same reason it does on the filter rows: the title is consumed as it is set.
+///
+/// **Wrapped, not ellipsized.** `AdwToast`'s own title is one line, and the
+/// rest is cut off with "…". A sentence from the CLI, or one of ours that
+/// explains a wait, then ends mid-thought with no way to read the rest: the
+/// licence toast after *Check now* was cut at "and this pag…" (10 October
+/// 2026). A plain label as the custom title wraps instead. It is not markup
+/// either, since a `gtk::Label` parses none unless asked.
 pub fn toast(message: &str) -> adw::Toast {
-    adw::Toast::builder().use_markup(false).title(message).build()
+    let title = gtk::Label::builder()
+        .label(message)
+        .wrap(true)
+        .wrap_mode(gtk::pango::WrapMode::WordChar)
+        .xalign(0.0)
+        .build();
+    adw::Toast::builder().custom_title(&title).build()
 }
 
 /// Scroll a widget to the top of whatever scrolls it, and tint it for a moment.
