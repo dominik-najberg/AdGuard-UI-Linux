@@ -11,6 +11,14 @@ This file is the one changelog.
 
 ---
 
+## Unreleased
+
+### Userscripts behind a redirect install
+
+AdGuard CLI does not follow redirects, so a userscript whose *Install* link passes through an install counter or a short link — answering `302` with the script's real address — was shown in the *Add this userscript?* question and then failed on *Add*, with AdGuard's log reading `Download failed with status code: 302` ([#29](https://github.com/dominik-najberg/AdGuard-UI-Linux/issues/29)). The question already follows the redirect to read the script; *Add* now gives AdGuard the address it was read from, and the *Source* row names that host — whose code it is — with *Redirected from* and the link's own host beneath it. An address pasted by hand that AdGuard refuses is followed the same way and tried once more if it leads somewhere else.
+
+---
+
 ## 1.9.0 — 4 October 2026
 
 ### A licence lost to the network says so before it is activated again

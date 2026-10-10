@@ -2098,6 +2098,8 @@ Userscript installed and enabled successfully
 
 **`Failed to install userscript` is the only failure sentence, and it covers everything.** A 404, a body that is not a userscript, a local path and a `file://` URL all produce that one line — indistinguishable, so neither the wrapper nor the UI may claim to know which happened. The same rule [§6](#installing-a-custom-filter) states for `Failed to install the filter from URL`, with an even blunter message: this one does not even echo what was passed.
 
+**A redirect is a failure too: the downloader does not follow one.** Reported against 1.4.13 in [#29](https://github.com/dominik-najberg/AdGuard-UI-Linux/issues/29) (the redirect itself re-checked against the live link 10 October 2026): an install-counter URL that answers `302` with the script's `raw.githubusercontent.com` address is fetched once, and AdGuard's log reads `Download failed with status code: 302` — on stdout, the same one sentence as above. So the application hands `install` the address *after* redirects: the install-link question has already followed them to read the script (`preview.rs`), and a pasted address that is refused is followed once and retried if it led elsewhere.
+
 Note the confirmation says **"installed and enabled"**. A new script arrives switched on; there is no install-disabled path.
 
 ### Re-installing is the update path, and it silently re-enables
