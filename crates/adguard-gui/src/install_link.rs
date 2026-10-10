@@ -18,7 +18,7 @@
 //! never acted on: it fills in a confirmation that names the URL in full, and
 //! defaults to *Cancel*.
 
-use adguard_core::preview::{self, Preview, RunsOn};
+use adguard_core::preview::{self, Fetched, RunsOn};
 use gtk4::glib;
 
 /// The scheme registered in the `.desktop` file as `x-scheme-handler/…`.
@@ -89,8 +89,9 @@ pub fn parse(link: &str) -> Result<String, Refused> {
 pub enum Details {
     /// The head of the script is being fetched.
     Reading,
-    /// Its metadata block (`adguard_core::preview`).
-    Read(Preview),
+    /// Its metadata block (`adguard_core::preview`), and the address it was
+    /// read from once redirects were followed.
+    Read(Fetched),
     /// It could not be read, and why — the dialog falls back to the file name.
     Unread(String),
 }
@@ -112,8 +113,11 @@ pub struct Summary {
     /// happening instead.
     pub note: Option<String>,
     pub version: Option<String>,
-    /// The host the script is fetched from.
+    /// The host the script is fetched from — where redirects led, once it
+    /// has been read, since that is whose code it is.
     pub source: String,
+    /// The host of the link itself, when it redirected somewhere else.
+    pub via: Option<String>,
     pub reach: Reach,
 }
 
@@ -207,7 +211,8 @@ pub fn shorten(text: &str, max: usize) -> String {
 
 /// The rows for `url`, from what is known about it so far.
 pub fn summary(url: &str, details: &Details) -> Summary {
-    let source = preview::host(url).unwrap_or_else(|| url.to_owned());
+    let host = |url: &str| preview::host(url).unwrap_or_else(|| url.to_owned());
+    let source = host(url);
     let file = preview::file_name(url).unwrap_or_else(|| source.clone());
     match details {
         Details::Reading => Summary {
@@ -215,6 +220,7 @@ pub fn summary(url: &str, details: &Details) -> Summary {
             note: Some("Reading what the script says about itself…".to_owned()),
             version: None,
             source,
+            via: None,
             reach: Reach::Reading,
         },
         Details::Unread(why) => Summary {
@@ -222,13 +228,15 @@ pub fn summary(url: &str, details: &Details) -> Summary {
             note: Some(format!("Its details could not be read: {why}")),
             version: None,
             source,
+            via: None,
             reach: Reach::Unknown,
         },
-        Details::Read(preview) => Summary {
+        Details::Read(Fetched { preview, url: served }) => Summary {
             name: preview.name.clone().unwrap_or(file),
             note: preview.description.clone(),
             version: preview.version.clone(),
-            source,
+            via: Some(source).filter(|link| *link != host(served)),
+            source: host(served),
             reach: match &preview.runs_on {
                 RunsOn::Everywhere => Reach::Everywhere,
                 RunsOn::Unstated => Reach::Unstated,
@@ -241,16 +249,24 @@ pub fn summary(url: &str, details: &Details) -> Summary {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use adguard_core::preview::Preview;
 
     const HIT_HIDER: &str = "https://update.greasyfork.org/scripts/1682/Google%20Hit%20Hider\
                              %20by%20Domain%20%28Search%20Filter%20%20Block%20Sites%29.user.js";
 
     fn read(runs_on: RunsOn) -> Details {
-        Details::Read(Preview {
-            name: Some("Google Hit Hider by Domain (Search Filter / Block Sites)".to_owned()),
-            version: Some("2.4.1".to_owned()),
-            description: Some("Block unwanted sites from your search results.".to_owned()),
-            runs_on,
+        read_from(HIT_HIDER, runs_on)
+    }
+
+    fn read_from(served: &str, runs_on: RunsOn) -> Details {
+        Details::Read(Fetched {
+            preview: Preview {
+                name: Some("Google Hit Hider by Domain (Search Filter / Block Sites)".to_owned()),
+                version: Some("2.4.1".to_owned()),
+                description: Some("Block unwanted sites from your search results.".to_owned()),
+                runs_on,
+            },
+            url: served.to_owned(),
         })
     }
 
@@ -265,6 +281,7 @@ mod tests {
                 note: Some("Block unwanted sites from your search results.".to_owned()),
                 version: Some("2.4.1".to_owned()),
                 source: "update.greasyfork.org".to_owned(),
+                via: None,
                 reach: Reach::Sites(sites.to_vec()),
             }
         );
@@ -272,6 +289,18 @@ mod tests {
         assert_eq!(summary.reach.note().as_deref(), Some("google.com, bing.com, …"));
         assert_eq!(summary.reach.sites().len(), 4, "every site is listed on expansion");
         assert!(!summary.reach.warns());
+    }
+
+    /// #29: a link that redirects is named by where the script is, with the
+    /// host that sent it there beside it.
+    #[test]
+    fn a_redirected_script_is_sourced_where_it_was_read() {
+        let link = "https://userscript-install-tracker.vercel.app/install/PinterestPowerMenu.user.js";
+        let served =
+            "https://raw.githubusercontent.com/Angel2mp3/Pinterest-Power-Menu/main/PinterestPowerMenu.user.js";
+        let summary = summary(link, &read_from(served, RunsOn::Everywhere));
+        assert_eq!(summary.source, "raw.githubusercontent.com");
+        assert_eq!(summary.via.as_deref(), Some("userscript-install-tracker.vercel.app"));
     }
 
     /// Before the head arrives, and if it never does: the decoded file name,

@@ -13,6 +13,14 @@
 //! application. It reads at most [`LIMIT`] bytes, runs nothing, and sends
 //! nothing about the user; AdGuard fetches the script again on *Add*.
 //!
+//! **That fetch is given the address the script was read from, not the one
+//! clicked.** AdGuard CLI does not follow redirects: measured against 1.4.13 on
+//! #29's install-counter link, which answers `302` with the script's
+//! `raw.githubusercontent.com` address, it logs `Download failed with status
+//! code: 302` and installs nothing. This fetch does follow them, so it reports
+//! where it ended up ([`Fetched::url`]) — which is also the host the dialog has
+//! to name, since that is whose code it is — and *Add* hands AdGuard that.
+//!
 //! **Everything in the block was written by the script's author.** A hostile
 //! script can call itself *AdGuard Extra*, so the dialog never shows a name
 //! without the host it came from, and every field is passed through [`clean`]:
@@ -42,6 +50,16 @@ pub enum Error {
     NotAUserscript,
 }
 
+/// A script's metadata block, and where it was read from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Fetched {
+    pub preview: Preview,
+    /// The address the script was served from: the one asked for, or where its
+    /// redirects led. The one to give `userscripts install`, which follows
+    /// none.
+    pub url: String,
+}
+
 /// The fields of a metadata block the confirmation shows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Preview {
@@ -67,9 +85,15 @@ pub enum RunsOn {
 /// Fetch the head of the script at `url` and read its metadata block.
 ///
 /// Blocking, for a worker thread.
-pub fn fetch(url: &str) -> Result<Preview, Error> {
+pub fn fetch(url: &str) -> Result<Fetched, Error> {
+    use ureq::ResponseExt;
+
     let agent = ureq::Agent::config_builder()
         .timeout_global(Some(TIMEOUT))
+        // To tell a redirect from no redirect. The final URI alone cannot: it
+        // is the request's own reparsed, and that is not always the string
+        // that went in — which is the string to install when nothing moved.
+        .save_redirect_history(true)
         // The application and its version, as the release check sends, and
         // nothing about the user.
         .user_agent(concat!("AdGuard-UI-Linux/", env!("CARGO_PKG_VERSION")))
@@ -82,6 +106,9 @@ pub fn fetch(url: &str) -> Result<Preview, Error> {
         _ => Error::Unreachable(host.clone()),
     })?;
 
+    let moved = response.get_redirect_history().is_some_and(|history| history.len() > 1);
+    let served = if moved { response.get_uri().to_string() } else { url.to_owned() };
+
     // `take` rather than the body's own limit, which fails a body longer than
     // the limit instead of stopping at it — and the block is at the top.
     let mut head = Vec::new();
@@ -92,7 +119,8 @@ pub fn fetch(url: &str) -> Result<Preview, Error> {
         .read_to_end(&mut head)
         .map_err(|_| Error::Unreachable(host))?;
 
-    parse(&String::from_utf8_lossy(&head)).ok_or(Error::NotAUserscript)
+    let preview = parse(&String::from_utf8_lossy(&head)).ok_or(Error::NotAUserscript)?;
+    Ok(Fetched { preview, url: served })
 }
 
 /// Read a `// ==UserScript==` block, or `None` if there is none.
@@ -433,12 +461,49 @@ mod tests {
             }
         });
 
-        let preview = fetch(&format!("http://127.0.0.1:{port}/a.user.js")).expect("reads the head");
-        assert_eq!(preview.version.as_deref(), Some("2.4.1"));
+        let url = format!("http://127.0.0.1:{port}/a.user.js");
+        let fetched = fetch(&url).expect("reads the head");
+        assert_eq!(fetched.preview.version.as_deref(), Some("2.4.1"));
+        assert_eq!(fetched.url, url, "nothing moved, so the address is the one given");
         assert_eq!(
             fetch(&format!("http://127.0.0.1:{port}/b.user.js")),
             Err(Error::NotAUserscript)
         );
+        server.join().unwrap();
+    }
+
+    /// #29: an install counter that answers `302` with the script's real
+    /// address. The head is read from there, and that is the address reported
+    /// — the one AdGuard, which follows no redirects, can install from.
+    #[test]
+    fn a_redirect_reports_where_the_script_is() {
+        use std::io::Write;
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let responses = [
+                format!(
+                    "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{port}/raw/a.user.js\r\n\
+                     Content-Length: 0\r\nConnection: close\r\n\r\n"
+                ),
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{HIT_HIDER}",
+                    HIT_HIDER.len()
+                ),
+            ];
+            for response in responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0_u8; 2048];
+                let _ = std::io::Read::read(&mut stream, &mut request);
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+
+        let fetched = fetch(&format!("http://127.0.0.1:{port}/install/a.user.js")).expect("follows it");
+        assert_eq!(fetched.url, format!("http://127.0.0.1:{port}/raw/a.user.js"));
+        assert_eq!(fetched.preview.version.as_deref(), Some("2.4.1"));
         server.join().unwrap();
     }
 }

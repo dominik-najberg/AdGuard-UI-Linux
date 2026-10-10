@@ -1001,8 +1001,8 @@ impl ExtensionsPage {
                     break;
                 };
                 this.asking.replace(Some(url.clone()));
-                if this.confirm_install(&url).await {
-                    this.install(url, None).await;
+                if let Some(served) = this.confirm_install(&url).await {
+                    this.install(served, None).await;
                 }
                 this.asking.replace(None);
             }
@@ -1024,7 +1024,12 @@ impl ExtensionsPage {
     /// cannot be waited out elsewhere and then clicked through unread. Enter
     /// and Escape are Cancel throughout, and Add is a plain button rather than
     /// a highlighted one, so the eye does not land on it first.
-    async fn confirm_install(&self, url: &str) -> bool {
+    ///
+    /// On *Add*, the address to install from: where the link's redirects led
+    /// once the script was read there, so AdGuard — which follows none (#29) —
+    /// fetches the file the dialog described. The link itself when it could
+    /// not be read.
+    async fn confirm_install(&self, url: &str) -> Option<String> {
         let dialog = adw::AlertDialog::new(Some("Add this userscript?"), Some(INSTALL_BODY));
         dialog.set_body_use_markup(false);
         // Room for the rows to read as rows rather than as a column of
@@ -1044,17 +1049,25 @@ impl ExtensionsPage {
         // says so and shows the file name, and the choice is still the user's.
         let countdown = Countdown::new(&dialog, "install", "Add");
         countdown.set_blocked(true);
+        let served = Rc::new(RefCell::new(url.to_owned()));
         {
             let url = url.to_owned();
             let countdown = countdown.clone();
             let details_view = details.clone();
+            let served = served.clone();
             glib::spawn_future_local(async move {
                 let fetched = {
                     let url = url.clone();
                     worker::job(move || preview::fetch(&url)).await
                 };
                 let details = match fetched {
-                    Some(Ok(preview)) => Details::Read(preview),
+                    Some(Ok(fetched)) => {
+                        if fetched.url != url {
+                            details_view.readdress(&fetched.url);
+                        }
+                        served.replace(fetched.url.clone());
+                        Details::Read(fetched)
+                    }
                     Some(Err(err)) => Details::Unread(err.to_string()),
                     None => Details::Unread("reading it failed".to_owned()),
                 };
@@ -1090,7 +1103,7 @@ impl ExtensionsPage {
         if let (Some(window), Some(focus)) = (window, focus) {
             window.disconnect(focus);
         }
-        answer == "install"
+        (answer == "install").then(|| served.take())
     }
 
     /// Fetch and install a userscript, then confirm it against the directory.
@@ -1123,7 +1136,18 @@ impl ExtensionsPage {
             let before: Vec<String> = read(&locale)
                 .map(|loaded| loaded.scripts.into_iter().map(|s| s.id).collect())
                 .unwrap_or_default();
-            let refused = cli.userscripts_install(&url).err().map(|e| e.to_string());
+            let mut refused = cli.userscripts_install(&url).err().map(|e| e.to_string());
+            // A typed address is not read first, so one that redirects — an
+            // install counter, a short link — reaches AdGuard as it is, and
+            // AdGuard follows no redirects (#29). Its refusal is the same
+            // sentence for every cause, so on any refusal the address is
+            // followed here, and tried once more if it led somewhere else.
+            if refused.is_some() {
+                let moved = preview::fetch(&url).ok().map(|fetched| fetched.url);
+                if let Some(moved) = moved.filter(|moved| *moved != url) {
+                    refused = cli.userscripts_install(&moved).err().map(|e| e.to_string());
+                }
+            }
             let after = read(&locale).ok().map(|loaded| loaded.scripts);
             (refused, before, after)
         })
@@ -1202,6 +1226,7 @@ struct InstallDetails {
     description: gtk::Label,
     version: adw::ActionRow,
     version_value: gtk::Label,
+    source: adw::ActionRow,
     source_value: gtk::Label,
     /// "Runs on" with nothing to list: one site, every site, unknown, or
     /// still reading.
@@ -1213,6 +1238,8 @@ struct InstallDetails {
     sites: adw::ExpanderRow,
     sites_value: gtk::Label,
     listed: RefCell<Vec<adw::ActionRow>>,
+    /// The full address — the link's, until it turns out to redirect.
+    address: RefCell<adw::ExpanderRow>,
 }
 
 impl InstallDetails {
@@ -1290,7 +1317,8 @@ impl InstallDetails {
         sites.add_suffix(&sites_value);
         list.append(&sites);
 
-        list.append(&address_row(url));
+        let address = address_row(url);
+        list.append(&address);
 
         Self {
             list,
@@ -1299,6 +1327,7 @@ impl InstallDetails {
             description,
             version,
             version_value,
+            source,
             source_value,
             reach,
             reach_value,
@@ -1307,7 +1336,16 @@ impl InstallDetails {
             sites,
             sites_value,
             listed: RefCell::new(Vec::new()),
+            address: RefCell::new(address),
         }
+    }
+
+    /// Show `url` as the full address instead: the one *Add* will install
+    /// from. Still the last row.
+    fn readdress(&self, url: &str) {
+        let address = address_row(url);
+        self.list.remove(&self.address.replace(address.clone()));
+        self.list.append(&address);
     }
 
     fn show(&self, summary: &Summary) {
@@ -1331,6 +1369,9 @@ impl InstallDetails {
         self.version_value
             .set_label(summary.version.as_deref().unwrap_or(""));
         self.source_value.set_label(&summary.source);
+        self.source.set_subtitle(
+            &summary.via.as_deref().map(|via| format!("Redirected from {via}")).unwrap_or_default(),
+        );
 
         let reach = &summary.reach;
         let listing = !reach.sites().is_empty();
