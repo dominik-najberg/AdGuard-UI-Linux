@@ -1376,7 +1376,7 @@ impl StatusPage {
                 // The contradiction, in the order that costs least: no daemons
                 // is the overwhelmingly common answer and it needs no `status`.
                 // An unreadable status is not a licence to kill anything.
-                if stranded.is_empty() || cli.status().is_ok_and(|status| status.running) {
+                if stranded.is_empty() || !reads_stopped(&cli) {
                     return None;
                 }
                 match clear(&stranded) {
@@ -2406,7 +2406,7 @@ impl Action {
 
         let said = self.run(cli).map_err(|err| err.to_string());
 
-        if !self.expects_running() || cli.status().is_ok_and(|status| status.running) {
+        if !self.expects_running() || !reads_stopped(cli) {
             return (said, None);
         }
 
@@ -2434,6 +2434,22 @@ impl Action {
         };
         (retried, Some(cleared_note(&cleared, outcome)))
     }
+}
+
+/// Does `status` positively say the proxy is not running?
+///
+/// The one reading that may lead to signalling a daemon, and the reason this
+/// is a function rather than `!status().is_ok_and(running)` at each caller.
+/// That expression is also true for a `status` that was **refused**, and the
+/// commonest refusal is a lost licence: every command is refused then, while
+/// the proxy that was started before the loss runs on. Measured on 11 October
+/// 2026: the licence was gone, the window was opened at 01:33:31, and
+/// [`StatusPage::sweep`] took the refusal for "not running" and stopped the
+/// user's proxy seven seconds later as a leftover. A refusal says nothing
+/// about the process, so it must end the check, as the comments at both
+/// callers always said it did.
+fn reads_stopped(cli: &Cli) -> bool {
+    matches!(cli.status(), Ok(status) if !status.running)
 }
 
 /// Ask every stranded process to exit. `None` if any of them would not.

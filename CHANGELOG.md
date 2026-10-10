@@ -13,6 +13,10 @@ This file is the one changelog.
 
 ## Unreleased
 
+### A lost licence no longer gets the running proxy stopped
+
+When AdGuard CLI lost its licence, it refused every command, `status` included. Opening the window then made the application treat the user's running proxy as a leftover from an earlier session and stop it, because the refused `status` was read as "not running". A start that failed while unlicensed did the same. A process is now stopped only when `status` answers and says the proxy is not running. A refusal stops nothing.
+
 ### AdGuard CLI is run about thirty times less often
 
 Every `adguard-cli` command rewrites AdGuard's configuration files, including `adguard.conf`, which holds the licence, even when nothing in them changes. The Status page ran `adguard-cli status` every two seconds, which came to about 27,000 rewrites a day. Each time AdGuard CLI lost its licence, its own log shows it rebuilding that file from scratch, so the application now checks locally whenever it can. Every two seconds it compares `proxy.yaml` and the running AdGuard processes with the last reading. It runs `status` only when one of them changes, after its own start, stop and restart, every ten seconds while AdGuard refuses it, and otherwise once a minute. A proxy that stops or starts is still noticed within two seconds. A licence that lapses while the proxy runs can take up to a minute to show.
