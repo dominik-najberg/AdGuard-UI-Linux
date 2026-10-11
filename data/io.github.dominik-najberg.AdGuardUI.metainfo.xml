@@ -53,6 +53,20 @@
     application is its first release.
   -->
   <releases>
+    <release version="1.10.0" type="stable" date="2026-10-11">
+      <url type="details">https://github.com/dominik-najberg/AdGuard-UI-Linux/releases/tag/v1.10.0</url>
+      <description>
+        <p>AdGuard UI updates itself, and protection survives a lost licence:</p>
+        <ul>
+          <li>AdGuard UI checks once a day for a newer version, and Update and restart in a notification, the tray menu or the About page installs it. Every release is signed, and nothing unsigned is installed. A .deb or .rpm install asks for your password. The daily check can be switched off on the About page.</li>
+          <li>After a lost licence, opening the window or pressing Activate no longer leaves protection switched off, and the tray shows a warning instead of the last state it knew.</li>
+          <li>Activation finishes by itself once AdGuard sees the log-in.</li>
+          <li>AdGuard CLI is run about thirty times less often.</li>
+          <li>The Extensions page says when the browser helper for userscript Install buttons is switched off, and turns it on with one button.</li>
+          <li>Long notifications wrap, and the source of a redirected userscript is shown whole.</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.9.1" type="stable" date="2026-10-10">
       <url type="details">https://github.com/dominik-najberg/AdGuard-UI-Linux/releases/tag/v1.9.1</url>
       <description>

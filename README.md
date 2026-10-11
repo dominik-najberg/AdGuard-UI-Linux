@@ -27,13 +27,13 @@ Every release carries a `.deb`, an `.rpm` and a tarball for `~/.local`, each bui
 On Ubuntu and Debian:
 
 ```bash
-sudo apt-get install ./adguard-ui_1.9.1_amd64.deb
+sudo apt-get install ./adguard-ui_1.10.0_amd64.deb
 ```
 
 On Fedora:
 
 ```bash
-sudo dnf install ./adguard-ui-1.9.1-1.x86_64.rpm
+sudo dnf install ./adguard-ui-1.10.0-1.x86_64.rpm
 ```
 
 [**Releases**](https://github.com/dominik-najberg/AdGuard-UI-Linux/releases) · [`CHANGELOG.md`](CHANGELOG.md). `apt-get install` and `dnf install` rather than `dpkg -i` or `rpm -i`, because they resolve the dependencies the package declares; the path has to start with `./` or they look the name up in the distribution's repositories instead. The tarball is the unprivileged route: extract it and run its `install.sh`, which writes under `~/.local` and never asks for a password.
@@ -162,7 +162,7 @@ AdGuard for Windows and Android turn a click on a userscript's *Install* button 
 
 Any page can send an `adguard-ui://` link, not only the helper, which is why the question is the only way in. The name, version and description are the script author's own words and a hostile script can call itself anything, so they are never shown without the host — the part that says whose code this is — and text that could disguise them (control characters, direction overrides) is removed. Reading the head is one request for at most 64 KB, made only after the browser's own prompt was accepted; nothing in it is run, and AdGuard fetches the script again on *Add*. Only http and https addresses are offered, which is all `adguard-cli userscripts install` accepts anyway. Several links at once are asked about one at a time, and a link that arrives while the first-run assistant is open waits for it to finish.
 
-The helper needs AdGuard to be filtering the browser over HTTPS, since that is how any userscript gets into a page. The scheme is registered by the launcher entry the packages install (`MimeType=x-scheme-handler/adguard-ui`); a build run from `target/` without installing has no handler, and the link does nothing.
+The helper needs AdGuard to be filtering the browser over HTTPS, since that is how any userscript gets into a page, and it has to be **switched on**: AdGuard injects only the scripts switched on under *Installed*, so a helper that is installed but off leaves *Install* opening the script as text, exactly as if it were missing. The *From your browser* group stays on the page while it is off, says so, and has a *Turn on* button. The scheme is registered by the launcher entry the packages install (`MimeType=x-scheme-handler/adguard-ui`); a build run from `target/` without installing has no handler, and the link does nothing.
 
 ## Prerequisites it detects, and will not perform for you
 

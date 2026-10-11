@@ -11,7 +11,7 @@ This file is the one changelog.
 
 ---
 
-## Unreleased
+## 1.10.0 — 11 October 2026
 
 ### AdGuard UI updates itself with one click
 
@@ -20,6 +20,10 @@ AdGuard UI now checks once a day whether a newer version has been released. The 
 Every file in a release is now signed with minisign, and the application installs nothing whose signature does not match the key built into it. The signature must also name the exact file that was asked for. `SHA256SUMS` stays in the release, but it cannot be used for this, because it sits beside the files it describes.
 
 The daily check can be switched off on the About page, which says what it sends. That is the application's name and version, nothing about you or the machine. Earlier releases are not signed, so the first signed release has to be installed by hand.
+
+### The Extensions page says when the browser helper is switched off
+
+The browser helper that makes *Install* on Greasy Fork, Sleazy Fork, OpenUserJS and GitHub bring a script to AdGuard UI only works while it is switched on. AdGuard injects only the userscripts that are on. Once it was installed, the *From your browser* group disappeared, whether the helper was on or off, so a helper that had been switched off left *Install* opening the script as text and nothing anywhere said why. The group now stays while the helper is off, says that this is why *Install* does nothing, and has a *Turn on* button. The hint after pasting an address by hand now appears in that case too.
 
 ### The source of a redirected userscript is readable again
 
