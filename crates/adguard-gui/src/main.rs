@@ -25,6 +25,7 @@ mod root_helper;
 mod setup;
 mod status;
 mod style;
+mod updater;
 mod watch;
 mod worker;
 
@@ -88,13 +89,43 @@ fn main() -> glib::ExitCode {
     // tray registration.
     let ui: Rc<RefCell<Option<Instance>>> = Rc::new(RefCell::new(None));
 
+    // Before the first activation, so the About page and the tray are built
+    // around it, and so the notification's actions exist by the time anything
+    // could raise one.
+    let updater = updater::Updater::new(&app);
+
+    // `startup` is emitted only in the primary instance. A second launch that
+    // hands its command line to the running one never gets here, and so never
+    // checks for updates of its own.
+    app.connect_startup({
+        let updater = updater.clone();
+        move |_| updater.start_schedule()
+    });
+
+    // A click on the notification's body: the window, at the About page, where
+    // the release is named and the button is.
+    let show_update = gio::SimpleAction::new(updater::SHOW_ACTION, None);
+    show_update.connect_activate({
+        let ui = ui.clone();
+        move |_, _| {
+            if let Some(instance) = ui.borrow().as_ref() {
+                instance.present();
+                if let Some(view) = &instance.view {
+                    (view.navigate)(Destination::About);
+                }
+            }
+        }
+    });
+    app.add_action(&show_update);
+
     // Activation with no command line behind it: `gapplication launch`, or the
     // shell calling org.freedesktop.Application.Activate on a running process.
     // Always means "show me".
     app.connect_activate({
         let ui = ui.clone();
+        let updater = updater.clone();
         move |app| {
-            if let Err(reason) = start(app, &ui, false) {
+            if let Err(reason) = start(app, &ui, &updater, false) {
                 eprintln!("adguard-ui: {reason}");
             }
         }
@@ -121,6 +152,8 @@ fn main() -> glib::ExitCode {
         }
     });
 
+    // Moved into the handler; `main` keeps its own to restart from.
+    let command_line_updater = updater.clone();
     app.connect_command_line(move |app, cmdline| {
         // Install links from a browser (#29): `Exec=adguard-ui %u` in the
         // `.desktop` file, so a click arrives here as an argument — in the
@@ -137,7 +170,7 @@ fn main() -> glib::ExitCode {
 
         // A link needs the window to ask in, whatever else the launch said.
         let background = cmdline.options_dict().contains(BACKGROUND) && offers.is_empty();
-        match start(app, &ui, background) {
+        match start(app, &ui, &command_line_updater, background) {
             Ok(()) => {
                 if let Some(instance) = ui.borrow().as_ref() {
                     for url in offers {
@@ -157,7 +190,32 @@ fn main() -> glib::ExitCode {
         }
     });
 
-    app.run()
+    let code = app.run();
+
+    // An update went in and the application quit for it. `exec` rather than a
+    // child process: this process's D-Bus connection closes with it, which is
+    // what releases the application id for the new copy to claim — a child
+    // started while this one still held it would find it taken and hand its
+    // command line to a process on its way out.
+    if let Some(restart) = updater.take_restart() {
+        use std::os::unix::process::CommandExt;
+        // Closed here rather than left to `exec`, so the bus has seen this
+        // connection go — and the name with it — before the new copy has
+        // even started, let alone asked for it.
+        if let Some(connection) = app.dbus_connection() {
+            let _ = connection.close_sync(gio::Cancellable::NONE);
+        }
+        let mut command = std::process::Command::new(&restart.exe);
+        if restart.background {
+            command.arg(format!("--{BACKGROUND}"));
+        }
+        let err = command.exec();
+        eprintln!(
+            "adguard-ui: the update is installed, but {} would not start: {err}",
+            restart.exe.display()
+        );
+    }
+    code
 }
 
 /// What the first launch built, so a later one has something to present.
@@ -228,6 +286,7 @@ impl Instance {
 fn start(
     app: &adw::Application,
     ui: &Rc<RefCell<Option<Instance>>>,
+    updater: &Rc<updater::Updater>,
     background: bool,
 ) -> Result<(), String> {
     if let Some(instance) = ui.borrow().as_ref() {
@@ -321,14 +380,15 @@ fn start(
             let app = app.clone();
             let window = window.clone();
             let ui = ui.clone();
-            move || install_main_view(&app, &window, &ui, &cli)
+            let updater = updater.clone();
+            move || install_main_view(&app, &window, &ui, &cli, &updater)
         });
         return Ok(());
     }
 
     let view = match cli {
         Ok(cli) => {
-            let view = main_view(&cli);
+            let view = main_view(&cli, updater);
             window.set_content(Some(&view.root));
             connect_focus_rechecks(&window, &view);
             Ok(view)
@@ -352,7 +412,7 @@ fn start(
     }
 
     let tray = match &view {
-        Ok(view) => connect_tray(app, &window, view),
+        Ok(view) => connect_tray(app, &window, view, updater),
         // No tray without a working CLI: every menu item would be inert, and
         // the window is already explaining why.
         Err(reason) => Err(reason.clone()),
@@ -405,12 +465,13 @@ fn install_main_view(
     window: &adw::ApplicationWindow,
     ui: &Rc<RefCell<Option<Instance>>>,
     cli: &Cli,
+    updater: &Rc<updater::Updater>,
 ) {
-    let view = main_view(cli);
+    let view = main_view(cli, updater);
     window.set_content(Some(&view.root));
     connect_focus_rechecks(window, &view);
 
-    let tray = connect_tray(app, window, &view);
+    let tray = connect_tray(app, window, &view, updater);
     view.advanced.set_tray_available(tray.is_ok());
     if let Err(reason) = tray {
         eprintln!("adguard-ui: continuing without a tray icon ({reason})");
@@ -449,6 +510,7 @@ fn connect_tray(
     app: &adw::Application,
     window: &adw::ApplicationWindow,
     view: &MainView,
+    updater: &Rc<updater::Updater>,
 ) -> Result<(), String> {
     let tray = match adguard_tray::spawn(adguard_tray::State::default()) {
         Ok(tray) => tray,
@@ -496,6 +558,26 @@ fn connect_tray(
         }
     });
 
+    // A release this copy can install offers itself in the menu, for the
+    // `--background` session that has no window to find the About page in.
+    updater.connect({
+        let tray = tray.clone();
+        let state = state.clone();
+        let installable = updater.install_kind().can_update();
+        move |phase| {
+            {
+                let mut state = state.borrow_mut();
+                state.update = phase.available().filter(|_| installable).map(|r| r.tag.clone());
+                state.updating = matches!(
+                    phase,
+                    updater::Phase::Downloading(_) | updater::Phase::Installing(_)
+                );
+            }
+            let snapshot = state.borrow().clone();
+            tray.set_state(snapshot);
+        }
+    });
+
     view.protection.connect_config({
         let tray = tray.clone();
         let state = state.clone();
@@ -528,6 +610,7 @@ fn connect_tray(
         let window = window.clone();
         let status = view.status.clone();
         let protection = view.protection.clone();
+        let updater = updater.clone();
         async move {
             // Owned by this future, so the hold lasts exactly as long as the
             // tray is being served.
@@ -551,6 +634,7 @@ fn connect_tray(
                         }
                     }
                     Command::SetToggle { toggle, on } => protection.request(toggle, on),
+                    Command::InstallUpdate => updater.install(),
                     Command::Quit => {
                         app.quit();
                         return;
@@ -696,6 +780,9 @@ pub enum Destination {
     /// The Extensions page. Only an install link leads here (#29), so that the
     /// confirmation it raises sits over the list the script will join.
     Extensions,
+    /// The About page. Only the notification of a new AdGuard UI release leads
+    /// here, since that is where it is named and installed.
+    About,
 }
 
 impl Destination {
@@ -709,6 +796,7 @@ impl Destination {
             Self::Advanced(_) | Self::Autostart => "advanced",
             Self::Activity => "activity",
             Self::Extensions => "extensions",
+            Self::About => "about",
         }
     }
 
@@ -747,8 +835,9 @@ struct MainView {
     _watch: Option<watch::ConfigWatch>,
 }
 
-fn main_view(cli: &Cli) -> MainView {
+fn main_view(cli: &Cli, updater: &Rc<updater::Updater>) -> MainView {
     let toasts = adw::ToastOverlay::new();
+    updater.set_toasts(&toasts);
 
     let status = status::StatusPage::new(cli.clone(), toasts.clone());
     // Before anything else asks the CLI for anything: an install can be left
@@ -780,7 +869,7 @@ fn main_view(cli: &Cli) -> MainView {
     let extensions = extensions::ExtensionsPage::new(cli.clone(), toasts.clone());
     // The two version numbers, and the one control that reaches AdGuard's
     // servers because the user asked it to (#4).
-    let about = about::AboutPage::new(cli.clone(), toasts.clone());
+    let about = about::AboutPage::new(cli.clone(), toasts.clone(), updater.clone());
     // Every check above, one line each, read when the page is opened (#21).
     let diagnostics = diagnostics::DiagnosticsPage::new(cli.clone(), toasts.clone());
     // Counts from AdGuard's access log, kept by `adguard_core::activity` (#21).
@@ -1018,7 +1107,8 @@ fn main_view(cli: &Cli) -> MainView {
                 Destination::Protection
                 | Destination::Status
                 | Destination::Activity
-                | Destination::Extensions => {}
+                | Destination::Extensions
+                | Destination::About => {}
             }
         }
     });
@@ -1322,6 +1412,8 @@ mod tests {
             Destination::Advanced(adguard_core::config::key::PROXY_MODE),
             Destination::Autostart,
             Destination::Activity,
+            Destination::Extensions,
+            Destination::About,
         ] {
             assert!(
                 destination.page_index().is_some(),

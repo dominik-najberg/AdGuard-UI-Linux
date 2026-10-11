@@ -48,3 +48,9 @@ yaml-rust2 = "0.11"
 # on exactly the machines this application exists for. Measured 11 August 2026 —
 # the live suite's request appears in AdGuard's own access log.
 ureq = { version = "3", default-features = false, features = ["rustls", "platform-verifier", "gzip"] }
+# Checks the signature on a downloaded release before anything installs it
+# (update.rs). Verification only, no signing, and no dependencies of its own:
+# its Ed25519 and BLAKE2b are in the crate. The signatures are minisign's,
+# because that is a format the release workflow can produce with one apt
+# package and one secret.
+minisign-verify = "0.3"

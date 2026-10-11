@@ -118,6 +118,11 @@ pub struct State {
     pub unavailable: bool,
     /// One entry per [`Toggle::ALL`], in that order.
     pub toggles: Vec<Option<bool>>,
+    /// A newer AdGuard UI this copy can install, by its tag. Offered in the
+    /// menu because under `--background` there is no About page to find it on.
+    pub update: Option<String>,
+    /// That update is being downloaded or installed.
+    pub updating: bool,
 }
 
 impl State {
@@ -154,6 +159,8 @@ pub enum Command {
     /// Open a terminal running AdGuard's `cert`, as the Status page's button does.
     FixCertificate,
     SetToggle { toggle: Toggle, on: bool },
+    /// Download, verify and install the newer AdGuard UI, then restart.
+    InstallUpdate,
     /// Quit the application outright — the only way out once closing the window
     /// merely hides it.
     Quit,
@@ -259,6 +266,29 @@ impl KsniTray for Indicator {
             }
             .into(),
             MenuItem::Separator,
+        ];
+
+        // Above the proxy controls, because it is the one item here that is
+        // news rather than a control the user already knows is there.
+        if let Some(tag) = &self.state.update {
+            items.push(
+                StandardItem {
+                    label: if self.state.updating {
+                        "Updating AdGuard UI…".into()
+                    } else {
+                        format!("Update AdGuard UI to {tag}")
+                    },
+                    icon_name: "software-update-available-symbolic".into(),
+                    enabled: !self.state.updating,
+                    activate: Box::new(|this: &mut Self| this.send(Command::InstallUpdate)),
+                    ..Default::default()
+                }
+                .into(),
+            );
+            items.push(MenuItem::Separator);
+        }
+
+        items.extend([
             StandardItem {
                 label: if self.state.running {
                     "Stop proxy".into()
@@ -281,7 +311,7 @@ impl KsniTray for Indicator {
             }
             .into(),
             MenuItem::Separator,
-        ];
+        ]);
 
         // Only in the state it cures. A restart is a second of no protection
         // at all, which is not something to leave lying in the menu of an
@@ -426,21 +456,21 @@ mod tests {
     use super::*;
 
     fn state(running: bool, toggles: Vec<Option<bool>>) -> State {
-        State { running, bypassed: false, untrusted: false, unavailable: false, toggles }
+        State { running, toggles, ..State::default() }
     }
 
     /// The tray's whole vocabulary, and the one word that must not appear in
     /// the bypassed state.
     #[test]
     fn a_bypassed_proxy_never_describes_itself_as_running() {
-        let bypassed = State { running: true, bypassed: true, untrusted: false, unavailable: false, toggles: vec![] };
+        let bypassed = State { running: true, bypassed: true, ..State::default() };
         assert_eq!(bypassed.description(), "not filtering");
 
         assert_eq!(state(true, vec![]).description(), "running");
         assert_eq!(state(false, vec![]).description(), "stopped");
         // A stopped proxy has no helper to have died, and must read as the
         // ordinary stop it is however the flag arrives.
-        let odd = State { running: false, bypassed: true, untrusted: false, unavailable: false, toggles: vec![] };
+        let odd = State { running: false, bypassed: true, ..State::default() };
         assert_eq!(odd.description(), "stopped");
     }
 
@@ -476,6 +506,17 @@ mod tests {
         // A stopped proxy needs no certificate to be trusted yet.
         let stopped = State { untrusted: true, ..state(false, vec![]) };
         assert_eq!(stopped.description(), "stopped");
+    }
+
+    /// An update on offer, and one being installed, are both changes the
+    /// dedupe in `set_state` must pass on, or the menu item would never appear
+    /// or never grey out.
+    #[test]
+    fn an_update_is_a_change_of_state() {
+        let plain = state(true, vec![]);
+        let offered = State { update: Some("v9.9.9".to_owned()), ..plain.clone() };
+        assert_ne!(plain, offered);
+        assert_ne!(offered, State { updating: true, ..offered.clone() });
     }
 
     /// `toggles` is positional against `Toggle::ALL`, so a short or empty vector

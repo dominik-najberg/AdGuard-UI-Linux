@@ -13,6 +13,14 @@ This file is the one changelog.
 
 ## Unreleased
 
+### AdGuard UI updates itself with one click
+
+AdGuard UI now checks once a day whether a newer version has been released. The first check comes a minute after it starts. When there is one, a notification, the tray menu and the About page offer **Update and restart**. It downloads the release from GitHub, checks the signature, installs it and restarts the application. The window comes back only if it was open. A `.deb` or `.rpm` install is upgraded by `apt-get` or `dnf`, and the system asks for your password. A tarball install in `~/.local` is upgraded in place without one. A copy built from source is never replaced.
+
+Every file in a release is now signed with minisign, and the application installs nothing whose signature does not match the key built into it. The signature must also name the exact file that was asked for. `SHA256SUMS` stays in the release, but it cannot be used for this, because it sits beside the files it describes.
+
+The daily check can be switched off on the About page, which says what it sends. That is the application's name and version, nothing about you or the machine. Earlier releases are not signed, so the first signed release has to be installed by hand.
+
 ### Opening the window no longer switches protection off after a lost licence
 
 AdGuard CLI without a licence stops a running proxy when it is asked for its version, and when it is asked to activate. The About page asked for the version at every start-up, so after a lost licence, opening AdGuard UI was enough to turn protection off. The version is now read only while the licence is active. When *Activate…* stops a proxy that was running, the application starts it again as soon as the licence is back.

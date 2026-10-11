@@ -514,7 +514,7 @@ install -Dm644 data/autostart/*.desktop ~/.config/autostart/
 
 **The desktop file, the GTK application ID, `StartupWMClass`, and the icon filename must all be the same reverse-DNS string.** If the first three diverge, GNOME shows a second, unbranded icon below the dock separator instead of grouping the window with its launcher. If the icon is the one that drifts, the grouping still works and the icon is simply the generic cog — the quieter failure of the two, and the one to suspect first when the artwork is right but nothing shows it.
 
-**Nothing here needs root, and nothing should.** This section used to end with a `sudo install` of `data/*.policy` into `/usr/share/polkit-1/actions/`. Do not run it, and there is nothing left to run it against: **the `.policy` file was deleted with the auto-mode work.** The application performs no privileged operation and ships no privileged component (`architecture.md` §6): AdGuard's own root helper — which `auto` mode needs, and which its HTTP proxy turns out to need in every mode (contract §8) — is set up by the user with AdGuard's own `sudo` command, which the app shows and never runs.
+**Nothing here needs root, and nothing should.** This section used to end with a `sudo install` of `data/*.policy` into `/usr/share/polkit-1/actions/`. Do not run it, and there is nothing left to run it against: **the `.policy` file was deleted with the auto-mode work.** The application performs no privileged operation on AdGuard's behalf and ships no privileged component (`architecture.md` §6; its own update's `pkexec` is the one exception): AdGuard's own root helper — which `auto` mode needs, and which its HTTP proxy turns out to need in every mode (contract §8) — is set up by the user with AdGuard's own `sudo` command, which the app shows and never runs.
 
 If an older checkout of this repo installed that file, remove it — it is a root-owned file authorising a helper binary that does not exist and never will:
 
@@ -632,7 +632,17 @@ The workflow re-derives the version from `Cargo.toml` and **fails if the tag doe
 
 `workflow_dispatch` runs the same build and stops before publishing, leaving the packages as a run artifact. That is how this file gets exercised without tagging anything — a tag-triggered workflow is otherwise only testable by pushing a tag you then have to explain.
 
-**What a release contains**, and each name comes from the scripts above: `adguard-ui_<version>_<arch>.deb`, `adguard-ui-<version>-1.<arch>.rpm`, `adguard-ui-<version>-<arch>.tar.gz`, and `SHA256SUMS` over all three. The `.rpm` comes from a `fedora:43` job of its own, and `publish` waits for both builds; a release cannot go out with one of its packages missing. The `.deb`'s `Depends:` is derived inside the container by `dpkg-shlibdeps` against that container's libraries, which is why `dpkg-dev` is in the workflow's package list and why the derived floor is Ubuntu 24.04's glibc rather than the build machine's.
+**What a release contains**, and each name comes from the scripts above: `adguard-ui_<version>_<arch>.deb`, `adguard-ui-<version>-1.<arch>.rpm`, `adguard-ui-<version>-<arch>.tar.gz`, `SHA256SUMS` over all three, and a `.minisig` beside each of the four. The `.rpm` comes from a `fedora:43` job of its own, and `publish` waits for both builds; a release cannot go out with one of its packages missing. The `.deb`'s `Depends:` is derived inside the container by `dpkg-shlibdeps` against that container's libraries, which is why `dpkg-dev` is in the workflow's package list and why the derived floor is Ubuntu 24.04's glibc rather than the build machine's.
+
+**Every file is signed, and the release fails without the key.** The in-app update installs nothing whose minisign signature does not verify against `data/release-signing.pub`, which is compiled into every build (`architecture.md` §6, *Updating this application*). The `publish` job signs with the repository secret `MINISIGN_SECRET_KEY`, which holds the whole of the secret key file, and then verifies every signature against the public key in the tree, so a secret that does not match fails the release rather than every user's update. The key has no password, because the runner has nobody to type one; the secret store is its protection.
+
+The pair was generated on 11 October 2026 with `minisign -G -W`, and the secret half lives at `~/.minisign/adguard-ui-release.key` on the maintainer's machine. **Keep a copy somewhere safe:** a lost key cannot sign the release that would ship its replacement, and copies that cannot verify a release can only be updated by hand. To install the secret, or to replace it after rotating:
+
+```bash
+gh secret set MINISIGN_SECRET_KEY < ~/.minisign/adguard-ui-release.key
+```
+
+Rotating means a new pair, the new public key committed to `data/release-signing.pub`, and **one last release signed with the old key** that carries it. Every copy older than that release still trusts only the old key.
 
 **The maintainer field comes from git**, and on a runner there is no `user.name` to read — so `deb.sh` falls back to the last commit's author rather than writing `unknown <unknown@invalid>` into the control and copyright files of the package everybody downloads.
 

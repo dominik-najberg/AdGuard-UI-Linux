@@ -22,7 +22,8 @@
 #     Move it forward when 43 reaches end of life, not before.
 #   * `publish` runs on the runner itself, because that is where `gh` is
 #     installed. Doing it that way costs one artifact round trip and saves
-#     depending on a third-party action to attach a file to a release.
+#     depending on a third-party action to attach a file to a release. It is
+#     also the only job that sees the signing key, and it signs every file.
 #
 # `workflow_dispatch` builds the packages and stops, which is how this file gets
 # exercised without tagging anything: a tag-triggered workflow cannot be tested
@@ -226,6 +227,41 @@ jobs:
           sha256sum ./*.deb ./*.rpm ./*.tar.gz | sed 's| \./| |' > SHA256SUMS
           cat SHA256SUMS
 
+      # One minisign signature beside every file, which is what the in-app
+      # update checks before it installs anything (adguard-core/src/update.rs).
+      # A checksum cannot do that job: it is published in the same release as
+      # the files it describes, so whoever could replace one could replace both.
+      #
+      # The secret is the whole of the key file `minisign -G -W` writes; its
+      # public half is data/release-signing.pub, compiled into every build. No
+      # secret is a failed release, not an unsigned one — every installed copy
+      # would refuse to update to it, and say so to its user.
+      #
+      # Verified straight after with the key the application carries, so a
+      # secret that does not match it fails here rather than on every machine.
+      # minisign names the file in the signed comment by its base name, and
+      # update.rs refuses a signature that names any other.
+      - name: Sign
+        working-directory: packages
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+        run: |
+          [ -n "$MINISIGN_SECRET_KEY" ] || {
+              echo "release.yml: the MINISIGN_SECRET_KEY secret is not set" >&2
+              exit 1
+          }
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends minisign
+          key="$RUNNER_TEMP/release.key"
+          (umask 077 && printf '%s\n' "$MINISIGN_SECRET_KEY" > "$key")
+          for file in *.deb *.rpm *.tar.gz SHA256SUMS; do
+              minisign -S -s "$key" -m "$file" < /dev/null
+          done
+          rm -f "$key"
+          for file in *.deb *.rpm *.tar.gz SHA256SUMS; do
+              minisign -V -p ../data/release-signing.pub -m "$file"
+          done
+
       # The section for this version, from `## <version> — ` up to the next
       # `## `. A tag whose version has no section publishes GitHub's generated
       # commit list instead of an empty body, and says so in the log — an
@@ -261,4 +297,5 @@ jobs:
               --title "AdGuard UI $tag" \
               --notes-file notes.md ${{ steps.notes.outputs.generate }} \
               --verify-tag \
-              packages/*.deb packages/*.rpm packages/*.tar.gz packages/SHA256SUMS
+              packages/*.deb packages/*.rpm packages/*.tar.gz packages/SHA256SUMS \
+              packages/*.minisig

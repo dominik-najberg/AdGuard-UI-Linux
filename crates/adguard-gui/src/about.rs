@@ -1,5 +1,5 @@
-//! The About page: two version numbers, and the one control that reaches
-//! AdGuard's servers on purpose.
+//! The About page: two version numbers, the one control that reaches
+//! AdGuard's servers on purpose, and the one that updates this application.
 //!
 //! Built for [issue #4](https://github.com/dominik-najberg/AdGuard-UI-Linux/issues/4),
 //! which asked for a way to check for updates from the main window. An About
@@ -32,6 +32,13 @@
 //! and instructs, as it already does for that helper and for the certificate.
 //! The command is named; running it is the user's.
 //!
+//! **This application's own update is a different case, and is applied.** It is
+//! a package this project builds and signs, installed by the distribution's
+//! own package manager behind polkit's own password prompt — not an installer
+//! run over a suid helper. `crate::updater` holds the flow and
+//! `adguard_core::update` the rules; this page is one of the three places it
+//! shows, with the tray and a notification.
+//!
 //! # What this page deliberately does not do
 //!
 //! **The Status page's poll is left running.** The activation path stands it
@@ -50,12 +57,13 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use adguard_core::{Catalogue, Cli, FilterSet, UpdateReport, Verdict};
+use adguard_core::{Catalogue, Cli, FilterSet, Standing, UpdateReport, Verdict};
 use adw::prelude::*;
 use gtk::glib;
 use gtk4 as gtk;
 use libadwaita as adw;
 
+use crate::updater::{Phase, Updater};
 use crate::{abbreviate, toast, worker};
 
 /// Shown in a value row before its reading has arrived, as on the Status page.
@@ -75,10 +83,16 @@ const WHAT_IT_DOES: &str =
      released. AdGuard does this on its own as well — this is for when you would rather \
      not wait.";
 
-/// Why there is no button to install an application update.
+/// Why there is no button to install an AdGuard CLI update, when there is one
+/// for AdGuard UI's own.
+///
+/// `adguard-cli update` re-runs AdGuard's installer over its suid root helper,
+/// a file in the user's home directory that AdGuard chose to make root. That is
+/// AdGuard's arrangement and the user's to renew, not this application's to
+/// renew on their behalf (`architecture.md` §6).
 const WHY_NO_BUTTON: &str =
-    "Updating AdGuard replaces its privileged helper, and this application never performs \
-     privileged operations — so this one is yours to run.";
+    "Updating AdGuard CLI re-runs its installer over AdGuard's privileged helper, which \
+     is AdGuard's to change rather than this application's — so this one is yours to run.";
 
 /// Beside the "last changed" figure, and load-bearing rather than decorative:
 /// the column behind that figure moves only when data arrives, so a long gap is
@@ -88,25 +102,42 @@ const WHAT_A_GAP_MEANS: &str =
      changed, so a long gap means the lists have not been revised — not that \
      nothing has looked.";
 
-/// The one disclosure this page owes before a button is pressed.
+/// The one disclosure this page owes, next to the switch it is about.
 ///
-/// This application has never spoken to anything but `adguard-cli`. The release
-/// check is the exception, and a user running an ad blocker should meet that
-/// fact before the request rather than in a changelog.
+/// This application never spoke to anything but `adguard-cli` until the release
+/// check, and the check now runs by itself once a day. A user running an ad
+/// blocker should meet that fact where it can be switched off rather than in a
+/// changelog.
 const WHAT_THE_CHECK_SENDS: &str =
-    "Checking for a newer AdGuard UI asks github.com, and is the only thing this \
-     application sends anywhere by itself. The request names the application and \
-     its version, and nothing about you or this machine.";
+    "AdGuard UI asks github.com once a day whether a newer version has been released, \
+     and whenever you press Check. It is the only thing this application sends anywhere \
+     by itself. The request names the application and its version, and nothing about \
+     you or this machine.";
 
 /// The button that asks, in its two states.
 const CHECK_RELEASES: &str = "Check";
 const CHECKING: &str = "Checking…";
 
-/// Why finding a release is the end of what this can do for you.
-const HOW_TO_UPDATE_THE_APP: &str =
-    "Releases are a .deb and a tarball on GitHub — there is no apt repository behind \
-     them, so nothing updates this application on its own and nothing here can \
-     install it for you.";
+/// The button that installs, in its three states.
+const INSTALL: &str = "Update and restart";
+const DOWNLOADING: &str = "Downloading…";
+const INSTALLING: &str = "Installing…";
+
+/// What *Update and restart* will do, said before it is pressed — the password
+/// prompt above all, which would otherwise look like something else asking.
+const HOW_A_PACKAGE_UPDATES: &str =
+    "Update and restart downloads the release from GitHub, checks that it was signed \
+     by this project, and installs it with your system's package manager, which asks \
+     for your password. AdGuard UI then restarts.";
+const HOW_A_TARBALL_UPDATES: &str =
+    "Update and restart downloads the release from GitHub, checks that it was signed \
+     by this project, and installs it where this copy is. AdGuard UI then restarts.";
+
+/// Why this copy cannot install the release itself.
+const WHY_NOT_THIS_COPY: &str =
+    "This copy of AdGuard UI was not installed from a release package — it is a build, \
+     or a file copied by hand — so it cannot replace itself. Install the release from \
+     its page.";
 
 /// The command that does it. Named, never invoked (contract §14).
 const UPDATE_COMMAND: &str = "adguard-cli update";
@@ -140,6 +171,10 @@ pub struct AboutPage {
     /// Shown only when a check found something newer.
     ui_notice: adw::PreferencesGroup,
     ui_release: adw::ActionRow,
+    /// *Update and restart*. Absent from a copy that cannot replace itself.
+    ui_install: gtk::Button,
+    /// The check, its timer and the install. Shared with the tray.
+    updater: Rc<Updater>,
     /// Where *Release notes* goes, set by the check that found it.
     ///
     /// Held rather than baked into the handler because the release is not known
@@ -173,7 +208,7 @@ pub struct AboutPage {
 }
 
 impl AboutPage {
-    pub fn new(cli: Cli, toasts: adw::ToastOverlay) -> Rc<Self> {
+    pub fn new(cli: Cli, toasts: adw::ToastOverlay, updater: Rc<Updater>) -> Rc<Self> {
         let page = adw::PreferencesPage::new();
 
         // ---- versions ----
@@ -200,19 +235,33 @@ impl AboutPage {
         let cli_version = row("AdGuard CLI", PLACEHOLDER);
         let binary = row("AdGuard CLI binary", &abbreviate(cli.binary()));
         binary.set_subtitle_lines(2);
-        for r in [&app_version, &cli_version, &binary] {
+        // Under the version it checks, so the switch and the disclosure above
+        // it are read together.
+        let automatic = adw::SwitchRow::builder()
+            .title("Check for updates automatically")
+            .subtitle("Once a day")
+            .active(updater.automatic())
+            .build();
+        versions.add(&app_version);
+        versions.add(&automatic);
+        for r in [&cli_version, &binary] {
             versions.add(r);
         }
         page.add(&versions);
 
-        // Revealed only when a check found something newer. The mirror of the
-        // AdGuard CLI notice below, and for a different reason that lands in the
-        // same place: releases here are a `.deb` and a tarball on GitHub with no
-        // apt repository behind them, so there is nothing this application could
-        // install even if it were willing to.
+        // Revealed only when a check found something newer. Unlike the AdGuard
+        // CLI notice below it carries a button that installs: this is a package
+        // this project signed, installed by the system's own package manager.
+        let install_kind = updater.install_kind();
         let ui_notice = adw::PreferencesGroup::builder()
             .title("A newer AdGuard UI is available")
-            .description(HOW_TO_UPDATE_THE_APP)
+            .description(if !install_kind.can_update() {
+                WHY_NOT_THIS_COPY
+            } else if install_kind.needs_password() {
+                HOW_A_PACKAGE_UPDATES
+            } else {
+                HOW_A_TARBALL_UPDATES
+            })
             .build();
         ui_notice.set_visible(false);
         let ui_release = row("Latest release", PLACEHOLDER);
@@ -220,9 +269,18 @@ impl AboutPage {
             .label("Release notes")
             .valign(gtk::Align::Center)
             .build();
-        open.add_css_class("suggested-action");
+        let ui_install = gtk::Button::builder()
+            .label(INSTALL)
+            .valign(gtk::Align::Center)
+            .build();
+        ui_install.add_css_class("suggested-action");
+        ui_install.set_visible(install_kind.can_update());
+        // The notes are the main action only where there is nothing to install.
+        if !install_kind.can_update() {
+            open.add_css_class("suggested-action");
+        }
         ui_release.add_suffix(&open);
-        ui_release.set_activatable_widget(Some(&open));
+        ui_release.add_suffix(&ui_install);
         ui_notice.add(&ui_release);
         page.add(&ui_notice);
 
@@ -321,6 +379,8 @@ impl AboutPage {
             ui_check: ui_check.clone(),
             ui_notice,
             ui_release,
+            ui_install: ui_install.clone(),
+            updater: updater.clone(),
             ui_release_url: RefCell::new(None),
             freshness,
             check: check.clone(),
@@ -338,8 +398,29 @@ impl AboutPage {
         });
 
         ui_check.connect_clicked({
-            let this = this.clone();
-            move |_| this.check_releases()
+            let updater = updater.clone();
+            move |_| updater.check(true)
+        });
+
+        ui_install.connect_clicked({
+            let updater = updater.clone();
+            move |_| updater.install()
+        });
+
+        automatic.connect_active_notify({
+            let updater = updater.clone();
+            move |row| updater.set_automatic(row.is_active())
+        });
+
+        // Weak: the updater outlives every page, and a strong capture would
+        // keep this one alive through it.
+        updater.connect({
+            let this = Rc::downgrade(&this);
+            move |phase| {
+                if let Some(this) = this.upgrade() {
+                    this.render_update(phase);
+                }
+            }
         });
 
         open.connect_clicked({
@@ -400,82 +481,52 @@ impl AboutPage {
         );
     }
 
-    /// Ask github.com whether a newer AdGuard UI has been released.
+    /// Draw where this application's own update stands.
     ///
-    /// The only request this application makes of its own, and it is made only
-    /// here — from a button, never on a timer and never at launch. The group's
-    /// description says so before the button is pressed, which is the point at
-    /// which a user of an ad blocker is owed it.
-    ///
-    /// The outcome is reported and never acted on. Releases are a `.deb` and a
-    /// tarball with no apt repository behind them, so there is nothing to
-    /// install even if this were willing to — it names the release and offers
-    /// the notes.
-    fn check_releases(self: &Rc<Self>) {
-        self.ui_check.set_sensitive(false);
-        self.ui_check.set_label(CHECKING);
-        self.ui_standing.set_label("");
+    /// The check itself is [`Updater::check`]'s, and so are the toasts that
+    /// answer a press of *Check* — a check run by the daily timer has no
+    /// button to answer and must not leave toasts on a page nobody opened.
+    fn render_update(&self, phase: &Phase) {
+        let checking = matches!(phase, Phase::Checking);
+        self.ui_check.set_sensitive(!phase.busy());
+        self.ui_check.set_label(if checking { CHECKING } else { CHECK_RELEASES });
 
-        let this = self.clone();
-        worker::run(adguard_core::release::latest, move |found| {
-            this.ui_check.set_sensitive(true);
-            this.ui_check.set_label(CHECK_RELEASES);
-
-            let release = match found {
-                Ok(release) => release,
-                Err(err) => {
-                    // Not on the row: a failed check leaves the version exactly
-                    // as unknown as it was, and a red word beside it would read
-                    // as a verdict about the build rather than about the
-                    // network.
-                    this.toasts.add_toast(toast(&err.to_string()));
-                    return;
-                }
-            };
-
-            use adguard_core::Standing;
-            match adguard_core::release::standing(env!("CARGO_PKG_VERSION"), release) {
-                Standing::Current => {
-                    this.ui_standing.set_label("Latest");
-                    this.ui_notice.set_visible(false);
-                    this.toasts.add_toast(toast("You have the latest AdGuard UI release"));
-                }
-                Standing::Behind(release) => {
-                    this.ui_standing.set_label(&release.tag);
-                    this.show_release(&release, &format!("{} is available", release.tag));
-                }
-                // A local build between releases. Saying "up to date" here would
-                // claim this binary matches a release it does not.
-                Standing::Ahead(release) => {
-                    this.ui_standing.set_label("Unreleased build");
-                    this.ui_notice.set_visible(false);
-                    this.toasts.add_toast(toast(&format!(
-                        "This build is newer than the latest release ({})",
-                        release.tag
-                    )));
-                }
-                // A tag this cannot place — a pre-release, most likely. Named
-                // rather than judged, and shown so the user can judge.
-                Standing::Unknown(release) => {
-                    this.ui_standing.set_label(&release.tag);
-                    this.show_release(
-                        &release,
-                        &format!("The latest release is {}", release.tag),
-                    );
-                }
-            }
+        self.ui_standing.set_label(&match phase {
+            Phase::Unchecked | Phase::Checking => String::new(),
+            Phase::Checked(Standing::Current) => "Latest".to_owned(),
+            // A local build between releases. Saying "up to date" here would
+            // claim this binary matches a release it does not.
+            Phase::Checked(Standing::Ahead(_)) => "Unreleased build".to_owned(),
+            Phase::Checked(Standing::Behind(release) | Standing::Unknown(release))
+            | Phase::Downloading(release)
+            | Phase::Installing(release) => release.tag.clone(),
         });
-    }
 
-    /// Reveal the release group, pointing at a page built from a constant and a
-    /// tag rather than at anything GitHub sent.
-    fn show_release(&self, release: &adguard_core::Release, message: &str) {
+        // A release that is newer, or one this cannot place — a pre-release,
+        // most likely, which is named so the user can judge. Only the first is
+        // offered for installing.
+        let shown = match phase {
+            Phase::Checked(Standing::Unknown(release)) => Some(release),
+            _ => phase.available(),
+        };
+        let Some(release) = shown else {
+            self.ui_notice.set_visible(false);
+            return;
+        };
         let url = release.url();
         self.ui_release.set_subtitle(&url);
         self.ui_release.set_subtitle_selectable(true);
         self.ui_release_url.replace(Some(url));
         self.ui_notice.set_visible(true);
-        self.toasts.add_toast(toast(message));
+
+        let installable = self.updater.install_kind().can_update() && phase.available().is_some();
+        self.ui_install.set_visible(installable);
+        self.ui_install.set_sensitive(!phase.busy());
+        self.ui_install.set_label(match phase {
+            Phase::Downloading(_) => DOWNLOADING,
+            Phase::Installing(_) => INSTALLING,
+            _ => INSTALL,
+        });
     }
 
     /// Read when new filter data last arrived, from the two catalogues.
@@ -829,18 +880,29 @@ mod tests {
         assert!(said.contains("nothing about you"), "and what it does not carry");
     }
 
-    /// Finding a release is the end of what this can do, and the reason is not
-    /// the privileged-helper one that applies to the CLI half — there is simply
-    /// no update channel to act through.
+    /// The check now runs by itself, so the disclosure has to say how often —
+    /// and the switch beside it is what makes that acceptable.
     #[test]
-    fn the_release_notice_says_nothing_will_update_it_for_you() {
-        let said = HOW_TO_UPDATE_THE_APP.to_lowercase();
-        assert!(said.contains("no apt repository"));
-        assert!(said.contains("nothing updates this application on its own"));
+    fn the_disclosure_says_the_check_runs_by_itself() {
+        assert!(WHAT_THE_CHECK_SENDS.contains("once a day"));
     }
 
-    /// This application installs nothing privileged, and the group that mentions
-    /// an available update has to say why it is only mentioning it.
+    /// The password prompt is said before the button is pressed, so polkit's
+    /// dialog is not mistaken for something else asking. Both routes say the
+    /// release is checked before it is installed.
+    #[test]
+    fn the_install_button_says_what_it_will_do() {
+        assert!(HOW_A_PACKAGE_UPDATES.contains("password"));
+        assert!(!HOW_A_TARBALL_UPDATES.contains("password"), "a tarball install needs none");
+        for said in [HOW_A_PACKAGE_UPDATES, HOW_A_TARBALL_UPDATES] {
+            assert!(said.contains("signed by this project"), "{said}");
+            assert!(said.contains("restarts"), "{said}");
+        }
+    }
+
+    /// The AdGuard CLI half is still named and never run, and the group that
+    /// mentions it has to say why — now beside a page that does install its
+    /// own update.
     #[test]
     fn the_update_notice_explains_why_it_is_not_a_button() {
         let why = WHY_NO_BUTTON.to_lowercase();

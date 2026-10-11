@@ -135,7 +135,7 @@ impl Autostart {
 /// A relative `$XDG_CONFIG_HOME` is ignored, as the spec says to: it would
 /// resolve against this process's working directory, which is wherever the user
 /// happened to launch us from.
-fn config_home() -> Option<PathBuf> {
+pub(crate) fn config_home() -> Option<PathBuf> {
     if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
         let xdg = PathBuf::from(xdg);
         if xdg.is_absolute() {

@@ -26,6 +26,7 @@ pub mod release;
 pub mod requests;
 pub mod site;
 pub mod trust;
+pub mod update;
 pub mod userscripts;
 pub mod window_state;
 pub mod zip;

@@ -118,7 +118,7 @@ One binary, `adguard-ui`, serves the window and the tray; `adguard-tray` is a li
 The full list is `overnight-plan.md` §3, which is archived but still in force, and §4 there is the verification discipline. The three that would do real damage:
 
 - **`adguard-cli configure` against a directory that already has a `proxy.yaml`.** It resets the user's whole configuration and there is no prompt to decline at with stdin closed. `Cli::configure` guards this; do not add a second call site around the guard.
-- **`sudo`, `pkexec`, or a suid bit on anything.** This application ships no privileged component and there is a section explaining why (`architecture.md` §6).
+- **`sudo`, `pkexec`, or a suid bit on anything** — with one exception, the `pkexec apt-get`/`dnf` that installs this application's own signed update. It is not a precedent for running AdGuard's commands, and `architecture.md` §6 says why the two differ. This application ships no privileged component.
 - **`cargo test --test config_mutate` / `--test filters_mutate`, or a filter installed into the real catalogue.** They drive the user's real install. Sandbox everything: `Cli::with_xdg_data_home`, and §4 below.
 
 ---
