@@ -107,6 +107,15 @@ pub struct State {
     /// could be seen. Lower priority than [`Self::bypassed`]: a proxy serving
     /// nothing is the worse news.
     pub untrusted: bool,
+    /// AdGuard CLI refuses to say what the proxy is doing, most often because
+    /// it has lost its licence and refuses every command.
+    ///
+    /// Outranks everything else, because nothing else is known: `running` is
+    /// whatever the last readable `status` said, possibly hours ago. Without
+    /// this the tray went on showing that last answer, a healthy shield
+    /// included, while the window said *Protection state unknown*, and the
+    /// tray is all there is under `--background` (11 October 2026).
+    pub unavailable: bool,
     /// One entry per [`Toggle::ALL`], in that order.
     pub toggles: Vec<Option<bool>>,
 }
@@ -118,6 +127,9 @@ impl State {
 
     /// The three words the tray has room for.
     fn description(&self) -> &'static str {
+        if self.unavailable {
+            return "state unknown";
+        }
         match (self.running, self.bypassed, self.untrusted) {
             (true, true, _) => "not filtering",
             (true, false, true) => "certificate not trusted",
@@ -228,6 +240,9 @@ impl KsniTray for Indicator {
     /// what a deliberate stop looks like — this is neither, and the icon is
     /// most of what anyone actually reads off a tray.
     fn icon_name(&self) -> String {
+        if self.state.unavailable {
+            return "dialog-warning-symbolic".to_owned();
+        }
         match (self.state.running, self.state.bypassed, self.state.untrusted) {
             (true, true, _) | (true, false, true) => "dialog-warning-symbolic".to_owned(),
             (true, false, false) => "security-high-symbolic".to_owned(),
@@ -259,6 +274,9 @@ impl KsniTray for Indicator {
                         Command::StartProxy
                     });
                 }),
+                // Which of the two it should be is exactly what is not known,
+                // and AdGuard would refuse either. The window says why.
+                enabled: !self.state.unavailable,
                 ..Default::default()
             }
             .into(),
@@ -408,21 +426,21 @@ mod tests {
     use super::*;
 
     fn state(running: bool, toggles: Vec<Option<bool>>) -> State {
-        State { running, bypassed: false, untrusted: false, toggles }
+        State { running, bypassed: false, untrusted: false, unavailable: false, toggles }
     }
 
     /// The tray's whole vocabulary, and the one word that must not appear in
     /// the bypassed state.
     #[test]
     fn a_bypassed_proxy_never_describes_itself_as_running() {
-        let bypassed = State { running: true, bypassed: true, untrusted: false, toggles: vec![] };
+        let bypassed = State { running: true, bypassed: true, untrusted: false, unavailable: false, toggles: vec![] };
         assert_eq!(bypassed.description(), "not filtering");
 
         assert_eq!(state(true, vec![]).description(), "running");
         assert_eq!(state(false, vec![]).description(), "stopped");
         // A stopped proxy has no helper to have died, and must read as the
         // ordinary stop it is however the flag arrives.
-        let odd = State { running: false, bypassed: true, untrusted: false, toggles: vec![] };
+        let odd = State { running: false, bypassed: true, untrusted: false, unavailable: false, toggles: vec![] };
         assert_eq!(odd.description(), "stopped");
     }
 
@@ -433,6 +451,18 @@ mod tests {
         let healthy = state(true, vec![Some(true)]);
         let bypassed = State { bypassed: true, ..healthy.clone() };
         assert_ne!(healthy, bypassed);
+    }
+
+    /// A refused `status` must not leave the last answer standing, a healthy
+    /// shield least of all.
+    #[test]
+    fn an_unreadable_state_says_so_whatever_was_last_known() {
+        let healthy = state(true, vec![]);
+        let unknown = State { unavailable: true, ..healthy.clone() };
+        assert_eq!(unknown.description(), "state unknown");
+        assert_ne!(unknown, healthy);
+        let stopped = State { unavailable: true, ..state(false, vec![]) };
+        assert_eq!(stopped.description(), "state unknown");
     }
 
     /// An untrusted CA must not read as plain "running", and a bypass outranks it.

@@ -476,6 +476,16 @@ fn connect_tray(
         }
     });
 
+    view.status.connect_unavailable({
+        let tray = tray.clone();
+        let state = state.clone();
+        move |unavailable| {
+            state.borrow_mut().unavailable = unavailable;
+            let snapshot = state.borrow().clone();
+            tray.set_state(snapshot);
+        }
+    });
+
     view.status.connect_trust({
         let tray = tray.clone();
         let state = state.clone();

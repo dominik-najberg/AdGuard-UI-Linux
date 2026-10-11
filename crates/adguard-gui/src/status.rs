@@ -388,6 +388,12 @@ pub struct StatusPage {
     trust_observer: RefCell<Option<Box<dyn Fn(bool)>>>,
     /// What `trust_observer` was last told, so it hears changes only.
     trust_reported: Cell<Option<bool>>,
+    /// Told when whether `status` can be read at all changes, for the tray.
+    /// `observer` only ever hears readings, so on its own the tray would go on
+    /// showing the last one through a refusal.
+    unavailable_observer: RefCell<Option<Box<dyn Fn(bool)>>>,
+    /// What `unavailable_observer` was last told, so it hears changes only.
+    unavailable_reported: Cell<Option<bool>>,
 
     /// Notified when a figure or a row here is clicked to go somewhere else.
     ///
@@ -754,6 +760,8 @@ impl StatusPage {
             ticks: Cell::new(0),
             observer: RefCell::new(None),
             trust_observer: RefCell::new(None),
+            unavailable_observer: RefCell::new(None),
+            unavailable_reported: Cell::new(None),
             trust_reported: Cell::new(None),
             navigate: RefCell::new(None),
         });
@@ -1229,6 +1237,7 @@ impl StatusPage {
         if read {
             self.filtering_read.set(Some(Instant::now()));
         }
+        self.report_unavailable(result.is_err());
         match result {
             Ok(status) => {
                 self.apply(&status, bypass);
@@ -1296,6 +1305,20 @@ impl StatusPage {
     /// the tray's warning icon. Only on a change.
     pub fn connect_trust(&self, observer: impl Fn(bool) + 'static) {
         self.trust_observer.replace(Some(Box::new(observer)));
+    }
+
+    /// Report whether `status` is being refused or cannot be read, to
+    /// `observer` — the tray's "state unknown". Only on a change.
+    pub fn connect_unavailable(&self, observer: impl Fn(bool) + 'static) {
+        self.unavailable_observer.replace(Some(Box::new(observer)));
+    }
+
+    fn report_unavailable(&self, unavailable: bool) {
+        if self.unavailable_reported.replace(Some(unavailable)) != Some(unavailable) {
+            if let Some(observer) = self.unavailable_observer.borrow().as_ref() {
+                observer(unavailable);
+            }
+        }
     }
 
     /// Where a click on a figure or a row here should take the user.

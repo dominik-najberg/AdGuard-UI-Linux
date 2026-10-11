@@ -13,6 +13,10 @@ This file is the one changelog.
 
 ## Unreleased
 
+### The tray warns when AdGuard will not say what it is doing
+
+When AdGuard CLI refused `status`, most often after losing its licence, the window said *Protection state unknown* while the tray went on showing the last state it had read, sometimes hours old. It now shows the warning icon and *state unknown*, and greys out *Start proxy*/*Stop proxy*, which AdGuard would refuse anyway. Under `--background` the tray is the only thing on screen.
+
 ### A lost licence no longer gets the running proxy stopped
 
 When AdGuard CLI lost its licence, it refused every command, `status` included. Opening the window then made the application treat the user's running proxy as a leftover from an earlier session and stop it, because the refused `status` was read as "not running". A start that failed while unlicensed did the same. A process is now stopped only when `status` answers and says the proxy is not running. A refusal stops nothing.
