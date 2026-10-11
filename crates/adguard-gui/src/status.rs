@@ -346,6 +346,15 @@ pub struct StatusPage {
     /// again — after a log-in, or after a check that had failed to reach
     /// AdGuard — and the licence group should hear about it once.
     status_unlicensed: Cell<bool>,
+    /// Whether a proxy was running when *Activate…* was pressed.
+    ///
+    /// `activate` stops a running proxy while the licence is refused (see
+    /// [`Cli::version`] for the measurement), so the protection the user had
+    /// before the licence was lost does not come back with the licence on its
+    /// own. Starting it again when the activation completes puts back what
+    /// activating took away. It is a restore, not a start this page decided
+    /// on, and it is never set when nothing was running.
+    resume_after_activation: Cell<bool>,
     /// The last `status` reading and what it was taken against. What lets a
     /// poll tick reuse it instead of running the CLI (see [`POLL_INTERVAL`]).
     last_status: RefCell<Option<StatusReading>>,
@@ -752,6 +761,7 @@ impl StatusPage {
             finish: finish.clone(),
             licence: RefCell::new(Licence::Unknown),
             status_unlicensed: Cell::new(false),
+            resume_after_activation: Cell::new(false),
             last_status: RefCell::new(None),
             busy: Cell::new(false),
             filtering: Cell::new(None),
@@ -1838,7 +1848,7 @@ impl StatusPage {
     }
 
     /// `license` answered.
-    fn licence_read(&self, licence: License) {
+    fn licence_read(self: &Rc<Self>, licence: License) {
         // An activation the user has not finished is not overwritten by a
         // reading that says what we already knew. Pressing the refresh button
         // to ask "did it work?" is the natural gesture at exactly that moment,
@@ -1857,7 +1867,25 @@ impl StatusPage {
         // Usually reached from the `status` poll, not from a press, so nothing
         // else tells the user the wait is over.
         if awaiting {
+            let _ = self.activation_completed();
+        }
+    }
+
+    /// The licence is active again after this page's *Activate…*. Say so, and
+    /// put back the proxy `activate` stopped, if one was running before it.
+    ///
+    /// Returns whether it started the proxy, which re-reads `status` itself
+    /// when done; a caller must not run a second one alongside it.
+    fn activation_completed(self: &Rc<Self>) -> bool {
+        if self.resume_after_activation.replace(false) {
+            self.toasts.add_toast(toast(
+                "AdGuard is activated. Activating stopped protection, so it is being started again",
+            ));
+            self.act(Action::Start);
+            true
+        } else {
             self.toasts.add_toast(toast("AdGuard is activated"));
+            false
         }
     }
 
@@ -1934,10 +1962,16 @@ impl StatusPage {
         let cli = self.cli.clone();
         let this = self.clone();
         worker::run(
-            move || cli.activate().map_err(|err| err.to_string()),
-            move |result| {
+            move || {
+                // Read before, because `activate` is what stops it. `/proc`
+                // rather than `status`, which is refused at this point.
+                let was_running = !orphan::daemons(cli.binary()).is_empty();
+                (was_running, cli.activate().map_err(|err| err.to_string()))
+            },
+            move |(was_running, result)| {
                 this.busy.set(false);
                 this.activate.set_sensitive(true);
+                this.resume_after_activation.set(was_running);
                 match result {
                     Ok(Activation::NeedsLogin { url }) => this.open_login(url),
                     // A shape nobody has measured — an install that is already
@@ -2005,16 +2039,22 @@ impl StatusPage {
                 // to leave `AwaitingLogin`, whichever way the reading went —
                 // the toast below has to be able to say "still not active".
                 self.set_licence(Licence::Read(licence));
-                self.toasts.add_toast(toast(if active {
-                    "AdGuard is activated"
+                let starting = if active {
+                    self.activation_completed()
                 } else {
-                    "AdGuard answered, but the licence is still not active"
-                }));
+                    self.toasts.add_toast(toast(
+                        "AdGuard answered, but the licence is still not active",
+                    ));
+                    false
+                };
                 // `status` was refused for want of a licence until a moment
                 // ago, so the rows above this group are stale. Only those: the
                 // filter catalogue is read from SQLite and was never gated, and
-                // the Protection and Advanced pages read `proxy.yaml`.
-                self.refresh();
+                // the Protection and Advanced pages read `proxy.yaml`. A start
+                // in flight re-reads them itself once it is done.
+                if !starting {
+                    self.refresh();
+                }
                 return;
             }
             Err(Refused { unlicensed, message, .. }) => (unlicensed, message),

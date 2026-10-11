@@ -534,7 +534,27 @@ impl Cli {
         Ok(Output { stdout, stderr })
     }
 
+    /// The CLI's version banner, `AdGuard CLI v1.4.13`.
+    ///
+    /// # It asks `license` first, because `--version` can stop the proxy
+    ///
+    /// Measured on v1.4.13 on 11 October 2026, in a sandbox with a running
+    /// proxy whose `adguard.conf` was then swapped for an unlicensed one.
+    /// `--version` and `-v` printed the banner and **stopped the proxy**:
+    /// `stop_command` in the log, and the daemon gone. So did `activate`.
+    /// `status`, `license`, `filters list` and `userscripts list` are refused
+    /// by the licence check before they get that far. `config get`,
+    /// `config set` and `check-update` run and leave the proxy alone.
+    /// `--version` *with* a licence leaves it alone too.
+    ///
+    /// That made opening the window enough to switch protection off after a
+    /// lost licence, because the About page reads this at start-up. It did so
+    /// at 01:33:41 and at 08:24:02 that day. So this reads `license` first, a
+    /// refused command, and does not run `--version` at all while the licence
+    /// is refused. The licence could still be lost in the milliseconds between
+    /// the two, but that is a window, not a certainty.
     pub fn version(&self) -> Result<String, Error> {
+        self.license()?;
         Ok(self.run(&["--version"])?.stdout.trim().to_owned())
     }
 

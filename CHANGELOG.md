@@ -13,6 +13,10 @@ This file is the one changelog.
 
 ## Unreleased
 
+### Opening the window no longer switches protection off after a lost licence
+
+AdGuard CLI without a licence stops a running proxy when it is asked for its version, and when it is asked to activate. The About page asked for the version at every start-up, so after a lost licence, opening AdGuard UI was enough to turn protection off. The version is now read only while the licence is active. When *Activate…* stops a proxy that was running, the application starts it again as soon as the licence is back.
+
 ### The tray warns when AdGuard will not say what it is doing
 
 When AdGuard CLI refused `status`, most often after losing its licence, the window said *Protection state unknown* while the tray went on showing the last state it had read, sometimes hours old. It now shows the warning icon and *state unknown*, and greys out *Start proxy*/*Stop proxy*, which AdGuard would refuse anyway. Under `--background` the tray is the only thing on screen.
