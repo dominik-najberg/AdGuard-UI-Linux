@@ -922,7 +922,18 @@ Two consequences for the UI, and the first is not about this row:
 
   **The `appid` belongs to the data directory, not to the invocation.** Measured: three runs against one sandbox produced the identical link, a second sandbox produced a different one. So a second run is harmless to a log-in in progress. It is just no use.
 
-  **The first run stops the proxy.** When it is running, the log has `stop_command` right after `activate_command`, in the same process (4 October 23:34, 10 October 08:41). Nothing starts it again: after the licence came back on 10 October, `status` said the proxy was not running until something ran `start`.
+  **Without a licence, `activate` stops a running proxy, and so does `--version`.** Measured on 11 October 2026 in a sandbox. A licensed proxy was started on its own ports, then `adguard.conf` was swapped for an unlicensed one, and one command was run each time from a fresh start:
+
+  | Command, unlicensed, proxy running | Proxy afterwards |
+  | --- | --- |
+  | `status`, `license`, `filters list`, `userscripts list` | running (each is refused before it acts) |
+  | `config get log_level`, `config set log_level info`, `check-update` | running |
+  | **`--version`, `-v`, `activate`** | **stopped**, with `stop_command` in the log |
+  | `--version` *with* a licence | running |
+
+  This is what `stop_command` after `activate_command` on 4 and 10 October was. It is not activation, but these commands meeting an unlicensed install. It is also how opening AdGuard UI stopped the user's proxy at 01:33:41 and 08:24:02 on 11 October: the About page ran `--version` at start-up. `Cli::version` now reads `license` first and does not run `--version` while that is refused. The Status page records whether a proxy was running when *Activate…* was pressed, and starts it again once the licence is back.
+
+  The sandbox needs a **short** data path. The CLI names its control socket after the data directory, and at 187 characters it truncated the name past the 107-byte limit and then failed every later start with `Failed to init control socket: Create listener error`.
 
   Timing: 0.14 s the first time in a fresh data directory, which it seeds, and 0.01–0.02 s afterwards. The link is computed locally, and there is no network leg at all with stdin closed. `Cli::activate` keeps `NETWORK_TIMEOUT` for the proxy it may stop on the way.
 

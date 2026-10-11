@@ -722,7 +722,12 @@ fn any_invocation_rewrites_the_config_and_touches_its_mtime() {
     let path = sandbox.config_path();
 
     // Normalise first, so this measures a steady state rather than a repair.
-    sandbox.cli.version().expect("--version should run unlicensed");
+    // Raw, not `Cli::version`, which asks `license` first and so refuses in an
+    // unlicensed sandbox. Nothing runs here for `--version` to stop.
+    sandbox
+        .cli
+        .run_within(&["--version"], std::time::Duration::from_secs(30))
+        .expect("--version should run unlicensed");
 
     // Licence-gated commands cannot run in a sandbox, so this uses the ones that
     // can. `status` and `license` were measured to behave identically.
@@ -790,7 +795,10 @@ fn the_rewrite_restores_missing_keys_but_not_invalid_values() {
     );
 
     // Any invocation triggers the rewrite; this one needs no licence.
-    sandbox.cli.version().expect("--version should run");
+    sandbox
+        .cli
+        .run_within(&["--version"], std::time::Duration::from_secs(30))
+        .expect("--version should run");
 
     let config = sandbox.config();
     assert!(

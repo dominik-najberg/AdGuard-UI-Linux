@@ -346,6 +346,15 @@ pub struct StatusPage {
     /// again — after a log-in, or after a check that had failed to reach
     /// AdGuard — and the licence group should hear about it once.
     status_unlicensed: Cell<bool>,
+    /// Whether a proxy was running when *Activate…* was pressed.
+    ///
+    /// `activate` stops a running proxy while the licence is refused (see
+    /// [`Cli::version`] for the measurement), so the protection the user had
+    /// before the licence was lost does not come back with the licence on its
+    /// own. Starting it again when the activation completes puts back what
+    /// activating took away. It is a restore, not a start this page decided
+    /// on, and it is never set when nothing was running.
+    resume_after_activation: Cell<bool>,
     /// The last `status` reading and what it was taken against. What lets a
     /// poll tick reuse it instead of running the CLI (see [`POLL_INTERVAL`]).
     last_status: RefCell<Option<StatusReading>>,
@@ -388,6 +397,12 @@ pub struct StatusPage {
     trust_observer: RefCell<Option<Box<dyn Fn(bool)>>>,
     /// What `trust_observer` was last told, so it hears changes only.
     trust_reported: Cell<Option<bool>>,
+    /// Told when whether `status` can be read at all changes, for the tray.
+    /// `observer` only ever hears readings, so on its own the tray would go on
+    /// showing the last one through a refusal.
+    unavailable_observer: RefCell<Option<Box<dyn Fn(bool)>>>,
+    /// What `unavailable_observer` was last told, so it hears changes only.
+    unavailable_reported: Cell<Option<bool>>,
 
     /// Notified when a figure or a row here is clicked to go somewhere else.
     ///
@@ -746,6 +761,7 @@ impl StatusPage {
             finish: finish.clone(),
             licence: RefCell::new(Licence::Unknown),
             status_unlicensed: Cell::new(false),
+            resume_after_activation: Cell::new(false),
             last_status: RefCell::new(None),
             busy: Cell::new(false),
             filtering: Cell::new(None),
@@ -754,6 +770,8 @@ impl StatusPage {
             ticks: Cell::new(0),
             observer: RefCell::new(None),
             trust_observer: RefCell::new(None),
+            unavailable_observer: RefCell::new(None),
+            unavailable_reported: Cell::new(None),
             trust_reported: Cell::new(None),
             navigate: RefCell::new(None),
         });
@@ -1229,6 +1247,7 @@ impl StatusPage {
         if read {
             self.filtering_read.set(Some(Instant::now()));
         }
+        self.report_unavailable(result.is_err());
         match result {
             Ok(status) => {
                 self.apply(&status, bypass);
@@ -1296,6 +1315,20 @@ impl StatusPage {
     /// the tray's warning icon. Only on a change.
     pub fn connect_trust(&self, observer: impl Fn(bool) + 'static) {
         self.trust_observer.replace(Some(Box::new(observer)));
+    }
+
+    /// Report whether `status` is being refused or cannot be read, to
+    /// `observer` — the tray's "state unknown". Only on a change.
+    pub fn connect_unavailable(&self, observer: impl Fn(bool) + 'static) {
+        self.unavailable_observer.replace(Some(Box::new(observer)));
+    }
+
+    fn report_unavailable(&self, unavailable: bool) {
+        if self.unavailable_reported.replace(Some(unavailable)) != Some(unavailable) {
+            if let Some(observer) = self.unavailable_observer.borrow().as_ref() {
+                observer(unavailable);
+            }
+        }
     }
 
     /// Where a click on a figure or a row here should take the user.
@@ -1376,7 +1409,7 @@ impl StatusPage {
                 // The contradiction, in the order that costs least: no daemons
                 // is the overwhelmingly common answer and it needs no `status`.
                 // An unreadable status is not a licence to kill anything.
-                if stranded.is_empty() || cli.status().is_ok_and(|status| status.running) {
+                if stranded.is_empty() || !reads_stopped(&cli) {
                     return None;
                 }
                 match clear(&stranded) {
@@ -1815,7 +1848,7 @@ impl StatusPage {
     }
 
     /// `license` answered.
-    fn licence_read(&self, licence: License) {
+    fn licence_read(self: &Rc<Self>, licence: License) {
         // An activation the user has not finished is not overwritten by a
         // reading that says what we already knew. Pressing the refresh button
         // to ask "did it work?" is the natural gesture at exactly that moment,
@@ -1834,7 +1867,25 @@ impl StatusPage {
         // Usually reached from the `status` poll, not from a press, so nothing
         // else tells the user the wait is over.
         if awaiting {
+            let _ = self.activation_completed();
+        }
+    }
+
+    /// The licence is active again after this page's *Activate…*. Say so, and
+    /// put back the proxy `activate` stopped, if one was running before it.
+    ///
+    /// Returns whether it started the proxy, which re-reads `status` itself
+    /// when done; a caller must not run a second one alongside it.
+    fn activation_completed(self: &Rc<Self>) -> bool {
+        if self.resume_after_activation.replace(false) {
+            self.toasts.add_toast(toast(
+                "AdGuard is activated. Activating stopped protection, so it is being started again",
+            ));
+            self.act(Action::Start);
+            true
+        } else {
             self.toasts.add_toast(toast("AdGuard is activated"));
+            false
         }
     }
 
@@ -1911,10 +1962,16 @@ impl StatusPage {
         let cli = self.cli.clone();
         let this = self.clone();
         worker::run(
-            move || cli.activate().map_err(|err| err.to_string()),
-            move |result| {
+            move || {
+                // Read before, because `activate` is what stops it. `/proc`
+                // rather than `status`, which is refused at this point.
+                let was_running = !orphan::daemons(cli.binary()).is_empty();
+                (was_running, cli.activate().map_err(|err| err.to_string()))
+            },
+            move |(was_running, result)| {
                 this.busy.set(false);
                 this.activate.set_sensitive(true);
+                this.resume_after_activation.set(was_running);
                 match result {
                     Ok(Activation::NeedsLogin { url }) => this.open_login(url),
                     // A shape nobody has measured — an install that is already
@@ -1982,16 +2039,22 @@ impl StatusPage {
                 // to leave `AwaitingLogin`, whichever way the reading went —
                 // the toast below has to be able to say "still not active".
                 self.set_licence(Licence::Read(licence));
-                self.toasts.add_toast(toast(if active {
-                    "AdGuard is activated"
+                let starting = if active {
+                    self.activation_completed()
                 } else {
-                    "AdGuard answered, but the licence is still not active"
-                }));
+                    self.toasts.add_toast(toast(
+                        "AdGuard answered, but the licence is still not active",
+                    ));
+                    false
+                };
                 // `status` was refused for want of a licence until a moment
                 // ago, so the rows above this group are stale. Only those: the
                 // filter catalogue is read from SQLite and was never gated, and
-                // the Protection and Advanced pages read `proxy.yaml`.
-                self.refresh();
+                // the Protection and Advanced pages read `proxy.yaml`. A start
+                // in flight re-reads them itself once it is done.
+                if !starting {
+                    self.refresh();
+                }
                 return;
             }
             Err(Refused { unlicensed, message, .. }) => (unlicensed, message),
@@ -2406,7 +2469,7 @@ impl Action {
 
         let said = self.run(cli).map_err(|err| err.to_string());
 
-        if !self.expects_running() || cli.status().is_ok_and(|status| status.running) {
+        if !self.expects_running() || !reads_stopped(cli) {
             return (said, None);
         }
 
@@ -2434,6 +2497,22 @@ impl Action {
         };
         (retried, Some(cleared_note(&cleared, outcome)))
     }
+}
+
+/// Does `status` positively say the proxy is not running?
+///
+/// The one reading that may lead to signalling a daemon, and the reason this
+/// is a function rather than `!status().is_ok_and(running)` at each caller.
+/// That expression is also true for a `status` that was **refused**, and the
+/// commonest refusal is a lost licence: every command is refused then, while
+/// the proxy that was started before the loss runs on. Measured on 11 October
+/// 2026: the licence was gone, the window was opened at 01:33:31, and
+/// [`StatusPage::sweep`] took the refusal for "not running" and stopped the
+/// user's proxy seven seconds later as a leftover. A refusal says nothing
+/// about the process, so it must end the check, as the comments at both
+/// callers always said it did.
+fn reads_stopped(cli: &Cli) -> bool {
+    matches!(cli.status(), Ok(status) if !status.running)
 }
 
 /// Ask every stranded process to exit. `None` if any of them would not.

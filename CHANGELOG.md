@@ -13,6 +13,18 @@ This file is the one changelog.
 
 ## Unreleased
 
+### Opening the window no longer switches protection off after a lost licence
+
+AdGuard CLI without a licence stops a running proxy when it is asked for its version, and when it is asked to activate. The About page asked for the version at every start-up, so after a lost licence, opening AdGuard UI was enough to turn protection off. The version is now read only while the licence is active. When *Activate…* stops a proxy that was running, the application starts it again as soon as the licence is back.
+
+### The tray warns when AdGuard will not say what it is doing
+
+When AdGuard CLI refused `status`, most often after losing its licence, the window said *Protection state unknown* while the tray went on showing the last state it had read, sometimes hours old. It now shows the warning icon and *state unknown*, and greys out *Start proxy*/*Stop proxy*, which AdGuard would refuse anyway. Under `--background` the tray is the only thing on screen.
+
+### A lost licence no longer gets the running proxy stopped
+
+When AdGuard CLI lost its licence, it refused every command, `status` included. Opening the window then made the application treat the user's running proxy as a leftover from an earlier session and stop it, because the refused `status` was read as "not running". A start that failed while unlicensed did the same. A process is now stopped only when `status` answers and says the proxy is not running. A refusal stops nothing.
+
 ### AdGuard CLI is run about thirty times less often
 
 Every `adguard-cli` command rewrites AdGuard's configuration files, including `adguard.conf`, which holds the licence, even when nothing in them changes. The Status page ran `adguard-cli status` every two seconds, which came to about 27,000 rewrites a day. Each time AdGuard CLI lost its licence, its own log shows it rebuilding that file from scratch, so the application now checks locally whenever it can. Every two seconds it compares `proxy.yaml` and the running AdGuard processes with the last reading. It runs `status` only when one of them changes, after its own start, stop and restart, every ten seconds while AdGuard refuses it, and otherwise once a minute. A proxy that stops or starts is still noticed within two seconds. A licence that lapses while the proxy runs can take up to a minute to show.
