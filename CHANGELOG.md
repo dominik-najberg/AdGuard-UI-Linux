@@ -21,6 +21,10 @@ Every file in a release is now signed with minisign, and the application install
 
 The daily check can be switched off on the About page, which says what it sends. That is the application's name and version, nothing about you or the machine. Earlier releases are not signed, so the first signed release has to be installed by hand.
 
+### The source of a redirected userscript is readable again
+
+When a userscript's *Install* link redirected, the *Add this userscript?* question put *Redirected from* and the link's host under *Source*, and that line took the room the source itself needed: `raw.githubusercontent.com` read `raw.gi… nt.com`, and the line under it broke in the middle of the other host. *Redirected from* is now a row of its own, below *Source*, with the link's host whole beneath it, and *Source* keeps the width for its value.
+
 ### Opening the window no longer switches protection off after a lost licence
 
 AdGuard CLI without a licence stops a running proxy when it is asked for its version, and when it is asked to activate. The About page asked for the version at every start-up, so after a lost licence, opening AdGuard UI was enough to turn protection off. The version is now read only while the licence is active. When *Activate…* stops a proxy that was running, the application starts it again as soon as the licence is back.
