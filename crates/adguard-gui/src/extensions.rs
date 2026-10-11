@@ -1226,8 +1226,9 @@ struct InstallDetails {
     description: gtk::Label,
     version: adw::ActionRow,
     version_value: gtk::Label,
-    source: adw::ActionRow,
     source_value: gtk::Label,
+    /// The link's own host, when it redirected to the source.
+    redirect: adw::ActionRow,
     /// "Runs on" with nothing to list: one site, every site, unknown, or
     /// still reading.
     reach: adw::ActionRow,
@@ -1296,6 +1297,15 @@ impl InstallDetails {
         source.add_suffix(&source_value);
         list.append(&source);
 
+        // A row of its own, not the source's subtitle: a subtitle is laid out
+        // before the suffix, so beside "Redirected from userscript-install-
+        // tracker.vercel.app" the source was cut to "raw.gi… nt.com". And the
+        // link's host goes under the title rather than beside it, where a
+        // name that long was cut the same way: there it has the whole width.
+        let redirect = static_row("Redirected from");
+        redirect.set_visible(false);
+        list.append(&redirect);
+
         let reach = static_row("Runs on");
         let reach_spinner = adw::Spinner::builder()
             .width_request(16)
@@ -1327,8 +1337,8 @@ impl InstallDetails {
             description,
             version,
             version_value,
-            source,
             source_value,
+            redirect,
             reach,
             reach_value,
             reach_warning,
@@ -1369,9 +1379,8 @@ impl InstallDetails {
         self.version_value
             .set_label(summary.version.as_deref().unwrap_or(""));
         self.source_value.set_label(&summary.source);
-        self.source.set_subtitle(
-            &summary.via.as_deref().map(|via| format!("Redirected from {via}")).unwrap_or_default(),
-        );
+        self.redirect.set_visible(summary.via.is_some());
+        self.redirect.set_subtitle(summary.via.as_deref().unwrap_or(""));
 
         let reach = &summary.reach;
         let listing = !reach.sites().is_empty();
