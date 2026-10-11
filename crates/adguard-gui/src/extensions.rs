@@ -28,7 +28,8 @@ use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 use std::time::Duration;
 
-use adguard_core::{userscripts, Cli, Config, Locale, Userscript};
+use adguard_core::userscripts::{self, Helper};
+use adguard_core::{Cli, Config, Locale, Userscript, INSTALL_LINKS};
 use adw::prelude::*;
 use gtk::glib;
 use gtk4 as gtk;
@@ -46,9 +47,8 @@ struct Loaded {
     /// `scripts`, but computed on the worker thread with everything else so the
     /// view builder has nothing left to work out.
     offered: Vec<&'static adguard_core::Recommended>,
-    /// This application's own script for browser install links, while it is
-    /// not installed.
-    install_links: Option<&'static adguard_core::Recommended>,
+    /// Where this application's own script for browser install links stands.
+    install_links: Helper,
 }
 
 /// A rendered userscript and the state it was rendered from.
@@ -105,8 +105,15 @@ const ADD_DESCRIPTION: &str =
     "AdGuard fetches userscripts over the web, so this takes an http or https address \
      ending in .user.js — a file on this computer cannot be installed.";
 
+/// What the *From your browser* group says while the helper is installed but
+/// switched off — the state that, on 11 October 2026, left *Install Script* on
+/// a GitHub page doing nothing, with nothing anywhere saying why.
+const HELPER_OFF: &str = "The browser helper is installed but switched off, so the Install \
+                          button on Greasy Fork, Sleazy Fork, OpenUserJS and GitHub opens the \
+                          script as text instead of bringing it here.";
+
 /// What the banner says after an address was pasted while the browser helper
-/// is missing (#29). It names the button people already know from Greasy Fork
+/// is missing or switched off (#29). It names the button people already know from Greasy Fork
 /// rather than the helper, whose name means nothing until it is explained.
 const HELPER_HINT: &str = "You can skip copying addresses: with the browser helper, the Install \
                            button on Greasy Fork brings scripts here.";
@@ -123,6 +130,10 @@ pub struct ExtensionsPage {
     /// The *From your browser* group in the current build, for the banner to
     /// point at.
     browser_group: RefCell<Option<adw::PreferencesGroup>>,
+    /// That group's *Turn on*, while the helper is installed: the group is
+    /// built either way and shown only while the helper is off, so a switch
+    /// flipped on the helper's own row moves it without a rebuild.
+    helper_turn_on: RefCell<Option<gtk::Button>>,
     cli: Cli,
     toasts: adw::ToastOverlay,
     locale: Locale,
@@ -157,6 +168,7 @@ impl ExtensionsPage {
             banner,
             bin,
             browser_group: RefCell::new(None),
+            helper_turn_on: RefCell::new(None),
             cli,
             toasts,
             locale: Locale::from_env(),
@@ -210,6 +222,7 @@ impl ExtensionsPage {
                 Err(err) => {
                     this.rows.borrow_mut().clear();
                     this.browser_group.replace(None);
+                    this.helper_turn_on.replace(None);
                     this.bin.set_child(Some(&error_view(&err)));
                 }
             },
@@ -262,6 +275,7 @@ impl ExtensionsPage {
             }
         }
         self.reconciling.set(false);
+        self.show_helper_state();
         moved
     }
 
@@ -274,14 +288,13 @@ impl ExtensionsPage {
         // Directly under the address field: the two are ways of doing the same
         // thing, and the helper is the one that saves typing the address.
         let browser_group = self.install_links_group(loaded.install_links);
-        if let Some(group) = &browser_group {
-            page.add(group);
-        } else {
-            // Added, from the banner's group or anywhere else: nothing left
-            // to suggest.
+        page.add(&browser_group);
+        if loaded.install_links.works() {
+            // Added and on, from the banner's group or anywhere else: nothing
+            // left to suggest.
             self.banner.set_revealed(false);
         }
-        self.browser_group.replace(browser_group);
+        self.browser_group.replace(Some(browser_group));
         if let Some(group) = self.offered_group(&loaded.offered) {
             page.add(&group);
         }
@@ -392,31 +405,97 @@ impl ExtensionsPage {
     /// this application's script, not AdGuard's, and it changes what happens
     /// on other sites when a link is clicked — which is worth a sentence of its
     /// own before anyone presses *Add*.
-    fn install_links_group(
-        self: &Rc<Self>,
-        entry: Option<&'static adguard_core::Recommended>,
-    ) -> Option<adw::PreferencesGroup> {
-        let entry = entry?;
-        let group = adw::PreferencesGroup::builder()
-            .title("From your browser")
-            .description(
-                "With this added, the Install button on Greasy Fork, Sleazy Fork, OpenUserJS \
-                 and GitHub brings the script here to be added, instead of opening it as text. \
-                 It needs HTTPS filtering for your browser, and the browser asks once whether \
-                 to open AdGuard UI.",
-            )
+    fn install_links_group(self: &Rc<Self>, helper: Helper) -> adw::PreferencesGroup {
+        let group = adw::PreferencesGroup::builder().title("From your browser").build();
+        self.helper_turn_on.replace(None);
+
+        let ambiguous = match helper {
+            Helper::Missing(entry) => {
+                group.set_description(Some(
+                    "With this added, the Install button on Greasy Fork, Sleazy Fork, OpenUserJS \
+                     and GitHub brings the script here to be added, instead of opening it as text. \
+                     It needs HTTPS filtering for your browser, and the browser asks once whether \
+                     to open AdGuard UI.",
+                ));
+                // Titled for what it does rather than with the script's own
+                // name, which reads as a product nobody has heard of. The name
+                // follows, so the row can be matched to the one that appears
+                // under *Installed*.
+                let row = self.offer_row(entry);
+                row.set_title("Install from your browser");
+                row.set_subtitle(&format!(
+                    "Adds the “{}” userscript. Each script is still added only after you confirm it.",
+                    entry.name
+                ));
+                group.add(&row);
+                return group;
+            }
+            Helper::Off { ambiguous } => ambiguous,
+            Helper::On => false,
+        };
+
+        // Installed: built either way, and shown only while it is off, so the
+        // switch on the helper's own row below can move it without a rebuild.
+        group.set_description(Some(HELPER_OFF));
+        let row = adw::ActionRow::builder()
+            .title("Install from your browser")
+            .subtitle(format!(
+                "“{}” is switched off. Each script is still added only after you confirm it.",
+                INSTALL_LINKS.name
+            ))
             .build();
-        // Titled for what it does rather than with the script's own name,
-        // which reads as a product nobody has heard of. The name follows, so
-        // the row can be matched to the one that appears under *Installed*.
-        let row = self.offer_row(entry);
-        row.set_title("Install from your browser");
-        row.set_subtitle(&format!(
-            "Adds the “{}” userscript. Each script is still added only after you confirm it.",
-            entry.name
-        ));
+        row.set_use_markup(false);
+        row.set_subtitle_lines(2);
+        // A helper AdGuard cannot be told to switch on by name (its id is
+        // inside another script's) gets the explanation and no button, as its
+        // own row does.
+        if !ambiguous {
+            let turn_on = gtk::Button::builder()
+                .label("Turn on")
+                .valign(gtk::Align::Center)
+                .build();
+            turn_on.add_css_class("suggested-action");
+            let this = Rc::downgrade(self);
+            turn_on.connect_clicked(move |button| {
+                let Some(this) = this.upgrade() else {
+                    return;
+                };
+                button.set_sensitive(false);
+                // Through the row's own path, so the switch below moves with
+                // it and the files have the last word.
+                this.toggle(INSTALL_LINKS.id, true);
+            });
+            row.add_suffix(&turn_on);
+            self.helper_turn_on.replace(Some(turn_on));
+        }
         group.add(&row);
-        Some(group)
+        group.set_visible(!helper.works());
+        group
+    }
+
+    /// Show the *From your browser* group exactly while the installed helper
+    /// is switched off, from the state its row last settled on.
+    ///
+    /// Nothing to do while the helper is missing: then the group offers it
+    /// for installing, and an install rebuilds the page.
+    fn show_helper_state(&self) {
+        let Some(on) = self
+            .rows
+            .borrow()
+            .get(INSTALL_LINKS.id)
+            .map(|row| row.script.borrow().enabled)
+        else {
+            return;
+        };
+        if let Some(group) = &*self.browser_group.borrow() {
+            group.set_visible(!on);
+        }
+        if let Some(button) = &*self.helper_turn_on.borrow() {
+            button.set_sensitive(true);
+        }
+        if on {
+            self.banner.set_revealed(false);
+        }
     }
 
     /// One script offered for installation: what it is, and *Add*.
@@ -850,6 +929,8 @@ impl ExtensionsPage {
         row.switch.set_active(settled);
         self.reconciling.set(false);
         *row.script.borrow_mut() = observed;
+        drop(rows);
+        self.show_helper_state();
 
         if settled == wanted {
             return;
@@ -1170,10 +1251,10 @@ impl ExtensionsPage {
                 // The moment the helper is worth mentioning: someone has just
                 // copied a script's address out of a browser and pasted it
                 // here, which is exactly what it saves. Once per run, and only
-                // while it is missing — a reminder, not a campaign. A banner
+                // while it is missing or off — a reminder, not a campaign. A banner
                 // rather than the toast: a toast has one line, and a long
                 // script name leaves no room for the explanation.
-                let helper_missing = userscripts::install_links(&after).is_some();
+                let helper_missing = !userscripts::install_links(&after).works();
                 if typed && helper_missing && !self.hinted.replace(true) {
                     self.banner.set_revealed(true);
                 }

@@ -62,6 +62,7 @@
           <li>After a lost licence, opening the window or pressing Activate no longer leaves protection switched off, and the tray shows a warning instead of the last state it knew.</li>
           <li>Activation finishes by itself once AdGuard sees the log-in.</li>
           <li>AdGuard CLI is run about thirty times less often.</li>
+          <li>The Extensions page says when the browser helper for userscript Install buttons is switched off, and turns it on with one button.</li>
           <li>Long notifications wrap, and the source of a redirected userscript is shown whole.</li>
         </ul>
       </description>

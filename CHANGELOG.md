@@ -21,6 +21,10 @@ Every file in a release is now signed with minisign, and the application install
 
 The daily check can be switched off on the About page, which says what it sends. That is the application's name and version, nothing about you or the machine. Earlier releases are not signed, so the first signed release has to be installed by hand.
 
+### The Extensions page says when the browser helper is switched off
+
+The browser helper that makes *Install* on Greasy Fork, Sleazy Fork, OpenUserJS and GitHub bring a script to AdGuard UI only works while it is switched on. AdGuard injects only the userscripts that are on. Once it was installed, the *From your browser* group disappeared, whether the helper was on or off, so a helper that had been switched off left *Install* opening the script as text and nothing anywhere said why. The group now stays while the helper is off, says that this is why *Install* does nothing, and has a *Turn on* button. The hint after pasting an address by hand now appears in that case too.
+
 ### The source of a redirected userscript is readable again
 
 When a userscript's *Install* link redirected, the *Add this userscript?* question put *Redirected from* and the link's host under *Source*, and that line took the room the source itself needed: `raw.githubusercontent.com` read `raw.gi… nt.com`, and the line under it broke in the middle of the other host. *Redirected from* is now a row of its own, below *Source*, with the link's host whole beneath it, and *Source* keeps the width for its value.

@@ -87,12 +87,37 @@ pub fn recommended(installed: &[Userscript]) -> Vec<&'static Recommended> {
         .collect()
 }
 
-/// [`INSTALL_LINKS`], unless it is installed already.
+/// Where this application's own script for browser install links stands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Helper {
+    /// Not installed: [`INSTALL_LINKS`] is offered.
+    Missing(&'static Recommended),
+    /// Installed and switched off, which is as good as missing — AdGuard does
+    /// not inject it, so *Install* on Greasy Fork opens the script as text —
+    /// and until 1.10 nothing said so. `ambiguous` is
+    /// [`Userscript::ambiguous`]: the CLI cannot be told to switch it on.
+    Off { ambiguous: bool },
+    On,
+}
+
+impl Helper {
+    /// Whether clicking *Install* in a browser reaches this application.
+    pub fn works(self) -> bool {
+        self == Self::On
+    }
+}
+
+/// [`Helper`] for these scripts.
 ///
 /// Matched on the id, as [`recommended`] is and for its reason.
-pub fn install_links(installed: &[Userscript]) -> Option<&'static Recommended> {
-    let have = installed.iter().any(|script| script.id == INSTALL_LINKS.id);
-    (!have).then_some(&INSTALL_LINKS)
+pub fn install_links(installed: &[Userscript]) -> Helper {
+    match installed.iter().find(|script| script.id == INSTALL_LINKS.id) {
+        None => Helper::Missing(&INSTALL_LINKS),
+        Some(script) if script.enabled => Helper::On,
+        Some(script) => Helper::Off {
+            ambiguous: script.ambiguous,
+        },
+    }
 }
 
 /// The ids installed in `dir`, from the metadata files present.
@@ -592,6 +617,28 @@ mod tests {
     const INSTALL_LINKS_SOURCE: &str =
         include_str!("../../../data/userscripts/adguard-ui-install-links.user.js");
 
+    /// Installed is not enough: a helper that is switched off is not injected,
+    /// so the browser's *Install* opens the script as text, exactly as if it
+    /// were missing (11 October 2026, on the reference machine).
+    #[test]
+    fn a_helper_that_is_switched_off_does_not_work() {
+        assert_eq!(install_links(&[]), Helper::Missing(&INSTALL_LINKS));
+        assert!(!install_links(&[]).works());
+
+        let mut helper = script(INSTALL_LINKS.id, INSTALL_LINKS.name);
+        assert_eq!(install_links(&[helper.clone()]), Helper::Off { ambiguous: false });
+        assert!(!install_links(&[helper.clone()]).works());
+
+        helper.enabled = true;
+        assert_eq!(install_links(&[helper.clone()]), Helper::On);
+        assert!(install_links(&[helper]).works());
+
+        // Another script being on says nothing about the helper.
+        let mut other = script("adguard-extra", "AdGuard Extra");
+        other.enabled = true;
+        assert!(matches!(install_links(&[other]), Helper::Missing(_)));
+    }
+
     /// The one-click address is this repository's own file, on `main`, and
     /// lands under the id the catalogue expects — the same two pins
     /// [`RECOMMENDED`] has, for the same reasons.
@@ -640,9 +687,9 @@ mod tests {
 
     #[test]
     fn install_links_is_offered_until_installed() {
-        assert_eq!(install_links(&[]).map(|entry| entry.id), Some(INSTALL_LINKS.id));
+        assert!(matches!(install_links(&[]), Helper::Missing(entry) if entry.id == INSTALL_LINKS.id));
         let installed = script(INSTALL_LINKS.id, INSTALL_LINKS.name);
-        assert!(install_links(&[installed]).is_none());
+        assert!(!matches!(install_links(&[installed]), Helper::Missing(_)));
     }
 
     /// The four AdGuard's own applications ship, in the state they ship them.
