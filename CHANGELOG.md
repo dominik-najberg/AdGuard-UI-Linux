@@ -11,7 +11,7 @@ This file is the one changelog.
 
 ---
 
-## Unreleased
+## 1.10.0 — 11 October 2026
 
 ### AdGuard UI updates itself with one click
 
