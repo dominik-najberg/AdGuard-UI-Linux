@@ -1,17 +1,16 @@
 //! Whether a newer **AdGuard UI** has been released.
 //!
-//! The other half of the About page's update story, and the only place this
-//! application touches the network on its own. Everything else it causes goes
-//! through `adguard-cli`, which is why this module is small, blunt, and
-//! reachable only from a button the user pressed.
+//! The other half of the About page's update story, and the half of this
+//! application's own network traffic that asks a question: [`crate::update`] is
+//! the half that downloads an answer. Everything else it causes goes through
+//! `adguard-cli`.
 //!
-//! # This application has no update channel, which is why a check is all there is
+//! # Asked by a button, and once a day if the user leaves it on
 //!
-//! Releases are a `.deb` and a tarball on GitHub. There is no apt repository, so
-//! `apt upgrade` will not move an installed package, and nothing here can
-//! install anything: the check reports, names the release, and offers to open
-//! the page. That is the same posture the AdGuard CLI half takes for a different
-//! reason (`architecture.md` §6) and it happens to land in the same place.
+//! Until 1.10 this was reachable only from the About page's *Check*. It now also
+//! runs once a day from the GUI, behind a switch on the same page that is on by
+//! default and says what it sends. The request is the same one either way: a
+//! `GET` naming the application and its version, and nothing about the user.
 //!
 //! # Two measured decisions
 //!
@@ -45,8 +44,8 @@ fn endpoint() -> String {
     format!("https://api.github.com/repos/{REPO}/releases/latest")
 }
 
-/// Generous, because it is a user-initiated check with a visible outcome, and
-/// short, because the user is watching a button.
+/// Generous, because it is a check with a visible outcome, and short, because
+/// the user may be watching a button.
 const TIMEOUT: Duration = Duration::from_secs(15);
 
 /// At most this much of the answer is read. The real one is ~2 KB; the cap is
@@ -83,6 +82,24 @@ impl Release {
     pub fn url(&self) -> String {
         format!("https://github.com/{REPO}/releases/tag/{}", self.tag)
     }
+
+    /// The version the tag names, as the packaging scripts spell it in file
+    /// names — `v1.10.0` -> `1.10.0`.
+    ///
+    /// `None` for anything that is not purely dotted numbers. That is what
+    /// makes it safe to build a download address and a file name out of: the
+    /// tag came from a network response, and a `/` or `..` in it must never
+    /// reach either.
+    pub fn version(&self) -> Option<String> {
+        let numbers = parts(&self.tag)?;
+        Some(numbers.iter().map(u64::to_string).collect::<Vec<_>>().join("."))
+    }
+
+    /// Where one of this release's files is downloaded from. Derived, like
+    /// [`Self::url`], and only ever handed a name [`Self::version`] built.
+    pub(crate) fn asset_url(&self, name: &str) -> String {
+        format!("https://github.com/{REPO}/releases/download/{}/{name}", self.tag)
+    }
 }
 
 /// How the running build stands against the newest release.
@@ -107,16 +124,7 @@ pub enum Standing {
 /// Blocking, and called from a worker thread like every other slow thing in this
 /// project.
 pub fn latest() -> Result<Release, Error> {
-    let agent = ureq::Agent::config_builder()
-        .timeout_global(Some(TIMEOUT))
-        // GitHub refuses requests without one. It names the application and its
-        // version and nothing else — no machine identifier, and nothing that
-        // says anything about the user.
-        .user_agent(concat!("AdGuard-UI-Linux/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .new_agent();
-
-    let mut response = agent
+    let mut response = agent(TIMEOUT)
         .get(endpoint())
         .header("Accept", "application/vnd.github+json")
         .call()
@@ -133,6 +141,19 @@ pub fn latest() -> Result<Release, Error> {
         .map_err(|err| Error::Unreachable(err.to_string()))?;
 
     tag_of(&body).map(|tag| Release { tag }).ok_or(Error::Unreadable)
+}
+
+/// The one HTTP client configuration this application uses, for the check and
+/// for the download in [`crate::update`] alike.
+pub(crate) fn agent(timeout: Duration) -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .timeout_global(Some(timeout))
+        // GitHub refuses requests without one. It names the application and its
+        // version and nothing else — no machine identifier, and nothing that
+        // says anything about the user.
+        .user_agent(concat!("AdGuard-UI-Linux/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .new_agent()
 }
 
 /// Pull `tag_name` out of GitHub's answer.
@@ -283,6 +304,22 @@ mod tests {
             "https://github.com/dominik-najberg/AdGuard-UI-Linux/releases/tag/v1.3.0"
         );
         assert!(endpoint().starts_with("https://api.github.com/repos/"));
+    }
+
+    /// The version is rebuilt from the numbers, so nothing but digits and dots
+    /// from a network response ever reaches a file name or an address.
+    #[test]
+    fn only_a_plain_numeric_tag_has_a_version() {
+        assert_eq!(release("v1.10.0").version().as_deref(), Some("1.10.0"));
+        assert_eq!(release("1.2").version().as_deref(), Some("1.2"));
+        assert_eq!(release("v1.3.0-rc1").version(), None);
+        assert_eq!(release("v1.0/../../x").version(), None);
+        assert_eq!(release("latest").version(), None);
+        assert_eq!(
+            release("v1.10.0").asset_url("adguard-ui_1.10.0_amd64.deb"),
+            "https://github.com/dominik-najberg/AdGuard-UI-Linux/releases/download/v1.10.0/\
+             adguard-ui_1.10.0_amd64.deb"
+        );
     }
 
     /// The repository this asks about and the one the package advertises are the

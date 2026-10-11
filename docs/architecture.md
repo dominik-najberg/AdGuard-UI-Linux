@@ -18,7 +18,7 @@ Read [`cli-contract.md`](cli-contract.md) first. It records the measured behavio
 | Process model | **No daemon of our own** | The AdGuard proxy is already the daemon. CLI calls cost 10–30 ms, so there is nothing to amortise. |
 | Build system | **Cargo** | Keep it plain. Meson only if flatpak packaging later demands it. |
 | v1 scope | Tray + core controls | See §7. |
-| Privileged ops | **None of our own** | AdGuard already ships the root helper it needs — for `auto` mode, and measurably for its HTTP proxy in any mode; we detect and instruct. See §6. The one thing the app does perform — clearing a proxy process the CLI has lost track of — needs no privilege, because the process is the user's own. |
+| Privileged ops | **None on AdGuard's behalf; one for our own update** | AdGuard already ships the root helper it needs — for `auto` mode, and measurably for its HTTP proxy in any mode; we detect and instruct. See §6. Clearing a proxy process the CLI has lost track of needs no privilege, because the process is the user's own. The one escalation is installing a newer AdGuard UI package, by the system's package manager under `pkexec`, after its signature is checked (§6, *Updating this application*). |
 
 **The no-daemon point is worth stating explicitly**, because it differs from `LenovoLegionToolLinux`. That project needs `legiond` because hardware registers require sustained root. Here, root is needed only for one occasional action — setting up AdGuard's own root helper, without which auto mode does nothing and the HTTP proxy serves nothing — and AdGuard already provides the command for it, so the GUI stays a plain user-session app that never escalates at all. A persistent root daemon would be a larger attack surface for no benefit; so, it turns out, would a one-shot helper of ours. See §6.
 
@@ -217,7 +217,7 @@ An `AdwApplicationWindow` with `AdwNavigationSplitView`, plus `AdwToastOverlay` 
 | **Stealth** | The 26 settings behind the one `stealthmode.enabled` switch Protection shows: cookies, tracking, identity, browser APIs, anti-DPI | `proxy.yaml` → `config set` |
 | **Extensions** | One row per installed userscript: a switch, the version and description from its metadata, a homepage link, a reinstall, and a remove behind a confirmation; an add-by-URL row above them, and *From your browser* offering the helper userscript that turns a click on a script's *Install* button into an `adguard-ui://` link the page asks about before installing (README, *Installing userscripts from the browser*). A row whose id collides by substring with another script's is inert and says why (§7) | `userscripts/*.meta.json` for what is installed and `proxy.yaml`'s `userscripts:` list for what is **on** — the two answer different questions — written through `userscripts …` (contract §15) |
 | **Diagnostics** | One group per subsystem — the CLI, the proxy and its per-run checks, the root helper, HTTPS filtering, browser integration, DNS — with one row per finding and a *Copy report* button that puts the same lines on the clipboard as plain text. Read when the page is opened and on refresh, never on a timer | `adguard_core::diagnostics`, which calls the modules every other page already uses |
-| **About** | The two version numbers — this application's and the CLI's — the binary's path, when filter data last changed, the one control that updates filters and asks after a newer AdGuard CLI, a result row per component in AdGuard's own words, a *Check* for a newer AdGuard UI, and the project links. Last in the sidebar: the only page about the installation rather than about what it is doing | `--version`, `check-update` (contract §14), `agflm_*.db`, and **one HTTPS request to github.com** — §6 |
+| **About** | The two version numbers — this application's and the CLI's — the binary's path, when filter data last changed, the one control that updates filters and asks after a newer AdGuard CLI, a result row per component in AdGuard's own words, a *Check* for a newer AdGuard UI with a switch for a daily check and *Update and restart* when there is one, and the project links. Last in the sidebar: the only page about the installation rather than about what it is doing | `--version`, `check-update` (contract §14), `agflm_*.db`, and **the application's own requests to github.com** — §6 |
 
 Notes that shape the widgets:
 
@@ -522,7 +522,9 @@ A saved size is validated on the way in, never trusted from the file: a dimensio
 
 ## 6. Privileged operations
 
-Two things this application touches need root, and it takes neither: AdGuard's root helper, and installing AdGuard's certificate into the system trust store. **This application performs no privileged operation and ships no privileged component** — no helper binary, no polkit action, no `pkexec` call, no setuid bit.
+Two things this application touches need root, and it takes neither: AdGuard's root helper, and installing AdGuard's certificate into the system trust store. **This application performs no privileged operation on AdGuard's behalf and ships no privileged component** — no helper binary, no polkit action, no setuid bit.
+
+**There is one `pkexec` call, and it is for this application's own package**, since the update that installs a newer AdGuard UI with one click (*Updating this application*, below). It is a different act from the ones this section refuses, and the subsection says why; it is not a precedent for running AdGuard's commands.
 
 That is possible because AdGuard already ships the escalation path for both — a fact an earlier revision of contract §8 missed for the first of them, and which turned out to hold for the second as well.
 
@@ -548,30 +550,35 @@ The corollary is worth stating for anyone tempted to add one later: a root-invok
 
 `data/io.github.dominik-najberg.AdGuardUI.policy` was deleted with the auto-mode work. It declared three polkit actions against `/usr/libexec/adguard-ui-helper`, a binary that was never written and now never will be, and its own header still asserted that AdGuard "ships no polkit policy … so there is nothing to reuse" — the conclusion contract §8 retracted. Nothing installed it; `building.md` §4 says so and now says how to remove it if an older checkout did.
 
-### The one request this application makes of its own
+### The requests this application makes of its own
 
 Everything else in this document is about not doing things: no daemon, no
-privileged operation, no writes outside the CLI. This is the exception, and it is
-worth stating plainly because it changes a property the project had until 1.2.0
-— **the application never spoke to anything but `adguard-cli`.**
+writes outside the CLI. This is the exception, and it is worth stating plainly
+because it changes a property the project had until 1.2.0 — **the application
+never spoke to anything but `adguard-cli`.**
 
-The About page's *Check* asks `api.github.com` whether a newer AdGuard UI has
-been released. Four constraints make that acceptable rather than a slippery
-slope:
+AdGuard UI asks `api.github.com` whether a newer AdGuard UI has been released —
+when the About page's *Check* is pressed, and once a day by itself. Until the
+update could be installed from the app, the check ran only from the button;
+a daily check that could only say "go and download it" was not worth a request
+a day. Four constraints keep it acceptable rather than a slippery slope:
 
-- **It happens only when a button is pressed.** Never at launch, never on a
-  timer, never as a side effect of anything else. A check on launch was proposed
-  and refused for its own reasons (contract §14); this one is refused for this
-  one as well.
-- **It is disclosed where it is made**, in the group's description, before the
-  button rather than in a changelog. A user running an ad blocker meets the fact
-  that this application can talk to a third party at the moment it matters.
+- **The daily check can be switched off**, on the About page, beside the
+  version it checks. It is on by default, because an application that installs
+  its own updates and never looks for them protects nobody. The first check
+  runs a minute after start-up and then once a day of wall-clock time, so a
+  laptop that suspends every night still gets one. A secondary launch that only
+  hands its command line to the running copy never checks.
+- **It is disclosed where it is made**, in the group's description, next to
+  the switch rather than in a changelog. A user running an ad blocker meets the
+  fact that this application can talk to a third party at the moment it
+  matters.
 - **It carries nothing about the user.** The request is a `GET` with a
   `User-Agent` naming the application and its version. No identifier, no
-  configuration, no machine detail.
-- **It reports and never acts.** Releases are a `.deb` and a tarball with no apt
-  repository behind them, so there is nothing to install even if this were
-  willing to. It names the release and offers the notes.
+  configuration, no machine detail. The download that follows a click asks
+  `github.com` for one release file and its signature, by names built from the
+  version, the package type and the processor.
+- **It installs only what the release key signed** (below).
 
 **The certificate path is a measured requirement, not a default.** On a machine
 filtering system-wide — which is what this application exists to configure —
@@ -583,8 +590,60 @@ down. Measured 11 August 2026 — the live suite's request appears in AdGuard's 
 `access.log`, named after the test binary, and validates. The feature selection
 in the workspace manifest carries that reasoning where a reader will meet it.
 
-`adguard-core/src/release.rs` holds it, and it is the one module in that crate
-that is not about `adguard-cli` at all.
+`adguard-core/src/release.rs` holds the check and `update.rs` the download,
+and they are the two modules in that crate that are not about `adguard-cli`.
+
+### Updating this application
+
+*Update and restart* — on the About page, in the tray menu, and on the
+notification the daily check raises — downloads the newer release, checks its
+signature, installs it, and starts the new copy in place of the running one.
+Which file, and how it is installed, follows from where the running binary
+lives (`update::Install::detect`):
+
+| Running from | Installed by | Password |
+| --- | --- | --- |
+| `/usr/bin`, owned by the `adguard-ui` Debian package | `pkexec apt-get install --yes <file>.deb` | yes, polkit's |
+| `/usr/bin`, owned by the `adguard-ui` RPM package | `pkexec dnf install --assumeyes <file>.rpm` | yes, polkit's |
+| `<prefix>/bin` under `$HOME` | the tarball's own `install.sh`, with that prefix | no |
+| anywhere else — a build, a hand copy | nothing; the page names the release | — |
+
+**Why this escalates when the helper's `sudo` does not.** The refusal above is
+about *what* would be made root: AdGuard's helper is a file in a user-writable
+directory, so a suid bit on it makes anyone who can write that file root, and
+conferring that from behind a button removes the only safeguard the arrangement
+has. A package update confers nothing. It is the distribution's package manager
+installing a package this project built, into the same root-owned paths the
+user already installed it into, behind polkit's own prompt — which names the
+command it is about to run, because what runs is `apt-get` itself and not a
+wrapper of ours. The user who typed `sudo apt install ./adguard-ui.deb` once is
+asked the same question again, by the same system, with less typing.
+
+**Nothing is installed that the release key did not sign.** Every file a
+release carries has a minisign signature beside it, made by the release
+workflow with a secret only GitHub Actions holds; the public half is
+`data/release-signing.pub`, compiled in. The download is held in memory and
+checked before anything is written to disk, and the signed comment must name
+the very file that was asked for, so a genuine signature of an older release, or
+of the package for another machine, is refused like a forged one. `SHA256SUMS`
+is not used for this: it is published beside the files it describes, so
+whoever could replace one could replace the other. Releases before the first
+signed one carry no signatures, and the app says so and falls back to naming
+the release.
+
+**The restart is an `exec`.** The running process quits, and `main` replaces
+itself with the new binary once the main loop has returned. A child process
+would find the application id still held on the session bus and hand its
+command line to a copy on its way out; `exec` closes the old connection, which
+releases the name, before the new copy asks for it. The window comes back if it
+was on screen, and only the tray if it was not.
+
+**What is not defended against** is a process already running as this user
+swapping the verified file in `~/.cache/adguard-ui/updates` (mode 0700) before
+`apt-get` opens it. Such a process can already wait for the user to type their
+password into anything. The file is written only after it is verified, and into
+a directory only its owner can enter, which is as much as an unprivileged
+program can do.
 
 ### Clearing a wedged proxy process is not one of these
 
@@ -699,6 +758,8 @@ One measured detail no plan carried: **the stock `location` is `'.'`** — measu
 **The About page and its update control** (§5), built 9 August 2026 for [issue #4](https://github.com/dominik-najberg/AdGuard-UI-Linux/issues/4) — the second item to arrive from outside, and the first that adds a page. It also gave the application somewhere to put two things it had never shown at all: its own version, and the CLI's.
 
 Three decisions in it are this section's rather than the page's. **It reports an available application update and never applies one** — `adguard-cli update` re-runs an installer over the suid root helper, and §6's rule is that this application performs no privileged operation of its own; naming a command is what it already does for that helper and for the certificate. **Automatic or periodic checks are out**, because a GUI that may not be running is a poor scheduler and the daemon refreshes filters on its own. **And there is no tray entry**: a two-minute network operation started from a menu has nowhere to report progress or a result, and §4's reason for the tray sharing this process — one writer, one view — argues against giving it a second way to start one.
+
+**Two of those three are about AdGuard CLI and its data, and still hold. The application's own release was a fourth thing on the page, and since 11 October 2026 it is treated differently**: it is checked once a day by default, it can be installed from the About page, the tray and a notification, and the tray carries the entry. The reasons above do not transfer. Its install takes seconds rather than minutes, ends in a restart that is its own report of success, and its failures go to a notification while the window is closed. And it is a package this project signs, not an installer run over a suid helper (§6, *Updating this application*).
 
 **What is worth carrying forward is where it came from.** Every other feature in both milestones was chosen from the inside, and this one was not; nothing in either list had proposed it, and taking it turned up CLI behaviour four measurements deep that no amount of re-reading the contract would have produced (contract §6, `handoff.md` §0). This section stays the scope authority, and an item arriving from outside is a legitimate way for something to enter it — it does not get to skip the measure-first rule, and this one did not.
 

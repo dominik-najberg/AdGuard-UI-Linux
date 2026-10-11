@@ -13,6 +13,14 @@ This file is the one changelog.
 
 ## Unreleased
 
+### AdGuard UI updates itself with one click
+
+AdGuard UI now checks once a day whether a newer version has been released. The first check comes a minute after it starts. When there is one, a notification, the tray menu and the About page offer **Update and restart**. It downloads the release from GitHub, checks the signature, installs it and restarts the application. The window comes back only if it was open. A `.deb` or `.rpm` install is upgraded by `apt-get` or `dnf`, and the system asks for your password. A tarball install in `~/.local` is upgraded in place without one. A copy built from source is never replaced.
+
+Every file in a release is now signed with minisign, and the application installs nothing whose signature does not match the key built into it. The signature must also name the exact file that was asked for. `SHA256SUMS` stays in the release, but it cannot be used for this, because it sits beside the files it describes.
+
+The daily check can be switched off on the About page, which says what it sends. That is the application's name and version, nothing about you or the machine. Earlier releases are not signed, so the first signed release has to be installed by hand.
+
 ### The source of a redirected userscript is readable again
 
 When a userscript's *Install* link redirected, the *Add this userscript?* question put *Redirected from* and the link's host under *Source*, and that line took the room the source itself needed: `raw.githubusercontent.com` read `raw.gi… nt.com`, and the line under it broke in the middle of the other host. *Redirected from* is now a row of its own, below *Source*, with the link's host whole beneath it, and *Source* keeps the width for its value.
