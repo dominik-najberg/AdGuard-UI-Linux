@@ -21,7 +21,8 @@
 //! last item of [issue #21]: *Add to Browsers* runs `certutil -A` against each
 //! browser store that lacks the certificate, exactly as `install_cert.sh` does
 //! for each store it finds (`adguard_core::nss::add`). It touches only the
-//! user's own files and needs no password, so it can be a button. The system
+//! user's own files and needs no administrator privileges. A browser store
+//! may still require its own password; Firefox instructions cover that case. The system
 //! store's half needs `sudo` and stays a command with a copy button, exactly as
 //! with the `sudo` command on the Advanced page.
 //!
@@ -41,8 +42,7 @@ use libadwaita as adw;
 use crate::root_helper::join_with_and;
 use crate::{abbreviate, style, toast, worker};
 
-/// A group of up to three rows: what the system store says, what the browsers'
-/// own stores say, and what to run about it.
+/// The system and browser trust states, their remedy, and Firefox instructions.
 ///
 /// Hidden entirely when the system and every browser store trust the
 /// certificate, or when HTTPS filtering is off and so nothing depends on it. A requirement that is met is not worth a
@@ -60,6 +60,9 @@ pub struct CertificateView {
     /// The command row's copy button, which becomes the step to take while the
     /// group is asking for one.
     copy: gtk::Button,
+    /// Manual fallback, also available before running the installer in a terminal.
+    firefox_help: adw::ExpanderRow,
+    firefox_instructions: gtk::Label,
     /// What the last paint was given, so the view can paint itself again once
     /// the button's work is done.
     last: RefCell<Option<(Option<bool>, String)>>,
@@ -105,7 +108,8 @@ impl CertificateView {
             .valign(gtk::Align::Center)
             .tooltip_text(
                 "Add AdGuard's certificate to these browsers' own stores, as AdGuard's installer \
-                 does. No password is needed: only your own files change.",
+                 does. No administrator password is needed, but a browser store may require \
+                 its own password. For Firefox, see the manual instructions below.",
             )
             .build();
         add.add_css_class("suggested-action");
@@ -159,6 +163,28 @@ impl CertificateView {
         command.add_suffix(&copy);
         group.add(&command);
 
+        let firefox_help = adw::ExpanderRow::builder()
+            .title("Trust the certificate manually in Firefox")
+            .subtitle("If NSS requires a password or adding the certificate fails")
+            .visible(false)
+            .build();
+        firefox_help.set_use_markup(false);
+        firefox_help.set_title_lines(0);
+        firefox_help.set_subtitle_lines(0);
+        let firefox_instructions = gtk::Label::builder()
+            .use_markup(false)
+            .selectable(true)
+            .wrap(true)
+            .wrap_mode(gtk::pango::WrapMode::WordChar)
+            .xalign(0.0)
+            .margin_top(12)
+            .margin_bottom(12)
+            .margin_start(12)
+            .margin_end(12)
+            .build();
+        firefox_help.add_row(&firefox_instructions);
+        group.add(&firefox_help);
+
         let this = Rc::new(Self {
             group,
             status,
@@ -166,6 +192,8 @@ impl CertificateView {
             add,
             command,
             copy: copy.clone(),
+            firefox_help,
+            firefox_instructions,
             last: RefCell::new(None),
             pending: RefCell::new(None),
             adding: Cell::new(false),
@@ -221,22 +249,23 @@ impl CertificateView {
                         } else {
                             nss::add(store, &certutil, &certificate)
                         };
-                        (store.name(), result)
+                        (store.name(), store.profile.is_some(), result)
                     })
                     .collect::<Vec<_>>()
             },
-            move |results: Vec<(String, Result<(), String>)>| {
+            move |results: Vec<(String, bool, Result<(), String>)>| {
                 this.adding.set(false);
                 this.add.set_sensitive(true);
                 this.add.set_label("Add to Browsers");
-                let failed: Vec<_> = results.iter().filter(|(_, result)| result.is_err()).collect();
+                let failed: Vec<_> = results.iter().filter(|(_, _, result)| result.is_err()).collect();
+                let firefox_failed = failed.iter().any(|(_, firefox, _)| *firefox);
                 let message = match (failed.first(), results.len()) {
                     (None, 1) => "Added to 1 browser store. An open browser may need restarting"
                         .to_owned(),
                     (None, n) => {
                         format!("Added to {n} browser stores. An open browser may need restarting")
                     }
-                    (Some((name, Err(why))), _) => format!("Could not add it to {name}: {why}"),
+                    (Some((name, _, Err(why))), _) => format!("Could not add it to {name}: {why}"),
                     (Some(_), _) => unreachable!("only failures are collected"),
                 };
                 toasts.add_toast(toast(&message));
@@ -244,6 +273,11 @@ impl CertificateView {
                 let last = this.last.borrow().clone();
                 if let Some((filtering, name)) = last {
                     this.paint(filtering, &name);
+                }
+                // NSS errors vary by version and locale. Offer the manual
+                // fallback for any Firefox failure without guessing its cause.
+                if firefox_failed && this.firefox_help.is_visible() {
+                    this.firefox_help.set_expanded(true);
                 }
             },
         );
@@ -366,6 +400,31 @@ impl CertificateView {
         self.pending.replace(button.then(|| {
             (unmet.iter().map(|store| (*store).clone()).collect(), trust.certificate.clone())
         }));
+        let firefox_unmet = unmet.iter().any(|store| store.profile.is_some());
+        self.firefox_help.set_visible(firefox_unmet);
+        if firefox_unmet {
+            self.firefox_instructions.set_label(&format!(
+                "If the terminal asks for a password or PIN for “NSS Certificate DB”, it means \
+                 the browser profile's password, usually Firefox's Primary Password if set. \
+                 This is not your administrator (sudo) password. Add to Browsers cannot \
+                 answer that prompt. You can set trust in Firefox instead:\n\n\
+                 1. Open the Firefox profile named in the Browsers row above.\n\n\
+                 2. Open Settings → Privacy & Security → Certificates → Manage Certificates \
+                 (or View Certificates) → Authorities. Some versions put Certificates under \
+                 Advanced settings.\n\n\
+                 3. Select “{certificate_name}” and choose Edit Trust. If it is missing or \
+                 belongs to an earlier AdGuard certificate, choose Import and select the \
+                 current certificate file:\n{}\n\n\
+                 4. Select “Trust this CA to identify websites” and click OK. Trust for \
+                 identifying mail users is not needed for HTTPS filtering. Firefox may \
+                 ask for its Primary Password.\n\n\
+                 5. Reload a page. If needed, restart Firefox. Repeat for each affected \
+                 profile. AdGuard UI checks the trust again automatically.",
+                trust.certificate.display()
+            ));
+        } else {
+            self.firefox_help.set_expanded(false);
+        }
 
         match remedy {
             Some(remedy) => {
@@ -700,14 +759,15 @@ fn store_or_stores(count: usize) -> &'static str {
 
 /// The system trusts the certificate and only the browsers are outstanding.
 ///
-/// "No password" is measured, not hoped: with the anchor already in place the
-/// script prints "Certificate already exists in system trust store" and never
-/// reaches its `sudo`, and `certutil` writes to the user's own stores.
+/// The installer skips `sudo` when the system anchor is already in place,
+/// but NSS can still require the browser profile's password.
 const BROWSERS: &str = "Filtered connections are signed by a certificate every browser has to \
                         trust, and Firefox and Chrome keep their own list rather than reading \
                         the system's. The command below is AdGuard's own installer: it finds the \
                         certificate already installed for the system and adds it to the \
-                        browsers, without asking for a password. A browser that is open may need \
+                        browsers without needing your administrator password. A browser store \
+                        may still ask for its own password (Firefox's Primary Password, if set). \
+                        A browser that is open may need \
                         restarting to notice. This application never runs it for you.";
 
 /// The rebuild is outstanding and the browsers are too. The installer skips
@@ -723,7 +783,9 @@ const REBUILD_AND_BROWSERS: &str = "The certificate is already in the system's c
 /// Appended when the button is shown: what it does, in the terms the command's
 /// sentence has just used.
 const BUTTON: &str = "Or press Add to Browsers, which runs the installer's own step for each \
-                      browser here: no password, and only your own files change.";
+                      browser here and changes only your own files. No administrator password \
+                      is needed, but a browser store may require its own password. If Firefox \
+                      requires one, use the manual instructions below.";
 
 /// Appended when a Flatpak Chromium store is waiting, which the installer's
 /// command cannot reach.
@@ -834,7 +896,7 @@ mod tests {
 
     /// The case this change is for: the system trusts the CA and a browser
     /// does not. The command is the installer alone — it finds the system done
-    /// and goes on to the browsers — and the sentence says no password.
+    /// and goes on to the browsers, which may still require their own password.
     #[test]
     fn a_trusted_system_with_a_browser_missing_gets_the_installer() {
         let installer = installer();
@@ -844,7 +906,7 @@ mod tests {
             remedy.command,
             trust::install_command(&installer, Path::new("/data/AdGuard CLI CA.pem")).unwrap()
         );
-        assert!(remedy.description.contains("without asking for a password"), "{remedy:?}");
+        assert!(remedy.description.contains("may still ask for its own password"), "{remedy:?}");
     }
 
     /// A second Firefox profile is named with `-f`, and the plain run is left

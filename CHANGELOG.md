@@ -11,6 +11,12 @@ This file is the one changelog.
 
 ---
 
+## Unreleased
+
+### Firefox certificate password guidance
+
+The certificate group now distinguishes the administrator password from a browser store’s own password. When Firefox does not trust AdGuard’s certificate, expandable instructions explain the NSS password prompt and how to import the current certificate or enable trust for identifying websites in Firefox. The instructions expand after a failed attempt to add the certificate to Firefox.
+
 ## 1.10.0 — 11 October 2026
 
 ### AdGuard UI updates itself with one click
