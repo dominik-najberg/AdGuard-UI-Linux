@@ -1,27 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!--
-  The monochrome companion to the full-colour icon, on GNOME's 16x16 symbolic
-  grid. One flat colour and one path: GTK renders a `-symbolic` icon as a mask
-  and paints it in the current foreground colour, so the fill below is only
-  there to give the mask its shape.
-
-  Not what the tray shows. The tray icon has to say whether the proxy is
-  running, which one static glyph cannot, so it stays on the stock
-  `security-high-symbolic`/`security-low-symbolic` pair (`adguard-tray`). This
-  file is for the places that ask for a symbolic form of the *application*
-  icon — notifications, and dialogs that want the app at label size.
-
-  Same shield outline as the colour icon at an eighth of the scale, but the
-  prohibition mark is inverted: there is no second colour to draw a white ring
-  in, so the ring becomes a hole punched through the shield with the bar left
-  standing inside it. Everything is one `evenodd` path because that is the only
-  way to punch a hole — a shape drawn *over* the shield would be drawn in the
-  same colour and vanish into it.
-
-  The bar stops short of the hole's edge on purpose. Extended to meet the ring
-  the way it does in the colour icon, the part crossing the hole's rim would
-  land back on filled shield and read as a notch in the rim instead of a bar.
--->
-<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
-  <path fill="#2e3436" fill-rule="evenodd" d="M 3.75 2 H 12.25 A 1.5 1.5 0 0 1 13.75 3.5 V 7.25 C 13.75 11 11.5 13.5 8.75 14.625 Q 8 14.94 7.25 14.625 C 4.5 13.5 2.25 11 2.25 7.25 V 3.5 A 1.5 1.5 0 0 1 3.75 2 Z M 11.4 7.5 A 3.4 3.4 0 1 0 4.6 7.5 A 3.4 3.4 0 1 0 11.4 7.5 Z M 6.34 4.85 L 10.65 9.16 L 9.66 10.15 L 5.35 5.84 Z"/>
+<!-- Monochrome companion: matching shield silhouette and prohibition cutout.
+     GTK recolours the mask; the tray retains its separate status icons.
+     The slash sits inside the cutout so it cannot notch the shield. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 128 128">
+  <path fill="#2e3436" fill-rule="evenodd" d="M64 8 C79 17 92 19 105 21 Q112 22 112 30 V55 C112 81 95 102 68 113 Q64 115 60 113 C33 102 16 81 16 55 V30 Q16 22 23 21 C36 19 49 17 64 8Z M91 59 A27 27 0 1 0 37 59 A27 27 0 1 0 91 59Z"/>
+  <path fill="#2e3436" d="M49.858 39.201 L83.799 73.142 L78.142 78.799 L44.201 44.858Z"/>
 </svg>
