@@ -53,6 +53,18 @@
     application is its first release.
   -->
   <releases>
+    <release version="1.11.0" type="stable" date="2026-10-14">
+      <url type="details">https://github.com/dominik-najberg/AdGuard-UI-Linux/releases/tag/v1.11.0</url>
+      <description>
+        <p>A certificate AdGuard switched to is reported, and a new icon:</p>
+        <ul>
+          <li>When AdGuard CLI signs with a different certificate from the one installed, which can happen after a licence activation, Diagnostics and the Status page say so. Use This Certificate on the Protection page puts the right one in place for the system and the browsers to trust.</li>
+          <li>Diagnostics counts the connections browsers refused because of AdGuard's certificate, and the Status page warns when there are many.</li>
+          <li>The certificate group explains the password a browser's own store may ask for, and how to trust the certificate in Firefox by hand.</li>
+          <li>A new emerald application icon.</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.10.0" type="stable" date="2026-10-11">
       <url type="details">https://github.com/dominik-najberg/AdGuard-UI-Linux/releases/tag/v1.10.0</url>
       <description>
