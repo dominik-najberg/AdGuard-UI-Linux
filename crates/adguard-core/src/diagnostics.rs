@@ -52,9 +52,10 @@ use std::time::SystemTime;
 use crate::browser::{self, BrowserIntegration};
 use crate::config::key;
 use crate::nss::{BrowserStores, Store, StoreState};
+use crate::rejected::{self, Rejections};
 use crate::{
-    access, helper, orphan, CaTrust, Cli, Config, Error, Filtering, HelperProcess, ProxyStatus,
-    RootHelper,
+    access, helper, orphan, CaTrust, Cli, Config, Error, Filtering, HelperProcess, InUse,
+    ProxyStatus, RootHelper,
 };
 
 /// How a finding should be read.
@@ -194,6 +195,10 @@ pub enum Daemons {
         helper: HelperProcess,
         /// `None` when the run could not be dated, so the log was not read.
         filtering: Option<Filtering>,
+        /// Handshakes refused on AdGuard's certificates in this run, from the
+        /// proxy log. `None` for an undated run, as above, or without a data
+        /// directory.
+        rejected: Option<Rejections>,
     },
     /// Several. `/proc` cannot say which one `status` meant.
     Several(Vec<i32>),
@@ -216,6 +221,9 @@ pub struct Inputs {
     pub daemons: Daemons,
     pub helper: Option<Result<RootHelper, String>>,
     pub ca: Option<CaTrust>,
+    /// Whether the CA the proxy signs with is the one the stores are checked
+    /// against. `None` without a data directory.
+    pub in_use: Option<InUse>,
     /// The browsers' own certificate stores. `None` when there was nothing to
     /// look for — no certificate, or no home directory.
     pub stores: Option<BrowserStores>,
@@ -270,6 +278,7 @@ impl Inputs {
                 .as_deref()
                 .and_then(BrowserStores::detect),
             ca: CaTrust::detect(certificate_name),
+            in_use: InUse::detect(certificate_name),
             browsers: BrowserIntegration::detect(),
             quic: access::path().map(|live| crate::requests::quic(&live)),
             config,
@@ -295,6 +304,7 @@ fn daemons(cli: &Cli) -> Daemons {
                 // undatable run is not read at all, because reading the log
                 // unscoped would count a previous run's failures against it.
                 filtering: started.map(access::filtering),
+                rejected: started.and_then(rejected::rejections),
             }
         }
         several => Daemons::Several(several.iter().map(orphan::Daemon::pid).collect()),
@@ -626,6 +636,18 @@ fn https_section(inputs: &Inputs, config: Option<&Config>) -> Section {
         }
     }
 
+    let failing = if enabled == Some(false) {
+        Level::Fact
+    } else {
+        Level::Problem
+    };
+    if let Some(in_use) = inputs.in_use {
+        findings.push(in_use_finding(in_use, failing));
+    }
+    if let Daemons::One { rejected, .. } = &inputs.daemons {
+        findings.push(rejected_finding(rejected.as_ref()));
+    }
+
     if let Some(stores) = &inputs.stores {
         let failing = if enabled == Some(false) {
             Level::Fact
@@ -653,6 +675,84 @@ fn https_section(inputs: &Inputs, config: Option<&Config>) -> Section {
         ),
         findings,
     }
+}
+
+/// Whether the proxy signs with the certificate everything else was checked
+/// against — the reading that was missing on 14 October 2026, when every line
+/// above said *trusted* about a CA the proxy no longer used.
+fn in_use_finding(in_use: InUse, failing: Level) -> Finding {
+    const LABEL: &str = "Certificate in use";
+    match in_use {
+        InUse::Matches => Finding::new(LABEL, "The certificate file above", Level::Healthy),
+        InUse::Replaced { since } => {
+            let when = since
+                .and_then(|at| SystemTime::now().duration_since(at).ok())
+                .map(|age| format!(", since {} ago", duration(age.as_secs())))
+                .unwrap_or_default();
+            let finding = Finding::new(
+                LABEL,
+                format!(
+                    "A different certificate from the file above{when} — what is installed is \
+                     not what AdGuard signs with"
+                ),
+                failing,
+            );
+            if failing == Level::Problem {
+                finding.fixed(ADOPT, Some(FixedOn::Certificate))
+            } else {
+                finding
+            }
+        }
+        InUse::Pending => Finding::new(
+            LABEL,
+            "The certificate file is newer than the one AdGuard signs with; restarting \
+             protection may take it up",
+            Level::Unknown,
+        ),
+        InUse::Unseen => Finding::new(LABEL, "AdGuard has not exported one to compare", Level::Unknown),
+    }
+}
+
+/// The browsers' answer to the certificates AdGuard signs, counted from the
+/// proxy log ([`crate::rejected`]). A count and program names; never a host.
+fn rejected_finding(rejected: Option<&Rejections>) -> Finding {
+    const LABEL: &str = "Refused certificates";
+    let Some(rejected) = rejected else {
+        return Finding::new(LABEL, "This run could not be dated", Level::Unknown);
+    };
+    if rejected.count == 0 {
+        return Finding::new(LABEL, "None in this run", Level::Healthy);
+    }
+    let apps = rejected.apps.join(", ");
+    if !rejected.alarming() {
+        return Finding::new(
+            LABEL,
+            format!(
+                "{} in this run ({apps}), as an application that pins its own certificates \
+                 produces",
+                rejected.count
+            ),
+            Level::Healthy,
+        );
+    }
+    let latest = rejected
+        .last
+        .and_then(|at| {
+            let now = SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_secs() as i64;
+            u64::try_from(now - at).ok()
+        })
+        .map(|ago| format!(", the latest {} ago", duration(ago)))
+        .unwrap_or_default();
+    Finding::new(
+        LABEL,
+        format!(
+            "{} connections in this run{latest}: {apps} refused AdGuard's certificate, showed a \
+             warning, and then got the site unfiltered",
+            rejected.count
+        ),
+        Level::Problem,
+    )
+    .fixed(REFUSED, Some(FixedOn::Certificate))
 }
 
 /// How much of the log went over QUIC, read against the HTTP/3 switch.
@@ -858,6 +958,16 @@ const OUT_OF_INSTALLER_REACH: &str =
 ///
 /// In [`CaTrust::unmet`]'s order, and matching the command the Protection page
 /// shows for each — that page renders the command, this names it.
+/// The fix for [`InUse::Replaced`].
+const ADOPT: &str = "On Protection, Use This Certificate writes the one AdGuard signs with into the \
+     certificate file. The group then shows how to replace the old one in the system and the \
+     browsers.";
+
+/// The fix for a run full of refused certificates, whatever the cause.
+const REFUSED: &str = "Protection's certificate group shows which store is missing the \
+     certificate AdGuard signs with. Once it is fixed, restart the browsers, and restart \
+     protection so AdGuard filters the refused sites again.";
+
 fn certificate_fix(ca: &CaTrust) -> &'static str {
     if !ca.generated {
         "Protection shows AdGuard's own command that generates one."
@@ -952,9 +1062,11 @@ pub(crate) mod tests {
                 uptime: Some(3 * 3_600 + 5 * 60),
                 helper: HelperProcess::Running,
                 filtering: Some(Filtering::Reaching),
+                rejected: Some(Rejections::default()),
             },
             helper: None,
             ca: None,
+            in_use: Some(InUse::Matches),
             stores: None,
             browsers: None,
             quic: None,
@@ -989,7 +1101,9 @@ pub(crate) mod tests {
             uptime: None,
             helper: HelperProcess::Unseen,
             filtering: Some(Filtering::Unseen),
+            rejected: None,
         };
+        inputs.in_use = Some(InUse::Unseen);
         let report = Report::build(&inputs);
         assert_eq!(finding(&report, "Proxy", "Root helper process").level, Level::Unknown);
         assert_eq!(finding(&report, "Proxy", "Traffic").level, Level::Unknown);
@@ -1004,6 +1118,7 @@ pub(crate) mod tests {
             uptime: None,
             helper: HelperProcess::Defunct,
             filtering: Some(Filtering::Bypassed),
+            rejected: None,
         };
         let report = Report::build(&inputs);
         // Both, where the Status page would show only the corpse: here the
@@ -1222,9 +1337,16 @@ pub(crate) mod tests {
                 uptime: None,
                 helper: HelperProcess::Defunct,
                 filtering: Some(Filtering::Bypassed),
+                rejected: Some(Rejections {
+                    count: 2_000,
+                    apps: vec!["chrome".into()],
+                    first: Some(1),
+                    last: Some(2),
+                }),
             },
             helper: Some(RootHelper::inspect("/bin/sh").map_err(|err| err.to_string())),
             ca: Some(CaTrust::inspect("/nonexistent/AdGuard CLI CA.pem", None, None)),
+            in_use: Some(InUse::Replaced { since: None }),
             stores: None,
             browsers: Some(BrowserIntegration::detect_under(&home, None)),
             quic: None,
@@ -1233,7 +1355,7 @@ pub(crate) mod tests {
         std::fs::remove_dir_all(&home).unwrap();
 
         let problems: Vec<_> = report.problems().collect();
-        assert!(problems.len() >= 8, "{problems:#?}");
+        assert!(problems.len() >= 10, "{problems:#?}");
         for problem in problems {
             assert!(problem.remedy.is_some(), "no fix for {problem:?}");
         }
@@ -1245,6 +1367,60 @@ pub(crate) mod tests {
             }
         }
         assert!(report.text("t").contains("         Fix: Activate it on the Status page.\n"));
+    }
+
+    /// The 14 October machine: every store trusts the certificate file, the
+    /// proxy signs with another, and the browsers have been refusing it all
+    /// day. Both lines are problems and both lead to the certificate group;
+    /// the report names the programs and no host.
+    #[test]
+    fn a_replaced_ca_and_its_refusals_are_both_problems() {
+        let mut inputs = healthy();
+        inputs.in_use = Some(InUse::Replaced { since: None });
+        inputs.daemons = Daemons::One {
+            pid: 1,
+            uptime: None,
+            helper: HelperProcess::Running,
+            filtering: Some(Filtering::Reaching),
+            rejected: Some(Rejections {
+                count: 2_031,
+                apps: vec!["chrome".into(), "firefox".into()],
+                first: None,
+                last: None,
+            }),
+        };
+        let report = Report::build(&inputs);
+        let in_use = finding(&report, "HTTPS filtering", "Certificate in use");
+        assert_eq!(in_use.level, Level::Problem);
+        assert_eq!(in_use.remedy.map(|fix| fix.page), Some(Some(FixedOn::Certificate)));
+        let refused = finding(&report, "HTTPS filtering", "Refused certificates");
+        assert_eq!(refused.level, Level::Problem);
+        assert!(refused.value.starts_with("2031 connections in this run: chrome, firefox"), "{}", refused.value);
+        assert!(!report.text("t").contains("google"));
+    }
+
+    /// The healthy background: a pinning application now and then is not a
+    /// broken certificate, and with filtering off a replaced CA breaks nothing.
+    #[test]
+    fn a_few_refusals_and_an_idle_replacement_are_not_problems() {
+        let mut inputs = healthy();
+        inputs.daemons = Daemons::One {
+            pid: 1,
+            uptime: None,
+            helper: HelperProcess::Running,
+            filtering: Some(Filtering::Reaching),
+            rejected: Some(Rejections {
+                count: 2,
+                apps: vec!["firefox".into()],
+                first: None,
+                last: None,
+            }),
+        };
+        inputs.in_use = Some(InUse::Replaced { since: None });
+        inputs.config = Ok(config("https_filtering:\n  enabled: false\n"));
+        let report = Report::build(&inputs);
+        assert_eq!(finding(&report, "HTTPS filtering", "Refused certificates").level, Level::Healthy);
+        assert_eq!(finding(&report, "HTTPS filtering", "Certificate in use").level, Level::Fact);
     }
 
     #[test]

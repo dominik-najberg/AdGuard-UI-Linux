@@ -22,6 +22,7 @@ pub mod paths;
 pub mod preview;
 // Private: a `/proc` parse two modules here share, and nothing outside needs.
 mod proc;
+pub mod rejected;
 pub mod release;
 pub mod requests;
 pub mod site;
@@ -41,7 +42,7 @@ pub use config::{AddressPlan, AuthState, Config, DnsListenPort, Watch};
 pub use helper::{HelperProcess, RootHelper};
 pub use orphan::Daemon;
 pub use release::{Release, Standing};
-pub use trust::CaTrust;
+pub use trust::{CaTrust, InUse};
 pub use window_state::{Geometry, WindowState};
 pub use filters::Catalogue;
 pub use locale::Locale;

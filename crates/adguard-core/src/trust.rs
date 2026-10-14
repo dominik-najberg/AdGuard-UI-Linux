@@ -26,7 +26,20 @@
 //! for the password itself, and it does the browser stores this module cannot
 //! see (see [`CaTrust::is_trusted`]) in the same pass.
 //!
-//! Nothing here escalates, spawns anything, or writes. It reads three files.
+//! Nothing here escalates or spawns anything. It reads three files, and writes
+//! one only when asked to: [`adopt`], which brings `<name>.pem` up to the CA
+//! the proxy really signs with.
+//!
+//! # The CA in use is a fourth file
+//!
+//! Everything above compares the stores against `<name>.pem`. The proxy does
+//! not sign with that file: it loads its CA from `adguard.conf` and exports a
+//! DER copy to `SSL/<name>.cer` when it takes one up. The two are normally the
+//! same certificate, and on 14 October 2026 they were not — an activation left
+//! a different CA in `adguard.conf`, the proxy started on it, and every store
+//! went on trusting the `.pem` while Chrome refused every filtered site on its
+//! first visit. Every check here said *trusted*, truthfully, about the wrong
+//! certificate. [`InUse`] is the comparison that catches it.
 //!
 //! # What the check actually looks at
 //!
@@ -74,6 +87,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 /// The certificate name to fall back on when `proxy.yaml` cannot be read or
 /// does not carry the key: the CLI's own seeded default (contract §7).
@@ -348,6 +362,150 @@ pub fn der(path: &Path) -> Option<Vec<u8>> {
         .into_iter()
         .next()
         .and_then(|body| base64(&body))
+}
+
+/// Whether the CA the proxy signs with is the one `<name>.pem` holds.
+///
+/// Four values for the reason [`CaTrust`] is not a bool: the two ways of
+/// differing call for different steps, and "could not compare" must never read
+/// as either of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InUse {
+    /// Both files hold the same certificate.
+    Matches,
+    /// The proxy took up a different CA **after** `<name>.pem` was written.
+    /// Every store that trusts the `.pem` trusts a CA nothing is signed with,
+    /// so a browser refuses each filtered site — once, after which AdGuard
+    /// stops filtering it (see [`crate::rejected`]). [`adopt`] is the fix.
+    ///
+    /// `since` is when the proxy exported it, when the file could be dated.
+    Replaced { since: Option<SystemTime> },
+    /// `<name>.pem` is the newer of the two and holds a different CA: one
+    /// generated after the proxy last exported its own. Not evidence of a fault
+    /// — whether the proxy takes it up on its next start is not measured — so
+    /// it is reported, never repaired.
+    Pending,
+    /// Nothing to compare: the proxy has never exported a CA here, or either
+    /// file holds no certificate this can read.
+    Unseen,
+}
+
+impl InUse {
+    /// Compare the `.pem` at `certificate` with the proxy's copy at `exported`.
+    ///
+    /// Paths as parameters for the reason [`CaTrust::inspect`] gives: on a
+    /// working machine the two match, and the states worth reporting are only
+    /// reachable by pointing the check somewhere else.
+    ///
+    /// The direction is read from the files' ages, which is the only witness
+    /// there is. The proxy writes its copy when it takes a CA up and `cert`
+    /// writes the `.pem` when it makes one, so the newer file is the later
+    /// event. Equal ages read as [`Self::Replaced`]: the proxy's copy is the
+    /// one known to be in use.
+    pub fn inspect(certificate: &Path, exported: &Path) -> Self {
+        let (Some(ours), Some(theirs)) = (der(certificate), exported_der(exported)) else {
+            return Self::Unseen;
+        };
+        if ours == theirs {
+            return Self::Matches;
+        }
+        let modified = |path: &Path| fs::metadata(path).and_then(|meta| meta.modified()).ok();
+        let since = modified(exported);
+        match (modified(certificate), since) {
+            (Some(pem), Some(cer)) if pem > cer => Self::Pending,
+            _ => Self::Replaced { since },
+        }
+    }
+
+    /// This machine's reading, for the certificate named in `proxy.yaml`.
+    /// `None` when AdGuard's data directory cannot be located.
+    pub fn detect(certificate_name: &str) -> Option<Self> {
+        Some(Self::inspect(
+            &crate::paths::certificate(certificate_name)?,
+            &crate::paths::certificate_in_use(certificate_name)?,
+        ))
+    }
+}
+
+/// The proxy's exported CA as DER.
+///
+/// AdGuard writes it as raw DER; a PEM copy is read too rather than refused,
+/// since the comparison is on the certificate and not on its wrapping. Raw
+/// bytes count only when they open an ASN.1 `SEQUENCE`, which every
+/// certificate does, so an empty or truncated-to-nothing file reads as no
+/// certificate rather than as a different one.
+fn exported_der(path: &Path) -> Option<Vec<u8>> {
+    let bytes = fs::read(path).ok()?;
+    if bytes.windows(11).any(|window| window == b"-----BEGIN ") {
+        return der(path);
+    }
+    (bytes.len() > 4 && bytes[0] == 0x30).then_some(bytes)
+}
+
+/// Write the CA the proxy signs with into `<name>.pem`.
+///
+/// After this the `.pem` is the certificate in use, so everything that works
+/// from it — [`CaTrust`], the browser stores, AdGuard's own installer and the
+/// command shown for it — works from the right one, and their existing
+/// remedies apply: a system anchor holding the earlier CA reads as
+/// [`CaTrust::stale`], and a browser store holding it as stale too, which
+/// [`crate::nss::renew`] replaces.
+///
+/// The one write in this module, and only on the user's request. The file is
+/// AdGuard's but carries nothing of AdGuard's state — the CA and its key live
+/// in `adguard.conf`, and only `cert` and this ever write the `.pem` — so
+/// replacing it changes what is *installed*, never what is *used*. Written to
+/// a temporary sibling and renamed over, so a reader never sees half of it,
+/// and read back afterwards: success is the file holding the certificate,
+/// not the write returning.
+pub fn adopt(exported: &Path, certificate: &Path) -> Result<(), String> {
+    let der = exported_der(exported)
+        .ok_or_else(|| format!("{} holds no certificate", exported.display()))?;
+    let mut temporary = certificate.as_os_str().to_owned();
+    temporary.push(".new");
+    let temporary = PathBuf::from(temporary);
+    fs::write(&temporary, pem(&der))
+        .and_then(|()| fs::rename(&temporary, certificate))
+        .map_err(|err| {
+            let _ = fs::remove_file(&temporary);
+            err.to_string()
+        })?;
+    match self::der(certificate) {
+        Some(written) if written == der => Ok(()),
+        _ => Err(format!("{} does not hold it after writing", certificate.display())),
+    }
+}
+
+/// DER as a PEM certificate block, 64 columns, as `openssl` writes one.
+fn pem(der: &[u8]) -> String {
+    let body = encode(der);
+    let mut text = String::from("-----BEGIN CERTIFICATE-----\n");
+    for line in body.as_bytes().chunks(64) {
+        text.push_str(std::str::from_utf8(line).unwrap_or_default());
+        text.push('\n');
+    }
+    text.push_str("-----END CERTIFICATE-----\n");
+    text
+}
+
+/// Standard base64 with padding — the other half of [`base64`].
+fn encode(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let triple = chunk
+            .iter()
+            .enumerate()
+            .fold(0u32, |acc, (at, byte)| acc | u32::from(*byte) << (16 - 8 * at));
+        for at in 0..4 {
+            if at <= chunk.len() {
+                out.push(char::from(ALPHABET[(triple >> (18 - 6 * at)) as usize & 63]));
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
 }
 
 /// Decode standard base64, as a PEM body carries it once [`bodies`] has taken
@@ -630,6 +788,107 @@ mod tests {
     /// none.
     const ONE: &str = "-----BEGIN CERTIFICATE-----\nQUJDREVGRw==\n-----END CERTIFICATE-----\n";
     const TWO: &str = "-----BEGIN CERTIFICATE-----\nSElKS0xNTk8=\n-----END CERTIFICATE-----\n";
+
+    /// A DER "certificate" as the proxy exports one: raw bytes opening a
+    /// `SEQUENCE`. Nothing here parses past the first byte.
+    const DER_ONE: &[u8] = &[0x30, 0x82, 0x01, 0x0a, 0xde, 0xad, 0xbe, 0xef, 0x01];
+    const DER_TWO: &[u8] = &[0x30, 0x82, 0x01, 0x0a, 0xca, 0xfe, 0xba, 0xbe, 0x02];
+
+    /// Set a file's modification time, `seconds` after an arbitrary origin, so
+    /// the direction [`InUse::inspect`] reads from ages is under the test's
+    /// control rather than the clock's.
+    fn age(path: &Path, seconds: u64) {
+        let at = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000 + seconds);
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .and_then(|file| file.set_modified(at))
+            .expect("date the file");
+    }
+
+    #[test]
+    fn base64_round_trips_through_every_padding() {
+        for input in [&b""[..], b"f", b"fo", b"foo", b"foob", b"fooba", b"foobar", DER_ONE] {
+            assert_eq!(base64(&encode(input)).as_deref(), Some(input));
+        }
+        assert_eq!(encode(b"foobar"), "Zm9vYmFy");
+        assert_eq!(encode(b"fooba"), "Zm9vYmE=");
+        assert_eq!(encode(b"foob"), "Zm9vYg==");
+    }
+
+    #[test]
+    fn the_same_ca_in_both_files_matches() {
+        let dir = scratch("in-use-matches");
+        let (pem_path, cer) = (dir.join("CA.pem"), dir.join("CA.cer"));
+        fs::write(&pem_path, pem(DER_ONE)).unwrap();
+        fs::write(&cer, DER_ONE).unwrap();
+        assert_eq!(InUse::inspect(&pem_path, &cer), InUse::Matches);
+    }
+
+    /// The 14 October state: the proxy exported a CA after the `.pem` was
+    /// written, and it is a different one.
+    #[test]
+    fn a_newer_export_of_another_ca_is_a_replacement() {
+        let dir = scratch("in-use-replaced");
+        let (pem_path, cer) = (dir.join("CA.pem"), dir.join("CA.cer"));
+        fs::write(&pem_path, pem(DER_ONE)).unwrap();
+        fs::write(&cer, DER_TWO).unwrap();
+        age(&pem_path, 0);
+        age(&cer, 60);
+        assert!(matches!(InUse::inspect(&pem_path, &cer), InUse::Replaced { since: Some(_) }));
+    }
+
+    /// The other way round is a CA generated since the proxy's export, and
+    /// nothing has measured what the proxy does with it. Not a replacement.
+    #[test]
+    fn a_newer_pem_is_pending_rather_than_replaced() {
+        let dir = scratch("in-use-pending");
+        let (pem_path, cer) = (dir.join("CA.pem"), dir.join("CA.cer"));
+        fs::write(&pem_path, pem(DER_ONE)).unwrap();
+        fs::write(&cer, DER_TWO).unwrap();
+        age(&cer, 0);
+        age(&pem_path, 60);
+        assert_eq!(InUse::inspect(&pem_path, &cer), InUse::Pending);
+    }
+
+    /// No export, an empty one, or a `.pem` holding nothing: no comparison,
+    /// and never a replacement.
+    #[test]
+    fn nothing_to_compare_is_unseen() {
+        let dir = scratch("in-use-unseen");
+        let (pem_path, cer) = (dir.join("CA.pem"), dir.join("CA.cer"));
+        fs::write(&pem_path, pem(DER_ONE)).unwrap();
+        assert_eq!(InUse::inspect(&pem_path, &cer), InUse::Unseen);
+        fs::write(&cer, b"").unwrap();
+        assert_eq!(InUse::inspect(&pem_path, &cer), InUse::Unseen);
+        fs::write(&cer, DER_TWO).unwrap();
+        fs::write(&pem_path, b"").unwrap();
+        assert_eq!(InUse::inspect(&pem_path, &cer), InUse::Unseen);
+    }
+
+    /// The fix: afterwards the `.pem` holds the CA in use, the comparison
+    /// matches, and no temporary file is left beside it.
+    #[test]
+    fn adopting_puts_the_ca_in_use_into_the_pem() {
+        let dir = scratch("adopt");
+        let (pem_path, cer) = (dir.join("AdGuard CLI CA.pem"), dir.join("AdGuard CLI CA.cer"));
+        fs::write(&pem_path, pem(DER_ONE)).unwrap();
+        fs::write(&cer, DER_TWO).unwrap();
+        adopt(&cer, &pem_path).expect("adopt");
+        assert_eq!(der(&pem_path).as_deref(), Some(DER_TWO));
+        assert_eq!(InUse::inspect(&pem_path, &cer), InUse::Matches);
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn adopting_nothing_leaves_the_pem_alone() {
+        let dir = scratch("adopt-nothing");
+        let (pem_path, cer) = (dir.join("CA.pem"), dir.join("CA.cer"));
+        fs::write(&pem_path, pem(DER_ONE)).unwrap();
+        fs::write(&cer, b"").unwrap();
+        assert!(adopt(&cer, &pem_path).is_err());
+        assert_eq!(der(&pem_path).as_deref(), Some(DER_ONE));
+    }
 
     /// The whole point of comparing bodies: the same certificate wrapped
     /// differently is the same certificate. Line breaks moved, indentation

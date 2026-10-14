@@ -16,6 +16,8 @@ const USERSCRIPTS_SUBDIR: &str = "userscripts";
 const LOGS_SUBDIR: &str = "logs";
 const ACCESS_LOG: &str = "access.log";
 const APP_LOG: &str = "app.log";
+const PROXY_LOG: &str = "proxy.log";
+const SSL_SUBDIR: &str = "SSL";
 
 fn home() -> Option<PathBuf> {
     env::var_os("HOME").map(PathBuf::from)
@@ -101,6 +103,20 @@ pub fn cert_installer() -> Option<PathBuf> {
 /// otherwise indistinguishable from an install that never generated one.
 pub fn certificate(name: &str) -> Option<PathBuf> {
     Some(data_dir()?.join(format!("{name}.pem")))
+}
+
+/// The DER copy of the CA the proxy **signs with**: `SSL/<name>.cer`.
+///
+/// Not the same file as [`certificate`], and not always the same certificate.
+/// The proxy loads its CA from `adguard.conf` and writes this copy when it
+/// starts on one it has not exported before; nothing rewrites the `.pem`
+/// except `cert`. Measured on 14 October 2026: an activation left a different
+/// CA in `adguard.conf`, the next start rewrote this file at 09:51:19, the
+/// `.pem` kept the CA from 11 October, and from 09:51:42 the browsers refused
+/// every filtered site. The restarts that followed did not touch this file
+/// again, so its age is when the proxy took the CA up, not when it last ran.
+pub fn certificate_in_use(name: &str) -> Option<PathBuf> {
+    Some(data_dir()?.join(SSL_SUBDIR).join(format!("{name}.cer")))
 }
 
 /// AdGuard's native-messaging host, beside the **resolved** binary.
@@ -227,6 +243,15 @@ pub fn userscripts_dir_under(xdg_data_home: &Path) -> PathBuf {
 /// nothing here may hold an fd across reads.
 pub fn access_log() -> Option<PathBuf> {
     Some(data_dir()?.join(LOGS_SUBDIR).join(ACCESS_LOG))
+}
+
+/// AdGuard's proxy log — the filtering engine's own diagnostics.
+///
+/// Beside [`access_log`] and rotated the same way, at ~10 MiB, so the same rule
+/// holds: open it per read, hold nothing across reads. Read only by
+/// [`crate::rejected`], for the one line it counts.
+pub fn proxy_log() -> Option<PathBuf> {
+    Some(data_dir()?.join(LOGS_SUBDIR).join(PROXY_LOG))
 }
 
 /// AdGuard CLI's own diagnostic log, under a data directory.

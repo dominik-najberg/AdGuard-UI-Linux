@@ -71,9 +71,10 @@ use std::rc::Rc;
 use std::time::{Duration, Instant, SystemTime};
 
 use adguard_core::config::key;
+use adguard_core::rejected::{self, Rejections};
 use adguard_core::{
     access, helper, orphan, Activation, Autostart, Catalogue, Cli, Config, Daemon, FilterSet,
-    Filtering, HelperProcess, License, ProxyStatus, RootHelper, StatusInputs, Toggle,
+    Filtering, HelperProcess, InUse, License, ProxyStatus, RootHelper, StatusInputs, Toggle,
 };
 use adw::prelude::*;
 use gtk::glib;
@@ -232,6 +233,26 @@ enum Bypass {
     Unreached,
 }
 
+/// What the certificate banner under the hero panel is saying, if anything.
+///
+/// Three causes of one symptom — a browser warning on a filtered site — and
+/// three different places to send the user, which is why the banner's button
+/// needs to know which one it is showing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Trouble {
+    /// Nothing to say.
+    None,
+    /// The system does not trust the CA in `<name>.pem`.
+    Untrusted,
+    /// The proxy signs with a different CA from `<name>.pem`
+    /// ([`InUse::Replaced`]), so everything that trusts the file trusts the
+    /// wrong certificate.
+    Replaced,
+    /// Browsers have been refusing AdGuard's certificates in this run
+    /// ([`rejected`]), and neither of the above explains it.
+    Refused,
+}
+
 /// What the page can say about the proxy, and the three shapes the hero panel
 /// takes.
 ///
@@ -289,6 +310,12 @@ pub struct StatusPage {
     trust_banner: gtk::Box,
     trust_label: gtk::Label,
     trust_fix: gtk::Button,
+    /// What the banner is showing, for its button.
+    trouble: Cell<Trouble>,
+    /// What the proxy log said about refused certificates, and the run it said
+    /// it about. Read on the access log's cadence and expired the same way —
+    /// by the run's identity, so a restart clears it on the next tick.
+    rejected: RefCell<Option<(SystemTime, Rejections)>>,
     /// *Fix certificate* has been pressed and the trust it was after has not yet
     /// been seen. Keeps the check going while the proxy is not (yet) running.
     trust_watch: Cell<bool>,
@@ -735,6 +762,8 @@ impl StatusPage {
             trust_label: trust_label.clone(),
             trust_fix: trust_fix.clone(),
             trust_watch: Cell::new(false),
+            trouble: Cell::new(Trouble::None),
+            rejected: RefCell::new(None),
             renewing: Cell::new(false),
             renew_tried: RefCell::new(HashSet::new()),
             trust_inputs: RefCell::new((None, adguard_core::trust::DEFAULT_CERTIFICATE_NAME.to_owned())),
@@ -924,6 +953,7 @@ impl StatusPage {
     pub fn reload(self: &Rc<Self>) {
         let cli = self.cli.clone();
         let (log_due, cached) = self.access_log_due();
+        let refused = self.rejected.borrow().clone();
         let this = self.clone();
         worker::run(
             move || {
@@ -932,7 +962,7 @@ impl StatusPage {
                 // Not a third `adguard-cli`, so it races nothing the note above
                 // is about: a walk of `/proc`, a tail of one log, and no
                 // subprocess at all.
-                let evidence = read_evidence(&cli, &status, log_due, cached);
+                let evidence = read_evidence(&cli, &status, log_due, cached, refused);
                 (status, licence, evidence)
             },
             move |(status, licence, evidence)| {
@@ -1034,12 +1064,13 @@ impl StatusPage {
     fn read_status(self: &Rc<Self>, force: bool) {
         let cli = self.cli.clone();
         let (log_due, cached) = self.access_log_due();
+        let refused = self.rejected.borrow().clone();
         let previous = self.last_status.borrow().clone();
         let this = self.clone();
         worker::run(
             move || {
                 let reading = StatusReading::take(&cli, previous, force);
-                let evidence = read_evidence(&cli, &reading.result, log_due, cached);
+                let evidence = read_evidence(&cli, &reading.result, log_due, cached, refused);
                 (reading, evidence)
             },
             move |(reading, evidence): (StatusReading, Evidence)| {
@@ -1082,6 +1113,20 @@ impl StatusPage {
     /// command that does work removes the old anchor first, and the Protection
     /// page already shows it with the machine's paths in it.
     pub fn fix_certificate(&self) -> bool {
+        // The two causes `cert` cannot touch at all: the fix for a replaced CA
+        // is on the certificate group, and refusals with no cause in sight are
+        // explained, line by line, on Diagnostics.
+        match self.trouble.get() {
+            Trouble::Replaced => {
+                self.go(Destination::Certificate);
+                return true;
+            }
+            Trouble::Refused => {
+                self.go(Destination::Diagnostics);
+                return true;
+            }
+            Trouble::None | Trouble::Untrusted => {}
+        }
         self.trust_watch.set(true);
         let name = self.trust_inputs.borrow().1.clone();
         let stale_or_untrusted = adguard_core::CaTrust::detect(&name)
@@ -1120,10 +1165,56 @@ impl StatusPage {
         let (https, name) = self.trust_inputs.borrow().clone();
         let matters = matches!(&*self.runtime.borrow(), Runtime::Up) && https != Some(false);
         let checking = matters || self.trust_watch.get();
-        let untrusted = checking
+        let system_untrusted = checking
             && !adguard_core::CaTrust::detect(&name).is_none_or(|trust| trust.is_trusted());
+        // Worst first, and each only when the one before it is not the reason:
+        // a replaced CA explains every refusal, and an untrusted one explains
+        // both. Two file reads for the comparison; the refusals were counted
+        // on the worker.
+        let replaced = checking
+            && !system_untrusted
+            && matches!(InUse::detect(&name), Some(InUse::Replaced { .. }));
+        let refused = (matters && !system_untrusted && !replaced)
+            .then(|| self.rejected.borrow().as_ref().map(|(_, found)| found.clone()))
+            .flatten()
+            .filter(Rejections::alarming);
+        let trouble = match (system_untrusted, replaced, &refused) {
+            (true, _, _) => Trouble::Untrusted,
+            (_, true, _) => Trouble::Replaced,
+            (_, _, Some(_)) => Trouble::Refused,
+            _ => Trouble::None,
+        };
+        self.trouble.set(trouble);
+        let untrusted = trouble != Trouble::None;
         self.trust_banner.set_visible(untrusted);
-        if untrusted {
+        if replaced {
+            self.trust_label.set_label(
+                "AdGuard signs with a different certificate from the one this system and its \
+                 browsers trust. Each site shows a warning on its first visit, and AdGuard then \
+                 stops filtering it. The Protection page can switch to the right certificate.",
+            );
+            self.trust_fix.set_label("Show the fix");
+        }
+        if let Some(found) = &refused {
+            let latest = found
+                .last
+                .and_then(|at| u64::try_from(at).ok())
+                .map(|at| {
+                    let at = std::time::UNIX_EPOCH + Duration::from_secs(at);
+                    format!(", the latest at {}", crate::certificate::local_time(at))
+                })
+                .unwrap_or_default();
+            self.trust_label.set_label(&format!(
+                "Browsers refused AdGuard's certificate {} times since protection started ({}){latest}. \
+                 Each refused site showed a warning and then loaded unfiltered. The certificate \
+                 checks find nothing wrong now; if you have just fixed it, restart protection to \
+                 filter those sites again. Diagnostics has the details.",
+                found.count,
+                found.apps.join(", "),
+            ));
+            self.trust_fix.set_label("Show diagnostics");
+        }
+        if system_untrusted {
             // `generated` and `unmet` come from the same reading as `untrusted`.
             let reading = adguard_core::CaTrust::detect(&name);
             match reading.as_ref().filter(|trust| trust.generated) {
@@ -1240,9 +1331,10 @@ impl StatusPage {
         result: Result<ProxyStatus, (bool, String)>,
         evidence: Evidence,
     ) {
+        let (bypass, cached, read, refused) = evidence;
+        self.rejected.replace(refused);
         self.recheck_trust();
         self.renew_browsers();
-        let (bypass, cached, read) = evidence;
         self.filtering.set(cached);
         if read {
             self.filtering_read.set(Some(Instant::now()));
@@ -2186,7 +2278,10 @@ type Cached = Option<(SystemTime, Filtering)>;
 /// What [`read_evidence`] hands back: the bypass to render if there is one, the
 /// verdict and run to remember, and whether the log was actually read this time
 /// — which is what re-arms [`ACCESS_LOG_EVERY`].
-type Evidence = (Option<Bypass>, Cached, bool);
+///
+/// The fourth is the proxy log's count of refused certificates, for the run it
+/// was read in — read and carried on the same terms as the access log.
+type Evidence = (Option<Bypass>, Cached, bool, Option<(SystemTime, Rejections)>);
 
 /// Everything this page knows about a bypass, and the log verdict to remember.
 ///
@@ -2213,18 +2308,19 @@ fn read_evidence(
     status: &Result<ProxyStatus, (bool, String)>,
     log_due: bool,
     cached: Cached,
+    refused: Option<(SystemTime, Rejections)>,
 ) -> Evidence {
     if !matches!(status, Ok(status) if status.running) {
-        return (None, None, false);
+        return (None, None, false, None);
     }
     let found = orphan::daemons(cli.binary());
     let [daemon] = found.as_slice() else {
-        return (None, None, false);
+        return (None, None, false, None);
     };
     // An undatable run has no window to read and nothing to key a cache on, and
     // reading one unscoped would count a previous run's failures against it.
     let Some(started) = daemon.started_at() else {
-        return (None, None, false);
+        return (None, None, false, None);
     };
     // **The cache expires on identity, not only on age.** A verdict belongs to
     // the run it was read in, and a restart from anywhere — this page, a
@@ -2232,23 +2328,27 @@ fn read_evidence(
     // that boundary would leave a cured install reporting a bypass for up to
     // `ACCESS_LOG_EVERY`, over the very restart that fixed it.
     let carried = cached.filter(|(run, _)| *run == started);
+    let refused = refused.filter(|(run, _)| *run == started);
 
     // The corpse first: it is cheaper, it is immediate, and it names the cause,
     // so a bypass it can explain is never reported as one nothing can — and the
     // log is not read at all, because nothing it could say would change this.
     if helper::process(daemon.pid()) == HelperProcess::Defunct {
-        return (Some(Bypass::Helper { redirected: redirects_traffic() }), carried, false);
+        return (Some(Bypass::Helper { redirected: redirects_traffic() }), carried, false, refused);
     }
 
     // Not due *and* still speaking for this run is the only way to skip the
     // read. A run this page has no verdict for is read now, whatever the
     // interval says, so a restart is answered on the next tick rather than five
     // minutes later.
-    if let (false, Some((_, filtering))) = (log_due, carried) {
-        return (bypass_of(filtering), carried, false);
+    if let (false, Some((_, filtering)), Some(_)) = (log_due, carried, &refused) {
+        return (bypass_of(filtering), carried, false, refused);
     }
     let filtering = access::filtering(started);
-    (bypass_of(filtering), Some((started, filtering)), true)
+    // The proxy log beside it, on the same terms: four mebibytes at most, once
+    // per interval and once per new run.
+    let refused = rejected::rejections(started).map(|found| (started, found));
+    (bypass_of(filtering), Some((started, filtering)), true, refused)
 }
 
 /// The one verdict a caller may act on, as the panel's evidence.
