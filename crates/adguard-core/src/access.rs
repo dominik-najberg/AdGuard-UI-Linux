@@ -437,13 +437,20 @@ fn local(year: i32, month: i32, day: i32, hour: i32, minute: i32, second: i32) -
 /// Never an error: an unreadable file, a missing one and an empty one all come
 /// back as no text, which [`verdict`] reads as no evidence.
 fn window(path: &Path) -> String {
-    let live = tail(path, TAIL);
-    let shortfall = TAIL.saturating_sub(live.len() as u64);
+    window_of(path, PREVIOUS, TAIL)
+}
+
+/// [`window`] for any of AdGuard's rotated logs: the last `want` bytes of
+/// `path`, reaching into `previous` beside it when the live file is shorter.
+/// [`crate::rejected`] reads `proxy.log` through this.
+pub(crate) fn window_of(path: &Path, previous: &str, want: u64) -> String {
+    let live = tail(path, want);
+    let shortfall = want.saturating_sub(live.len() as u64);
     if shortfall == 0 {
         return live;
     }
 
-    let Some(previous) = path.parent().map(|dir| dir.join(PREVIOUS)) else {
+    let Some(previous) = path.parent().map(|dir| dir.join(previous)) else {
         return live;
     };
     let mut earlier = tail(&previous, shortfall);

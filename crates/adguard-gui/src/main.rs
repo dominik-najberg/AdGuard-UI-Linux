@@ -783,6 +783,9 @@ pub enum Destination {
     /// The About page. Only the notification of a new AdGuard UI release leads
     /// here, since that is where it is named and installed.
     About,
+    /// The Diagnostics page. Only the Status banner for refused certificates
+    /// leads here, when no check it can name explains them.
+    Diagnostics,
 }
 
 impl Destination {
@@ -797,6 +800,7 @@ impl Destination {
             Self::Activity => "activity",
             Self::Extensions => "extensions",
             Self::About => "about",
+            Self::Diagnostics => "diagnostics",
         }
     }
 
@@ -1108,7 +1112,8 @@ fn main_view(cli: &Cli, updater: &Rc<updater::Updater>) -> MainView {
                 | Destination::Status
                 | Destination::Activity
                 | Destination::Extensions
-                | Destination::About => {}
+                | Destination::About
+                | Destination::Diagnostics => {}
             }
         }
     });
@@ -1414,6 +1419,7 @@ mod tests {
             Destination::Activity,
             Destination::Extensions,
             Destination::About,
+            Destination::Diagnostics,
         ] {
             assert!(
                 destination.page_index().is_some(),

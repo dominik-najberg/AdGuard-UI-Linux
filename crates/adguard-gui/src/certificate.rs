@@ -26,14 +26,24 @@
 //! store's half needs `sudo` and stays a command with a copy button, exactly as
 //! with the `sudo` command on the Advanced page.
 //!
+//! **And one step comes before all of that**, since 14 October 2026: when the
+//! proxy signs with a different CA from the `.pem` everything here is checked
+//! against ([`InUse::Replaced`]), every row would be reporting on the wrong
+//! certificate and every command would install it. So that state hides them
+//! all and shows one row, whose *Use This Certificate* writes the CA in use
+//! into the `.pem` (`adguard_core::trust::adopt`). The ordinary rows then
+//! describe the right certificate, and their remedies — the stale anchor's
+//! command, *Add to Browsers* renewing the old copies — take it from there.
+//!
 //! [issue #21]: https://github.com/dominik-najberg/AdGuard-UI-Linux/issues/21
 
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use adguard_core::nss::{self, BrowserStores, Store, StoreState};
-use adguard_core::trust::{self, CaTrust};
+use adguard_core::trust::{self, CaTrust, InUse};
 use adw::prelude::*;
 use gtk::glib;
 use gtk4 as gtk;
@@ -50,6 +60,12 @@ use crate::{abbreviate, style, toast, worker};
 /// command they do not need.
 pub struct CertificateView {
     group: adw::PreferencesGroup,
+    /// Shown alone while the proxy signs with a CA other than the `.pem`.
+    in_use: adw::ActionRow,
+    /// On that row: writes the CA in use into the `.pem`.
+    adopt: gtk::Button,
+    /// The `.pem` and the proxy's copy, as last painted, for that button.
+    adoptable: RefCell<Option<(PathBuf, PathBuf)>>,
     status: adw::ActionRow,
     /// The browsers whose own stores lack the certificate. Hidden when none do.
     browsers: adw::ActionRow,
@@ -88,6 +104,23 @@ impl CertificateView {
         let group = adw::PreferencesGroup::builder()
             .title("AdGuard's certificate")
             .build();
+
+        let in_use = adw::ActionRow::new();
+        in_use.set_use_markup(false);
+        in_use.set_title("AdGuard signs with another certificate");
+        in_use.set_subtitle_lines(6);
+        in_use.add_prefix(&gtk::Image::from_icon_name("dialog-warning-symbolic"));
+        let adopt = gtk::Button::builder()
+            .label("Use This Certificate")
+            .valign(gtk::Align::Center)
+            .tooltip_text(
+                "Write the certificate AdGuard signs with into AdGuard's certificate file, so \
+                 the steps below install that one. Changes only that file; no password is needed.",
+            )
+            .build();
+        adopt.add_css_class("suggested-action");
+        in_use.add_suffix(&adopt);
+        group.add(&in_use);
 
         let status = adw::ActionRow::new();
         status.set_use_markup(false);
@@ -187,6 +220,9 @@ impl CertificateView {
 
         let this = Rc::new(Self {
             group,
+            in_use,
+            adopt,
+            adoptable: RefCell::new(None),
             status,
             browsers,
             add,
@@ -201,6 +237,16 @@ impl CertificateView {
             installer: std::env::var_os("ADGUARD_CERT_INSTALLER")
                 .map(PathBuf::from)
                 .or_else(adguard_core::paths::cert_installer),
+        });
+        this.adopt.connect_clicked({
+            // Weak, for the reason the copy button's closure is.
+            let this = Rc::downgrade(&this);
+            let toasts = toasts.downgrade();
+            move |_| {
+                if let (Some(this), Some(toasts)) = (this.upgrade(), toasts.upgrade()) {
+                    this.adopt(&toasts);
+                }
+            }
         });
         this.add.connect_clicked({
             // Weak, for the reason the copy button's closure is.
@@ -283,6 +329,29 @@ impl CertificateView {
         );
     }
 
+    /// Write the CA the proxy signs with into the `.pem`, then read everything
+    /// again: the rows now describe the certificate in use, and say what is
+    /// left to install. One small file, so on the main loop.
+    fn adopt(&self, toasts: &adw::ToastOverlay) {
+        let Some((certificate, exported)) = self.adoptable.borrow().clone() else {
+            return;
+        };
+        let message = match trust::adopt(&exported, &certificate) {
+            Ok(()) => "AdGuard's certificate file now holds the certificate it signs with".to_owned(),
+            Err(why) => format!("Could not update the certificate file: {why}"),
+        };
+        toasts.add_toast(toast(&message));
+        self.painted.replace(None);
+        let last = self.last.borrow().clone();
+        if let Some((filtering, name)) = last {
+            self.paint(filtering, &name);
+        }
+        // The group asks for the next step itself, if one is left.
+        if self.group.is_visible() {
+            self.attend();
+        }
+    }
+
     pub fn widget(&self) -> &adw::PreferencesGroup {
         &self.group
     }
@@ -302,10 +371,16 @@ impl CertificateView {
             return;
         }
         self.group.add_css_class(style::NEEDS_ACTION);
-        self.copy.add_css_class("suggested-action");
-        self.copy.remove_css_class("flat");
+        // The step to take is the one on screen: the adopt button while it is
+        // the only row, the copy button otherwise.
+        let copy = if self.in_use.is_visible() {
+            self.adopt.clone()
+        } else {
+            self.copy.add_css_class("suggested-action");
+            self.copy.remove_css_class("flat");
+            self.copy.clone()
+        };
         let group = self.group.clone();
-        let copy = self.copy.clone();
         crate::once_allocated(&self.group, move |widget| {
             crate::scroll_into_view(widget);
             group.add_css_class(style::ATTENTION);
@@ -366,7 +441,13 @@ impl CertificateView {
         // suppress precisely the repaint worth making.
         let remedy = check.as_ref().and_then(|trust| self.remedy(trust, &unmet));
         let certutil = nss::certutil();
-        let snapshot = format!("{check:?} {stores:?} {remedy:?} {certutil:?}");
+        // Whether the proxy signs with the certificate all of the above was
+        // read against. Two small reads and two stats.
+        let in_use = check
+            .as_ref()
+            .and_then(|_| InUse::detect(certificate_name))
+            .unwrap_or(InUse::Unseen);
+        let snapshot = format!("{check:?} {stores:?} {remedy:?} {certutil:?} {in_use:?}");
         if self.painted.borrow().as_deref() == Some(snapshot.as_str()) {
             return;
         }
@@ -379,6 +460,13 @@ impl CertificateView {
             self.settle();
             return;
         };
+
+        if let InUse::Replaced { since } = in_use {
+            self.paint_replaced(&trust, certificate_name, since);
+            return;
+        }
+        self.in_use.set_visible(false);
+        self.adoptable.replace(None);
 
         if trust.is_trusted() && unmet.is_empty() {
             self.group.set_visible(false);
@@ -457,6 +545,33 @@ impl CertificateView {
                     .set_description(Some(if unshowable { UNSHOWABLE } else { NO_INSTALLER }));
             }
         }
+    }
+
+    /// The proxy signs with a CA other than the `.pem`: one row, one button,
+    /// and every row that would describe the `.pem` hidden — they would be
+    /// right about a certificate nothing uses, and their commands would
+    /// install it.
+    fn paint_replaced(&self, trust: &CaTrust, certificate_name: &str, since: Option<SystemTime>) {
+        let exported = adguard_core::paths::certificate_in_use(certificate_name);
+        self.group.set_visible(true);
+        self.in_use.set_visible(true);
+        for row in [&self.status, &self.browsers, &self.command] {
+            row.set_visible(false);
+        }
+        self.firefox_help.set_visible(false);
+        self.pending.replace(None);
+        self.in_use.set_subtitle(&format!(
+            "AdGuard has been signing with the certificate in {}{}, and it is not the one in {} \
+             — which is what this machine and its browsers trust. A browser shows a warning on \
+             each site's first visit, and AdGuard then stops filtering that site.",
+            exported.as_deref().map(abbreviate).unwrap_or_default(),
+            since.map(|at| format!(" since {}", local_time(at))).unwrap_or_default(),
+            abbreviate(&trust.certificate),
+        ));
+        self.adopt.set_visible(exported.is_some());
+        self.adoptable
+            .replace(exported.map(|exported| (trust.certificate.clone(), exported)));
+        self.group.set_description(Some(ADOPT));
     }
 
     /// What the check found, in the order the machine applies it.
@@ -829,6 +944,21 @@ const UNSHOWABLE: &str = "Filtered connections are signed by a certificate this 
                           this application shows none. The certificate's name comes from \
                           https_filtering.root_certificate_name, and a Firefox profile's from \
                           Firefox's profile manager.";
+
+/// The proxy signs with another CA: what the one button does, and what follows.
+const ADOPT: &str = "Use This Certificate writes the certificate AdGuard signs with into its \
+                     certificate file. This group then shows how to install it in place of the \
+                     old one: a command for the system, which asks for your password, and Add to \
+                     Browsers for the browsers. Restart open browsers afterwards.";
+
+/// A moment as the user's clock shows it — `14 October, 09:51`.
+pub fn local_time(at: SystemTime) -> String {
+    let seconds = at.duration_since(UNIX_EPOCH).map_or(0, |since| since.as_secs() as i64);
+    glib::DateTime::from_unix_local(seconds)
+        .ok()
+        .and_then(|at| at.format("%-d %B, %H:%M").ok())
+        .map_or_else(String::new, |text| text.to_string())
+}
 
 /// The copy button as it is when nothing is asking for it: an icon, flat.
 fn calm_copy(button: &gtk::Button) {

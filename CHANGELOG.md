@@ -13,6 +13,14 @@ This file is the one changelog.
 
 ## Unreleased
 
+### A certificate AdGuard switched to without saying so is now reported
+
+After a licence activation, AdGuard CLI can start signing with a different certificate from the one installed on the machine. Chrome and Firefox then show a certificate warning the first time each site is opened. AdGuard then stops filtering that site, which is why a refresh made the page load. Every check here compared the browsers and the system with the certificate file AdGuard had last written, and that file still held the old certificate, so Diagnostics and Status said everything was fine.
+
+AdGuard UI now compares that file with the copy AdGuard writes when it starts signing with a certificate. When they differ, Diagnostics reports *Certificate in use* as a problem, the Status page shows a notice under the panel, and the certificate group on the Protection page offers **Use This Certificate**. That button puts the certificate AdGuard really uses into the file. The group then shows how to replace the old one in the system and in the browsers, with the usual command and *Add to Browsers*.
+
+Diagnostics also counts the connections browsers refused because of AdGuard's certificate since protection started, read from AdGuard's own log. The report shows only the number and the program names, never the sites. Ten or more in a day is reported as a problem, and on the Status page as a notice. A healthy machine logs at most two a day, from applications that check their own certificates.
+
 ### Firefox certificate password guidance
 
 The certificate group now distinguishes the administrator password from a browser store’s own password. When Firefox does not trust AdGuard’s certificate, expandable instructions explain the NSS password prompt and how to import the current certificate or enable trust for identifying websites in Firefox. The instructions expand after a failed attempt to add the certificate to Firefox.
