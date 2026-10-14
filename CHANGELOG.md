@@ -11,7 +11,11 @@ This file is the one changelog.
 
 ---
 
-## Unreleased
+## 1.11.0 — 14 October 2026
+
+### A new icon
+
+The application icon is now an emerald shield with a prohibition mark, with depth and a lighter rim so it stands out on both light and dark panels. Every size from 16 to 256 pixels was redrawn along with the scalable one, so the mark stays legible in a dock or a menu. The monochrome version that GNOME uses in symbolic contexts was redrawn to match.
 
 ### A certificate AdGuard switched to without saying so is now reported
 
