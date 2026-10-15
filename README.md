@@ -12,13 +12,15 @@ It is a plain user-session application: no daemon, no background service of its 
 
 | | |
 | --- | --- |
-| **AdGuard CLI** | Installed and licensed. Not bundled here, and nothing works without it — measured against 1.4.13. |
+| **AdGuard CLI** | Installed and licensed. Not bundled here, and nothing works without it — measured against 1.4.13. If it is missing, the window offers AdGuard's own installer. |
 | **GTK4 / libadwaita** | GTK 4.10+, libadwaita 1.7+. Developed against GTK 4.22 and libadwaita 1.9 on Ubuntu 26.04, GNOME 50, Wayland. |
 | **Rust** | 1.85+ to build from source. |
 | **A tray icon** | KDE Plasma has one built in. GNOME needs an AppIndicator extension — it has no native tray. Without one the app prints a line to stderr and runs windowed. |
 | **Distribution** | A `.deb` for Ubuntu and Debian, an `.rpm` for Fedora 43 and later, and a tarball for anything else that meets the toolkit versions above. |
 
-AdGuard CLI is a third-party install under `$HOME`, so no package can declare a dependency on it. The application looks for `adguard-cli` on `$PATH`, then in `~/.local/bin` and `~/.local/opt/adguard-cli`, and renders an explanation rather than failing if it finds none.
+AdGuard CLI is a third-party install, so no package can declare a dependency on it. The application looks for `adguard-cli` on `$PATH`, then in `~/.local/bin`, `~/.local/opt/adguard-cli` and `/opt/adguard-cli` — the last being where AdGuard's installer puts it, so an install whose `/usr/local/bin` link was declined is still found. `$ADGUARD_CLI` overrides all of them.
+
+**If it finds none, the window offers to install it.** *Install AdGuard CLI…* opens a terminal running the command [AdGuard's knowledge base](https://adguard.com/kb/adguard-for-linux/installation/) gives, unchanged — `curl -fsSL https://raw.githubusercontent.com/AdguardTeam/AdGuardCLI/release/install.sh | sh -s -- -v`, or the beta or nightly branch if you pick one. It downloads AdGuard CLI from GitHub, asks for your password to create `/opt/adguard-cli`, and asks whether to link it into `/usr/local/bin`; the password goes to the terminal, never to this application. AdGuard's script does not check the signature of what it downloads, and the page does not claim otherwise. With no terminal it can drive, the command is copied instead. The window looks for the binary every two seconds, however it got there, and once it has finished unpacking hands over to activation and the first-run assistant. AdGuard publishes builds for x86_64 and aarch64 only, so on any other CPU the page says so and offers no button.
 
 ## Install
 

@@ -14,6 +14,7 @@ pub mod config;
 pub mod diagnostics;
 pub mod filters;
 pub mod helper;
+pub mod install;
 pub mod locale;
 pub mod model;
 pub mod nss;
