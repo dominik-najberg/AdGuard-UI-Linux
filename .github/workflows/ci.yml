@@ -49,6 +49,8 @@ jobs:
     container: ubuntu:26.04
 
     steps:
+      # `dbus-daemon` is for the tray's registration test, which runs its own
+      # private bus and skips without one.
       # Before checkout, because a container image this bare has no git: the
       # checkout action would silently fall back to downloading a tarball, and
       # `git status` in a later step would then describe nothing.
@@ -57,7 +59,7 @@ jobs:
           apt-get update
           apt-get install -y --no-install-recommends \
             build-essential pkg-config libgtk-4-dev libadwaita-1-dev \
-            ca-certificates curl git
+            ca-certificates curl git dbus-daemon
           pkg-config --modversion gtk4 libadwaita-1
 
       - uses: actions/checkout@v4
@@ -102,7 +104,7 @@ jobs:
       - name: Install build dependencies
         run: |
           dnf install -y --setopt=install_weak_deps=False \
-            gcc pkgconf-pkg-config gtk4-devel libadwaita-devel git curl
+            gcc pkgconf-pkg-config gtk4-devel libadwaita-devel git curl dbus-daemon
           pkg-config --modversion gtk4 libadwaita-1
 
       - uses: actions/checkout@v4

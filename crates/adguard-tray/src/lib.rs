@@ -30,6 +30,29 @@
 //! froze the D-Bus service for as long as stopping the proxy took. Here a
 //! callback only puts a value on an unbounded channel.
 //!
+//! ## Registered under the connection's own name, not one with the PID in it
+//!
+//! `ksni`'s default is to own `org.kde.StatusNotifierItem-<pid>-<n>` and to
+//! register that, as the StatusNotifierItem specification describes. **A
+//! restart after an update keeps the PID**: it is an `exec`, so that the
+//! application's D-Bus name is released before the new copy asks for it. The
+//! new copy therefore asks for the very name the old one had just given up,
+//! and on 15 October 2026, right after the update to 1.11.0, Ubuntu's
+//! AppIndicator extension dropped it. The extension's list of registered
+//! items had no AdGuard UI in it, while the item itself was alive on the bus,
+//! answering `Title` with "AdGuard — running". The extension took the old
+//! name's disappearance, which reached it after the new registration, as
+//! the end of an item that was in fact the new one. Registering the same
+//! name again by hand brought the icon back, which settles where the fault
+//! was.
+//!
+//! So the item is registered under the connection's unique name, `:1.N`,
+//! which the bus never hands out twice. That departs from the specification
+//! the same way Chromium's tray has since 2023 (ksni's own documentation
+//! cites it), and the hosts in use accept it. On the reference machine the
+//! AppIndicator extension lists Chrome's two items as `:1.137` and `:1.868`,
+//! and Chrome owns no `StatusNotifierItem-*` name at all.
+//!
 //! [`Cli`]: adguard_core::Cli
 
 use std::sync::{Arc, Mutex};
@@ -412,7 +435,9 @@ pub fn spawn(initial: State) -> Result<Tray, Error> {
                     state: initial,
                     commands: command_tx,
                 };
-                let handle = match indicator.spawn().await {
+                // See the module header: a name with the PID in it is reused
+                // by the copy an update `exec`s, and a host can drop it.
+                let handle = match indicator.disable_dbus_name(true).spawn().await {
                     Ok(handle) => {
                         let _ = ready_tx.send(Ok(()));
                         handle
