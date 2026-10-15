@@ -53,6 +53,12 @@
     application is its first release.
   -->
   <releases>
+    <release version="1.11.1" type="stable" date="2026-10-15">
+      <url type="details">https://github.com/dominik-najberg/AdGuard-UI-Linux/releases/tag/v1.11.1</url>
+      <description>
+        <p>The tray icon no longer disappears after Update and restart.</p>
+      </description>
+    </release>
     <release version="1.11.0" type="stable" date="2026-10-14">
       <url type="details">https://github.com/dominik-najberg/AdGuard-UI-Linux/releases/tag/v1.11.0</url>
       <description>

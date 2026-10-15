@@ -11,7 +11,7 @@ This file is the one changelog.
 
 ---
 
-## Unreleased
+## 1.11.1 — 15 October 2026
 
 ### The tray icon survives an update
 
