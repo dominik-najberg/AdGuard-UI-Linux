@@ -1290,7 +1290,7 @@ Measured 30 September 2026 against `adguard-cli` 1.4.13 at `log_level: 'info'`, 
 
 | Field | Holds | Observed values |
 | --- | --- | --- |
-| 3 | The **client process name**, quoted | `"chrome"`, `"slack"`, `"gh"`, `"internal_proxy_client"`, `"Unknown"`, … — per-application attribution comes free |
+| 3 | The **client process name**, quoted | `"chrome"`, `"slack"`, `"gh"`, `"internal_proxy_client"`, `"Unknown"`, … — per-application attribution comes free. A space in the name is written `\ `, which makes the line one whitespace-separated field longer; see below |
 | 4 | Protocol | `HTTP1`, `HTTP2`, `TLS`, `IQUIC`, `TCP`, `UDP`, `STUN_TURN` |
 | 6, 7 | Host and path | `-` where the protocol has none; **the browsing record itself** |
 | 9 | Request type | `xhr`, `img`, `script`, `any`, `other\|xhr`, … — `\|`-joined |
@@ -1298,6 +1298,8 @@ Measured 30 September 2026 against `adguard-cli` 1.4.13 at `log_level: 'info'`, 
 | 11 | A small count (0–3 observed) | **Not a count of the rules that matched**, measured below. Follows the *kind* of rule that decided the line: 0 for a plain request or an HTML-filtering rule, 1 for a blocking rule or a `$csp`, 2 for an exception. Is not the rule in field 17 and does not decide the action |
 | 12 | `ID=<n>` when a rule decided the line, otherwise `-` | `ID=2` is AdGuard Base's id in `agflm_standard.db` |
 | 17 | **The rule's text**, after the `--` marker, present exactly when field 12 is `ID=` | e.g. an `@@…` exception or a blocking rule |
+
+**A client name can hold an escaped space.** Measured 15 October 2026, after Chrome and Claude Desktop had been updated while running: 9,589 lines carried `"chrome\ (deleted)"` or `"claude-desktop\ (deleted)"`. AdGuard names the client after `/proc/<pid>/exe`, and that link gains ` (deleted)` once the binary behind a running process has been replaced, until the program restarts. It was the only escape found, and no client field held an unescaped space. Split on whitespace, every later column on those lines moves one place right, so `activity.rs` reads field 3 from its opening quote to its closing one, takes `\ ` as a space and nothing else, and files the client under the name without ` (deleted)`. `access.rs` needs no change: only `"internal_proxy_client"` matters to it, and a line with any other client is someone else's traffic whatever its field count.
 
 **Blocking is attributable to a filter list**, which is the finding that decides whether "top blocking rules" is buildable. Of 44,690 `BLOCKED` lines, 44,284 carry `ID=`, which joins against the catalogue for the list's name, and the rule text itself. The 406 without it are all `TLS` or `IQUIC`, and what blocked them is not identified.
 

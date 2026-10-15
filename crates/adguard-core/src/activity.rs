@@ -59,6 +59,7 @@
 //!
 //! [issue #21]: https://github.com/dominik-najberg/AdGuard-UI-Linux/issues/21
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom};
@@ -113,6 +114,15 @@ const FIELDS: usize = 16;
 
 /// The marker that closes the fixed columns, field 16.
 const MARKER: &str = "--";
+
+/// Zero-based index of the quoted client, the one fixed column that may hold
+/// a space.
+const CLIENT: usize = 2;
+
+/// What `/proc/<pid>/exe` gains once the binary behind a running process has
+/// been replaced, which a browser updated in place carries until it restarts.
+/// AdGuard names the client after that link and keeps the suffix (contract §9).
+const DELETED: &str = " (deleted)";
 
 /// The key [`Tally`] files a line under when it could not be read.
 const UNREAD: &str = "unread";
@@ -279,7 +289,8 @@ pub struct Ranked {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Client {
     /// As AdGuard names it, without the quotes: `chrome`, `slack`, and
-    /// `internal_proxy_client` for AdGuard's own.
+    /// `internal_proxy_client` for AdGuard's own. `chrome\ (deleted)` is filed
+    /// as `chrome` ([`client`]).
     pub name: String,
     pub requests: u64,
     pub blocked: u64,
@@ -796,7 +807,9 @@ pub(crate) struct Request<'a> {
     /// Local hour and local midnight it fell in, epoch seconds.
     hour: i64,
     day: i64,
-    pub(crate) client: &'a str,
+    /// Field 3, unquoted and unescaped, without [`DELETED`]. Borrowed from
+    /// the line unless an escape had to be undone.
+    pub(crate) client: Cow<'a, str>,
     /// Field 4.
     pub(crate) protocol: &'a str,
     /// Field 6 as logged: a full URL on HTTP lines, a bare host otherwise, and
@@ -818,12 +831,19 @@ pub(crate) struct Request<'a> {
 /// 4 protocol, 5 method, 6 URL or host, 7 referrer, 8 status, 9 request type,
 /// 10 action, 11 a small count, 12 `ID=<n>` or `-`, 13 upstream, 14 size,
 /// 15 duration, 16 `--`, then the rule when 12 names one.
+///
+/// Fields are split on whitespace, except that 3 runs from its opening quote
+/// to the closing one: AdGuard writes a space in a client name as `\ `, as in
+/// `"chrome\ (deleted)"`, and splitting there would shift every later column.
 pub(crate) fn parse<'a>(line: &'a str, clock: &mut Clock) -> Option<Request<'a>> {
     let mut fields = [""; FIELDS];
     let mut rest = line;
-    for field in &mut fields {
+    for (index, field) in fields.iter_mut().enumerate() {
         rest = rest.trim_start_matches(|c: char| c.is_ascii_whitespace());
-        let end = rest.find(|c: char| c.is_ascii_whitespace()).unwrap_or(rest.len());
+        let end = match index {
+            CLIENT => quoted(rest)?,
+            _ => rest.find(|c: char| c.is_ascii_whitespace()).unwrap_or(rest.len()),
+        };
         if end == 0 {
             return None;
         }
@@ -835,7 +855,7 @@ pub(crate) fn parse<'a>(line: &'a str, clock: &mut Clock) -> Option<Request<'a>>
     if fields[15] != MARKER {
         return None;
     }
-    let client = fields[2].strip_prefix('"')?.strip_suffix('"')?;
+    let client = client(fields[CLIENT])?;
     let action = Action::parse(fields[9])?;
     // A size and a duration, each in its own unit. Neither is needed for
     // anything but the traffic figure; both are here because a column that has
@@ -865,6 +885,65 @@ pub(crate) fn parse<'a>(line: &'a str, clock: &mut Clock) -> Option<Request<'a>>
         rule,
         bytes,
     })
+}
+
+/// The length of the quoted field `rest` starts with, quotes included, or
+/// `None` when it does not start with one, never closes it, or runs straight on
+/// into the next field. A backslash takes the character after it with it, so
+/// `\"` does not close the field; [`client`] then refuses it.
+fn quoted(rest: &str) -> Option<usize> {
+    let bytes = rest.as_bytes();
+    if bytes.first() != Some(&b'"') {
+        return None;
+    }
+    let mut at = 1;
+    while at < bytes.len() {
+        match bytes[at] {
+            b'\\' => at += 2,
+            b'"' => {
+                let end = at + 1;
+                let closed = bytes.get(end).is_none_or(u8::is_ascii_whitespace);
+                return closed.then_some(end);
+            }
+            _ => at += 1,
+        }
+    }
+    None
+}
+
+/// Field 3 as the program's name: unquoted, with `\ ` read as a space, and
+/// with [`DELETED`] dropped.
+///
+/// **Stored as `chrome`, not `chrome (deleted)`.** The suffix says the browser
+/// was updated while it ran, not that a different program made the request.
+/// Kept, it would split one browser across two rows of the clients table for
+/// the days between an update and a restart, and the second row would name
+/// something the user has never installed.
+///
+/// An escaped space is the only one measured. Bare whitespace, or a backslash
+/// before anything else, is a format this was not measured against, and the
+/// line goes unread.
+fn client(field: &str) -> Option<Cow<'_, str>> {
+    let raw = field.strip_prefix('"')?.strip_suffix('"')?;
+    if !raw.contains(|c: char| c == '\\' || c.is_ascii_whitespace()) {
+        return Some(Cow::Borrowed(raw));
+    }
+    let mut name = String::with_capacity(raw.len());
+    let mut chars = raw.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => match chars.next()? {
+                ' ' => name.push(' '),
+                _ => return None,
+            },
+            c if c.is_ascii_whitespace() => return None,
+            _ => name.push(c),
+        }
+    }
+    if let Some(kept) = name.strip_suffix(DELETED).map(str::len) {
+        name.truncate(kept);
+    }
+    Some(Cow::Owned(name))
 }
 
 /// The host name in field 6, and nothing else from it.
@@ -1011,7 +1090,7 @@ impl Tally {
         }
         *self
             .clients
-            .entry((request.day, request.client.to_owned(), request.action))
+            .entry((request.day, request.client.into_owned(), request.action))
             .or_default() += 1;
     }
 
@@ -1242,6 +1321,63 @@ mod tests {
         assert_eq!(request.host.as_deref(), Some("video.example.net"));
     }
 
+    /// The shape a browser updated in place logs until it restarts: AdGuard
+    /// names the client after `/proc/<pid>/exe`, which has gained
+    /// ` (deleted)`, and escapes the space. Both line shapes seen with it.
+    #[test]
+    fn an_updated_browser_is_read_as_itself() {
+        let tls = "13.10.2026 21:14:59.536995 \"chrome\\ (deleted)\" TLS - www.example.com - - any NONE 0 - 192.0.2.1:443 4042b 10034ms --";
+        let request = parse(tls, &mut Clock::default()).expect("parses");
+        assert_eq!(request.client, "chrome");
+        assert_eq!(request.protocol, "TLS");
+        assert_eq!(request.host.as_deref(), Some("www.example.com"));
+        assert_eq!(request.action, Action::Passed);
+        assert_eq!(request.bytes, 4042);
+
+        let http = passed("10:00:00", "chrome\\ (deleted)", "https://www.example.com/a?q=1");
+        let request = parse(&http, &mut Clock::default()).expect("parses");
+        assert_eq!(request.client, "chrome");
+        assert_eq!(request.protocol, "HTTP2");
+        assert_eq!(request.status, Some(200));
+
+        let rule = decided("10:00:00", "https://ads.example.net/x.js", "BLOCKED", 2, "||ads.example.net^")
+            .replace("\"firefox\"", "\"claude-desktop\\ (deleted)\"");
+        let request = parse(&rule, &mut Clock::default()).expect("parses");
+        assert_eq!(request.client, "claude-desktop");
+        assert_eq!(request.rule, Some("||ads.example.net^"));
+    }
+
+    /// An escaped space anywhere else is part of the name, and ` (deleted)` is
+    /// dropped only from the end.
+    #[test]
+    fn an_escaped_space_is_a_space_in_the_name() {
+        for (field, expected) in [
+            ("my\\ app", "my app"),
+            ("my\\ app\\ (deleted)", "my app"),
+            ("chrome\\ (deleted)\\ helper", "chrome (deleted) helper"),
+        ] {
+            let line = passed("10:00:00", field, "https://example.com/");
+            let request = parse(&line, &mut Clock::default()).expect(field);
+            assert_eq!(request.client, expected, "{field}");
+        }
+    }
+
+    /// One browser, before and after an update, is one row of clients.
+    #[test]
+    fn an_update_does_not_split_a_client_in_two() {
+        let scratch = Scratch::new("deleted");
+        scratch.write("access.log", &[
+            passed("10:00:00", "chrome\\ (deleted)", "https://example.com/"),
+            passed("10:30:00", "chrome", "https://example.com/"),
+        ]);
+        let mut store = scratch.store();
+        let ingested = store.ingest_at(&scratch.live(), noon()).unwrap();
+        assert_eq!((ingested.lines, ingested.unread), (2, 0));
+        let summary = store.summary_at(Span::Today, noon()).unwrap();
+        assert_eq!(summary.clients.len(), 1);
+        assert_eq!((summary.clients[0].name.as_str(), summary.clients[0].requests), ("chrome", 2));
+    }
+
     /// **The privacy decision, as a test.** Whatever the URL carries, the host
     /// is all that comes out.
     #[test]
@@ -1274,6 +1410,14 @@ mod tests {
             good.replacen(" HTTP2", " HTTP2 extra", 1),
             // The client unquoted.
             good.replace("\"chrome\"", "chrome"),
+            // A space in the client that is not escaped.
+            good.replace("\"chrome\"", "\"chrome (deleted)\""),
+            // An escape this was not measured against.
+            good.replace("\"chrome\"", "\"chr\\ome\""),
+            good.replace("\"chrome\"", "\"chrome\\\"\""),
+            // A quote that never closes, and one that runs into the next field.
+            good.replace("\"chrome\"", "\"chrome\\ (deleted)"),
+            good.replace("\"chrome\"", "\"chrome\"HTTP2"),
             // An action this was not measured against.
             good.replace(" NONE ", " REDIRECTED "),
             // A size in another unit.

@@ -562,6 +562,10 @@ mod tests {
     #[test]
     fn somebody_elses_request_is_not_an_internal_entry() {
         assert_eq!(internal_entry(REAL), None);
+        // A client with an escaped space has seventeen whitespace-separated
+        // fields; it is somebody else's either way.
+        let updated = REAL.replace("\"chrome\"", "\"chrome\\ (deleted)\"");
+        assert_eq!(internal_entry(&updated), None);
     }
 
     /// The measured bypass: hourly failures, nothing succeeding.
