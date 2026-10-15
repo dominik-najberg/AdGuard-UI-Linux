@@ -11,6 +11,12 @@ This file is the one changelog.
 
 ---
 
+## 1.11.2 — 15 October 2026
+
+### Activity counts the requests of a browser updated while it runs
+
+When a program is updated while it is running, AdGuard CLI logs its name with ` (deleted)` added and an escaped space, such as `"chrome\ (deleted)"`, until the program restarts. The Activity page read that space as a column break, so every such request was set aside as unreadable. On the reference machine that was 9,589 requests from Chrome and Claude Desktop. They are now counted under the program's own name, so an updated Chrome stays one row among the clients, and the Requests search finds them too. Requests already read before this version stay counted as unreadable, because the page does not read the log twice.
+
 ## 1.11.1 — 15 October 2026
 
 ### The tray icon survives an update

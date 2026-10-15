@@ -53,6 +53,12 @@
     application is its first release.
   -->
   <releases>
+    <release version="1.11.2" type="stable" date="2026-10-15">
+      <url type="details">https://github.com/dominik-najberg/AdGuard-UI-Linux/releases/tag/v1.11.2</url>
+      <description>
+        <p>Activity counts the requests of a browser that was updated while it was running, instead of setting them aside as unreadable.</p>
+      </description>
+    </release>
     <release version="1.11.1" type="stable" date="2026-10-15">
       <url type="details">https://github.com/dominik-najberg/AdGuard-UI-Linux/releases/tag/v1.11.1</url>
       <description>
