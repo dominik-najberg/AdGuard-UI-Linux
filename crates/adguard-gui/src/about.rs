@@ -26,11 +26,18 @@
 //! a failure is a row with a retry beside it, and the page does not otherwise
 //! change character.
 //!
-//! **The application half is reported and never applied.** `adguard-cli update`
-//! re-runs an installer over a suid root helper, and this application performs
-//! no privileged operation of its own (`architecture.md` §1, §6) — it detects
-//! and instructs, as it already does for that helper and for the certificate.
-//! The command is named; running it is the user's.
+//! **The application half is never applied by this application.** `adguard-cli
+//! update` re-runs an installer over a suid root helper, and this application
+//! performs no privileged operation on AdGuard's behalf (`architecture.md` §1,
+//! §6). The command is named, and *Run in Terminal* hands it to a terminal the
+//! user drives — the arrangement *Fix certificate* uses for `cert` — so any
+//! password it asks for is typed there, and nothing runs it unseen.
+//!
+//! **The channel is AdGuard's setting, written the ordinary way.** Which of
+//! release, beta and nightly AdGuard offers itself from is `update_channel` in
+//! `proxy.yaml`, and switching it is one `config set`. It downloads nothing and
+//! installs nothing; what it changes is what AdGuard says is available, which
+//! the page reads back straight away and shows in the notice above the command.
 //!
 //! **This application's own update is a different case, and is applied.** It is
 //! a package this project builds and signs, installed by the distribution's
@@ -57,7 +64,7 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use adguard_core::{Catalogue, Cli, FilterSet, Standing, UpdateReport, Verdict};
+use adguard_core::{Catalogue, Channel, Cli, Config, FilterSet, Standing, UpdateReport, Verdict};
 use adw::prelude::*;
 use gtk::glib;
 use gtk4 as gtk;
@@ -92,7 +99,8 @@ const WHAT_IT_DOES: &str =
 /// renew on their behalf (`architecture.md` §6).
 const WHY_NO_BUTTON: &str =
     "Updating AdGuard CLI re-runs its installer over AdGuard's privileged helper, which \
-     is AdGuard's to change rather than this application's — so this one is yours to run.";
+     is AdGuard's to change rather than this application's — so this one is yours to run. \
+     Run in Terminal opens it in a terminal, where it asks for anything it needs.";
 
 /// Beside the "last changed" figure, and load-bearing rather than decorative:
 /// the column behind that figure moves only when data arrives, so a long gap is
@@ -139,8 +147,23 @@ const WHY_NOT_THIS_COPY: &str =
      or a file copied by hand — so it cannot replace itself. Install the release from \
      its page.";
 
-/// The command that does it. Named, never invoked (contract §14).
+/// The command that does it. Named, and only ever run in a terminal the user
+/// drives (contract §14).
 const UPDATE_COMMAND: &str = "adguard-cli update";
+
+/// What each update channel is, as the row under the CLI's version says it.
+fn channel_meaning(channel: Channel) -> &'static str {
+    match channel {
+        Channel::Release => "Stable builds — what AdGuard recommends",
+        Channel::Beta => "Release candidates, ahead of the next stable build",
+        Channel::Nightly => "Built daily from current development — newest, least tested",
+    }
+}
+
+/// Said in the notice, in AdGuard's own words less its `>`.
+fn available(newer: &str) -> String {
+    format!("AdGuard CLI v{newer} is now available")
+}
 
 const HOMEPAGE: &str = "https://github.com/dominik-najberg/AdGuard-UI-Linux";
 const ISSUES: &str = "https://github.com/dominik-najberg/AdGuard-UI-Linux/issues";
@@ -153,6 +176,20 @@ pub struct AboutPage {
     /// The CLI's own version banner, read off the main thread like everything
     /// else it says.
     cli_version: adw::ActionRow,
+
+    /// Release, beta or nightly — the `update_channel` AdGuard offers itself
+    /// from. Insensitive until the file has been read, and while a switch is
+    /// being written.
+    channel: adw::ComboRow,
+    /// What the file says now, so a refused switch can be put back.
+    channel_now: Cell<Channel>,
+    /// Set while the row is being moved to match the file, so that the move is
+    /// not taken for the user choosing a channel.
+    painting: Cell<bool>,
+    /// *Run in Terminal* was pressed and AdGuard still said something newer
+    /// was available. The version is read again each time the window comes
+    /// back into focus until it says nothing is — see [`Self::recheck_update`].
+    updating: Cell<bool>,
 
     /// When new filter data last arrived, from the catalogues themselves.
     ///
@@ -233,6 +270,13 @@ impl AboutPage {
         app_version.add_suffix(&ui_check);
 
         let cli_version = row("AdGuard CLI", PLACEHOLDER);
+        // Under the version, because it decides what the next one will be.
+        let channel = adw::ComboRow::builder()
+            .title("AdGuard CLI channel")
+            .subtitle(channel_meaning(Channel::Release))
+            .model(&gtk::StringList::new(&Channel::ALL.map(Channel::label)))
+            .sensitive(false)
+            .build();
         let binary = row("AdGuard CLI binary", &abbreviate(cli.binary()));
         binary.set_subtitle_lines(2);
         // Under the version it checks, so the switch and the disclosure above
@@ -244,9 +288,9 @@ impl AboutPage {
             .build();
         versions.add(&app_version);
         versions.add(&automatic);
-        for r in [&cli_version, &binary] {
-            versions.add(r);
-        }
+        versions.add(&cli_version);
+        versions.add(&channel);
+        versions.add(&binary);
         page.add(&versions);
 
         // Revealed only when a check found something newer. Unlike the AdGuard
@@ -355,6 +399,11 @@ impl AboutPage {
             }
         });
         command.add_suffix(&copy);
+        let run_update = gtk::Button::builder()
+            .label("Run in Terminal")
+            .valign(gtk::Align::Center)
+            .build();
+        command.add_suffix(&run_update);
         notice.add(&notice_row);
         notice.add(&command);
         page.add(&notice);
@@ -375,6 +424,10 @@ impl AboutPage {
             cli,
             toasts,
             cli_version,
+            channel: channel.clone(),
+            channel_now: Cell::new(Channel::Release),
+            painting: Cell::new(false),
+            updating: Cell::new(false),
             ui_standing: ui_standing.clone(),
             ui_check: ui_check.clone(),
             ui_notice,
@@ -405,6 +458,28 @@ impl AboutPage {
         ui_install.connect_clicked({
             let updater = updater.clone();
             move |_| updater.install()
+        });
+
+        channel.connect_selected_notify({
+            let this = Rc::downgrade(&this);
+            move |row| {
+                let Some(this) = this.upgrade() else { return };
+                if this.painting.get() {
+                    return;
+                }
+                if let Some(&channel) = Channel::ALL.get(row.selected() as usize) {
+                    this.switch_channel(channel);
+                }
+            }
+        });
+
+        run_update.connect_clicked({
+            let this = Rc::downgrade(&this);
+            move |_| {
+                if let Some(this) = this.upgrade() {
+                    this.run_update();
+                }
+            }
         });
 
         automatic.connect_active_notify({
@@ -440,6 +515,7 @@ impl AboutPage {
         });
 
         this.read_version();
+        this.read_channel();
         this.read_freshness();
         this
     }
@@ -459,7 +535,19 @@ impl AboutPage {
     /// that is a no-op everywhere else.
     pub fn reload(self: &Rc<Self>) {
         self.read_version();
+        self.read_channel();
         self.read_freshness();
+    }
+
+    /// The window came back into focus: if an AdGuard CLI update was handed to
+    /// a terminal and has not visibly landed yet, read the version again.
+    ///
+    /// Two quick CLI calls, and only while one is outstanding — the focus
+    /// re-check is otherwise a handful of `stat`s, and stays that way.
+    pub fn recheck_update(self: &Rc<Self>) {
+        if self.updating.get() {
+            self.read_version();
+        }
     }
 
     /// Called after a run, with what AdGuard said.
@@ -471,14 +559,125 @@ impl AboutPage {
         let cli = self.cli.clone();
         let this = self.clone();
         worker::run(
-            move || cli.version(),
-            move |version: Result<String, adguard_core::Error>| match version {
-                Ok(banner) => this.cli_version.set_subtitle(short_version(&banner)),
+            move || cli.installed(),
+            move |installed: Result<adguard_core::Installed, adguard_core::Error>| match installed {
+                Ok(installed) => {
+                    this.cli_version.set_subtitle(short_version(&installed.banner));
+                    // `--version` carries AdGuard's word on a newer build for
+                    // free, so the notice is current without `check-update`.
+                    this.render_newer(installed.newer.as_deref());
+                }
                 // The row says what it could not do rather than sitting on a
                 // placeholder that reads as "not installed".
                 Err(err) => this.cli_version.set_subtitle(&err.to_string()),
             },
         );
+    }
+
+    /// Show AdGuard's word on a newer build of itself, or take it away.
+    fn render_newer(&self, newer: Option<&str>) {
+        match newer {
+            Some(newer) => {
+                self.notice_row.set_subtitle(&available(newer));
+                self.notice.set_visible(true);
+            }
+            None => {
+                self.notice.set_visible(false);
+                self.updating.set(false);
+            }
+        }
+    }
+
+    /// Read the channel from `proxy.yaml`, as every other setting is read.
+    fn read_channel(self: &Rc<Self>) {
+        let this = self.clone();
+        worker::run(
+            || Config::load().map(|config| config.update_channel()),
+            move |channel: Result<Channel, adguard_core::config::Error>| match channel {
+                Ok(channel) => {
+                    this.paint_channel(channel);
+                    this.channel.set_sensitive(true);
+                }
+                Err(err) => {
+                    this.channel.set_sensitive(false);
+                    this.channel.set_subtitle(&format!("Unavailable — {err}"));
+                }
+            },
+        );
+    }
+
+    /// Move the row to `channel` without that counting as a choice.
+    fn paint_channel(&self, channel: Channel) {
+        self.channel_now.set(channel);
+        self.painting.set(true);
+        let index = Channel::ALL.iter().position(|c| *c == channel).unwrap_or(0);
+        self.channel.set_selected(index as u32);
+        self.painting.set(false);
+        self.channel.set_subtitle(channel_meaning(channel));
+    }
+
+    /// The user picked a channel: write it, then ask what is available on it.
+    ///
+    /// Act, re-read, reconcile, like every write here (`architecture.md` §3).
+    /// The re-read is the second command rather than the `config set` itself,
+    /// because that one reports what AdGuard had cached for the channel it is
+    /// leaving (contract §14).
+    fn switch_channel(self: &Rc<Self>, channel: Channel) {
+        if channel == self.channel_now.get() {
+            return;
+        }
+        self.channel.set_sensitive(false);
+        self.channel.set_subtitle("Switching…");
+
+        let cli = self.cli.clone();
+        let this = self.clone();
+        worker::run(
+            move || {
+                cli.set_update_channel(channel)?;
+                cli.newer_release()
+            },
+            move |result: Result<Option<String>, adguard_core::Error>| {
+                this.channel.set_sensitive(true);
+                match result {
+                    Ok(newer) => {
+                        this.paint_channel(channel);
+                        this.render_newer(newer.as_deref());
+                        this.toasts.add_toast(toast(&match newer {
+                            Some(newer) => format!(
+                                "Switched to {} — AdGuard CLI v{newer} is available",
+                                channel.label()
+                            ),
+                            None => format!("Switched to {} — nothing newer there", channel.label()),
+                        }));
+                    }
+                    Err(err) => {
+                        // Put the row back where the file is, rather than
+                        // leave it showing a channel AdGuard is not on.
+                        this.paint_channel(this.channel_now.get());
+                        this.toasts.add_toast(toast(&format!("Channel not changed: {err}")));
+                    }
+                }
+            },
+        );
+    }
+
+    /// Hand `adguard-cli update` to a terminal, as *Fix certificate* does
+    /// `cert`. The binary is the resolved one, quoted, so the terminal runs the
+    /// copy this page describes rather than whichever `$PATH` finds first.
+    fn run_update(&self) {
+        let command = format!(
+            "{} update",
+            glib::shell_quote(self.cli.binary()).to_string_lossy()
+        );
+        if crate::terminal::open(&command) {
+            self.updating.set(true);
+            self.toasts.add_toast(toast("Follow AdGuard's update in the terminal"));
+        } else {
+            // No terminal we know how to drive: the command is still the way,
+            // so hand it over to be pasted into one.
+            self.notice_row.clipboard().set_text(&command);
+            self.toasts.add_toast(toast("No terminal found — command copied, run it yourself"));
+        }
     }
 
     /// Draw where this application's own update stands.
@@ -626,6 +825,7 @@ impl AboutPage {
             value.add_css_class(match component.verdict {
                 Verdict::Changed => "success",
                 Verdict::Failed => "error",
+                Verdict::Available => "accent",
                 Verdict::Unrecognised => "warning",
                 Verdict::UpToDate => "dim-label",
             });
@@ -654,7 +854,7 @@ impl AboutPage {
                 self.notice_row.set_subtitle(said);
                 self.notice.set_visible(true);
             }
-            None => self.notice.set_visible(false),
+            None => self.render_newer(None),
         }
 
         let failed = report.failures().count();
@@ -900,14 +1100,22 @@ mod tests {
         }
     }
 
-    /// The AdGuard CLI half is still named and never run, and the group that
-    /// mentions it has to say why — now beside a page that does install its
-    /// own update.
+    /// The AdGuard CLI half is never run by this application, and the group
+    /// that mentions it has to say why — now beside a page that does install
+    /// its own update, and with a button that hands it to a terminal.
     #[test]
     fn the_update_notice_explains_why_it_is_not_a_button() {
         let why = WHY_NO_BUTTON.to_lowercase();
         assert!(why.contains("privileged"));
         assert!(why.contains("yours to run"));
+        assert!(why.contains("terminal"));
         assert_eq!(UPDATE_COMMAND, "adguard-cli update");
+    }
+
+    /// The notice repeats AdGuard's sentence, so it reads the same whether it
+    /// came from `--version`, a channel switch or `check-update`.
+    #[test]
+    fn the_notice_is_adguards_sentence() {
+        assert_eq!(available("1.5.0-nightly.8"), "AdGuard CLI v1.5.0-nightly.8 is now available");
     }
 }

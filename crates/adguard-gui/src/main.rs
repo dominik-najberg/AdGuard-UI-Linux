@@ -872,6 +872,8 @@ struct MainView {
     advanced: Rc<advanced::AdvancedPage>,
     /// Held for install links, which arrive on the command line (#29).
     extensions: Rc<extensions::ExtensionsPage>,
+    /// Held for the AdGuard CLI update re-check, which needs the window.
+    about: Rc<about::AboutPage>,
     /// The same resolver the pages' own links go through, for the one
     /// destination that is reached from outside the window.
     navigate: Rc<dyn Fn(Destination)>,
@@ -1211,6 +1213,7 @@ fn main_view(cli: &Cli, updater: &Rc<updater::Updater>) -> MainView {
         protection,
         advanced,
         extensions,
+        about,
         navigate: navigate_out,
         _watch: watch,
     }
@@ -1256,8 +1259,10 @@ fn connect_focus_rechecks(window: &adw::ApplicationWindow, view: &MainView) {
     let advanced = view.advanced.clone();
     let protection = view.protection.clone();
     let status = view.status.clone();
+    let about = view.about.clone();
     window.connect_is_active_notify(move |window| {
         if window.is_active() {
+            about.recheck_update();
             advanced.recheck_helper();
             // Both ends of the login entry: the switch that writes it and the
             // row on Status that reports it. Whichever page is showing, one of

@@ -1976,13 +1976,41 @@ So the 2 s `status` poll produces one every two seconds while the window is open
 
 Nothing in this project reads these logs. It is recorded because the count is alarming and wrong, and because the next person to go looking for evidence of network activity will find it first.
 
-### The application half is deliberately half-measured
+### The application half, measured on another channel
 
-The app line has printed `Up to date` in all fourteen runs, because 1.4.13 is current. **What it says when an update exists has never been seen, and this project will not manufacture the condition to find out.** So nothing parses that line beyond asking whether it is exactly `Up to date`; anything else is shown to the user verbatim, as AdGuard's own sentence, alongside the `adguard-cli update` command to run.
+The app line printed `Up to date` in all fourteen runs on the release channel, because 1.4.13 is current there. This section used to say what it prints when an update exists had never been seen, and that this project would not manufacture the condition. **It did not have to: the other channels are the condition.** Measured 15 October 2026 on v1.4.13, in a sandbox `$XDG_DATA_HOME` holding copies of `proxy.yaml` and `adguard.conf`, with `update_channel` set to `nightly`:
+
+```text
+Checking app updates...
+
+> AdGuard CLI v1.5.0-nightly.8 is now available
+You can update AdGuard CLI by running `/home/…/.local/bin/adguard-cli update`
+```
+
+**And it is not `check-update`'s to say.** The same blank line and two lines end the output of **every** command in that state — `--version`, `status`, `license`, `filters list`, `dns filters list`, `userscripts list`, `config get` and `config set` — at exit 0. That makes it data in every parser's way: the About page's version row would carry it, and `start`, `stop` and `restart`, which report their last line, would answer every press with the advice to update. So `cli::split_update_hint` takes the exact two-line shape out of every command's stdout before anything reads it, and keeps the version as `Output::newer`; `Cli::check_update` puts it back on the app line as `Verdict::Available`. The release channel will meet this the day 1.4.14 ships, which is why the fix is in the wrapper rather than in the channel switch.
+
+**The hint is one invocation behind a channel change.** It reports what AdGuard had cached for the channel in force before the command: switching beta to nightly printed beta's `v1.5.0-rc.2`, switching from there to release printed it again, and in each case the *next* invocation spoke for the new channel. So `Cli::newer_release` asks with a second, cheap command rather than reading the `config set`.
+
+Anything on the app line other than `Up to date` and the hint is still shown verbatim, as AdGuard's own sentence.
 
 **One shape is excluded from that pass-through, and it is not the unmeasured one.** A `Failed …` verdict on the app line is a failed *check*, not news of a release, so `UpdateReport::app_notice` returns `None` for it and the line is reported among the failures where it belongs. Without that the same event would be shown twice, once as a failure and once as an update notice offering a command to run — and the second of those would be advice derived from a check that did not complete. It costs nothing to be right about a shape nobody has seen: a failure of the app check has never been observed either, since all five measured failures were filter components.
 
-**`adguard-cli update` is not measured and is never invoked**, which are the same decision. It re-runs an installer over a suid `adguard_root_helper`, and this application performs no privileged operation on AdGuard's behalf ([§8](#8-privileged-operations), `architecture.md` §1) — it detects and instructs, as it already does for the root helper and the certificate. Not calling it is what makes not measuring it free, and it joins the list in `handoff.md` §3 item 7 for that reason. `update_channel` stays unclassified on the same grounds.
+**`adguard-cli update` is not measured and is never invoked by this application.** It re-runs an installer over a suid `adguard_root_helper`, and this application performs no privileged operation on AdGuard's behalf ([§8](#8-privileged-operations), `architecture.md` §1). Since 16 October 2026 the About page's *Run in Terminal* hands it to a terminal the user drives, as *Fix certificate* does `cert`, so what it asks is answered there. Its behaviour is still AdGuard's and still unmeasured here.
+
+### `update_channel`
+
+Measured 15 October 2026 on v1.4.13, in the sandbox above. It is the key the About page's channel row writes, and every one of these facts shaped that row:
+
+| `config set update_channel …` | Prints | Exit | File afterwards | Next invocation |
+| --- | --- | --- | --- | --- |
+| `release`, `beta`, `nightly` | echo + `Config has been updated` | 0 | the value, quoted | reads it back |
+| `NIGHTLY` | echo + `Config has been updated` | 0 | `'NIGHTLY'` | `config get` answers **`release`**, and the file is rewritten to `'release'` |
+| `default` | echo + `Config has been updated` | 0 | `'default'` | the same: **`release`** |
+| `bogus` | `Invalid value for key `update_channel`. Valid values are: release, nightly, beta, default` | 0 | unchanged | — |
+
+**Accepted is not kept.** `config set` matches the value case-insensitively and writes it verbatim, as it does for `log_level`; but unlike `log_level` the reader does not, so anything but the three lowercase names is read as release and rewritten on the next invocation — which, with the Status page polling, is within two seconds. `Cli::set_update_channel` therefore writes only the three lowercase names, and `Config::update_channel` reads case-*sensitively*, answering release for anything else, because that is what AdGuard will do with it. `default`, the fourth value the CLI lists, is the same trap under a friendlier name.
+
+It is one of the two keys `config set` accepts before `configure` has created `proxy.yaml`, and it is stored somewhere else until then (§5); the About page, which writes it, is only built once the file exists. Switching it downloads and installs nothing; it changes what AdGuard says is available, and only `adguard-cli update` acts on that.
 
 **No ANSI escapes appear in any of the fourteen runs.** Not a counter-example to [§4](#4-ansi-escapes-are-unconditional), which is about the CLI ignoring every opt-out rather than about every command colouring its output — but it does mean the stripper is a no-op on this command, and that the test fixtures are plain text rather than escape-laden captures.
 
