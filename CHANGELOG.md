@@ -11,6 +11,12 @@ This file is the one changelog.
 
 ---
 
+## Unreleased
+
+### The tray icon survives an update
+
+After *Update and restart*, the tray icon could disappear from the panel while the application went on running. The restart keeps the process ID. The tray named itself after that ID, so the new copy asked for the same name the old one had just released, and Ubuntu's AppIndicator extension dropped the new icon together with the old one. The tray now registers under the name the bus gives each connection, which is never reused. Chrome's tray does the same. This also covers the first update from 1.11.0.
+
 ## 1.11.0 — 14 October 2026
 
 ### A new icon

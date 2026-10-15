@@ -35,6 +35,7 @@ dependencies = [
  "ksni",
  "thiserror",
  "tokio",
+ "zbus",
 ]
 
 [[package]]

@@ -15,3 +15,9 @@ thiserror.workspace = true
 # gets a thread of its own. `net`/`time` are for the D-Bus reactor; nothing here
 # runs a timer.
 tokio = { version = "1", features = ["rt", "net", "time"] }
+
+[dev-dependencies]
+# A stand-in StatusNotifierWatcher on a private bus, for the registration test.
+# The same zbus `ksni` already builds, with the same runtime, so it costs no
+# new crates.
+zbus = { version = "5", default-features = false, features = ["tokio"] }
