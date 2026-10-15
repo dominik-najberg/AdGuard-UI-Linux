@@ -18,6 +18,7 @@ mod extensions;
 mod filter_settings;
 mod filters;
 mod geometry;
+mod install_cli;
 mod install_link;
 mod protection;
 mod requests;
@@ -25,6 +26,7 @@ mod root_helper;
 mod setup;
 mod status;
 mod style;
+mod terminal;
 mod updater;
 mod watch;
 mod worker;
@@ -221,9 +223,10 @@ fn main() -> glib::ExitCode {
 /// What the first launch built, so a later one has something to present.
 struct Instance {
     window: adw::ApplicationWindow,
-    /// `None` when `adguard-cli` is missing: the window explains why, and there
-    /// are no pages behind it. Also `None` while the first-run assistant has the
-    /// window, since the pages it would hold cannot be built yet.
+    /// `None` when `adguard-cli` is missing: the window explains why and offers
+    /// AdGuard's installer, and there are no pages behind it until the binary
+    /// turns up ([`cli_installed`]). Also `None` while the first-run assistant
+    /// has the window, since the pages it would hold cannot be built yet.
     view: Option<MainView>,
     /// The first-run assistant, for as long as it owns the window.
     ///
@@ -262,16 +265,13 @@ impl Instance {
     /// While the first-run assistant owns the window there is no page yet, but
     /// there will be one the moment it finishes, so the link waits for it —
     /// someone who clicked *Install* before setting AdGuard up still meant it.
-    /// With the CLI missing there will never be a page, and the window already
-    /// says why; the link is dropped with a line on stderr.
+    /// The same holds with the CLI missing, now that the window offers to
+    /// install it (#51): the link waits through that as well.
     fn offer_install(&self, url: String) {
         self.present();
-        match (&self.view, &self.setup) {
-            (Some(view), _) => view.offer_install(url),
-            (None, Some(_)) => self.pending.borrow_mut().push(url),
-            (None, None) => {
-                eprintln!("adguard-ui: cannot install {url} without AdGuard CLI")
-            }
+        match &self.view {
+            Some(view) => view.offer_install(url),
+            None => self.pending.borrow_mut().push(url),
         }
     }
 }
@@ -337,11 +337,7 @@ fn start(
     // (contract §5) — so every page behind this would render "unavailable" and
     // nothing the user touched would stick. The assistant is the only thing
     // that can move that state, so it takes the window until it has.
-    let needs_setup = cli
-        .as_ref()
-        .ok()
-        .and_then(Cli::config_path)
-        .is_some_and(|path| !path.is_file());
+    let needs_setup = cli.as_ref().is_ok_and(unconfigured);
 
     if needs_setup && background {
         // There is no window to run the assistant in, and a tray built over a
@@ -358,10 +354,7 @@ fn start(
 
     if needs_setup {
         let cli = cli.expect("needs_setup is only true when the CLI was found");
-        let toasts = adw::ToastOverlay::new();
-        let assistant = setup::SetupAssistant::new(cli.clone(), toasts.clone());
-        toasts.set_child(Some(assistant.widget()));
-        window.set_content(Some(&toasts));
+        let assistant = setup_assistant(app, &window, ui, cli, updater);
         window.present();
 
         // The instance exists from here so a second activation presents this
@@ -371,18 +364,10 @@ fn start(
         ui.replace(Some(Instance {
             window: window.clone(),
             view: None,
-            setup: Some(assistant.clone()),
+            setup: Some(assistant),
             geometry: saver,
             pending: RefCell::new(Vec::new()),
         }));
-
-        assistant.connect_finished({
-            let app = app.clone();
-            let window = window.clone();
-            let ui = ui.clone();
-            let updater = updater.clone();
-            move || install_main_view(&app, &window, &ui, &cli, &updater)
-        });
         return Ok(());
     }
 
@@ -394,7 +379,20 @@ fn start(
             Ok(view)
         }
         Err(err) => {
-            window.set_content(Some(&missing_cli_view(&err.to_string())));
+            // The window weakly, so a poll still pending when `--background`
+            // destroys it below does not keep it alive.
+            let found = {
+                let app = app.clone();
+                let window = window.downgrade();
+                let ui = ui.clone();
+                let updater = updater.clone();
+                move |cli: Cli| {
+                    if let Some(window) = window.upgrade() {
+                        cli_installed(&app, &window, &ui, cli, &updater);
+                    }
+                }
+            };
+            window.set_content(Some(&install_cli::view(found)));
             Err(err.to_string())
         }
     };
@@ -451,6 +449,65 @@ fn start(
         pending: RefCell::new(Vec::new()),
     }));
     Ok(())
+}
+
+/// Whether this CLI has never been configured, so the first-run assistant has
+/// to have the window before any page can be built.
+///
+/// A machine where `adguard-cli configure` has never run has no `proxy.yaml`,
+/// and until it does, `config set` refuses every real key (contract §5).
+fn unconfigured(cli: &Cli) -> bool {
+    cli.config_path().is_some_and(|path| !path.is_file())
+}
+
+/// Give the window to the first-run assistant, wired to hand it to the real
+/// pages when it finishes. The caller holds the returned assistant in the
+/// [`Instance`] — see [`Instance::setup`] for why nothing else may.
+fn setup_assistant(
+    app: &adw::Application,
+    window: &adw::ApplicationWindow,
+    ui: &Rc<RefCell<Option<Instance>>>,
+    cli: Cli,
+    updater: &Rc<updater::Updater>,
+) -> Rc<setup::SetupAssistant> {
+    let toasts = adw::ToastOverlay::new();
+    let assistant = setup::SetupAssistant::new(cli.clone(), toasts.clone());
+    toasts.set_child(Some(assistant.widget()));
+    window.set_content(Some(&toasts));
+
+    assistant.connect_finished({
+        let app = app.clone();
+        let window = window.clone();
+        let ui = ui.clone();
+        let updater = updater.clone();
+        move || install_main_view(&app, &window, &ui, &cli, &updater)
+    });
+    assistant
+}
+
+/// AdGuard CLI turned up while the window was saying it was missing (#51) —
+/// installed from the button there, or any other way.
+///
+/// Carries on from where [`start`] would have been had it been there at
+/// launch: a fresh install has never been configured, so that is nearly
+/// always the first-run assistant, which is where activation and setup are.
+/// Only a non-background launch reaches here — `--background` with no CLI
+/// gives up in [`start`] — so there is a window on screen throughout.
+fn cli_installed(
+    app: &adw::Application,
+    window: &adw::ApplicationWindow,
+    ui: &Rc<RefCell<Option<Instance>>>,
+    cli: Cli,
+    updater: &Rc<updater::Updater>,
+) {
+    if unconfigured(&cli) {
+        let assistant = setup_assistant(app, window, ui, cli, updater);
+        if let Some(instance) = ui.borrow_mut().as_mut() {
+            instance.setup = Some(assistant);
+        }
+    } else {
+        install_main_view(app, window, ui, &cli, updater);
+    }
 }
 
 /// Put the real UI in the window once the first-run assistant is done with it.
@@ -645,21 +702,6 @@ fn connect_tray(
     });
 
     Ok(())
-}
-
-/// Shown when `adguard-cli` is not installed. Failing with an explanation
-/// beats crashing, since the GUI is useless without the CLI.
-fn missing_cli_view(message: &str) -> adw::ToolbarView {
-    let status = adw::StatusPage::builder()
-        .icon_name("dialog-error-symbolic")
-        .title("AdGuard CLI not found")
-        .description(message)
-        .build();
-
-    let view = adw::ToolbarView::new();
-    view.add_top_bar(&adw::HeaderBar::new());
-    view.set_content(Some(&status));
-    view
 }
 
 /// Sidebar entries, in order. The id doubles as the stack child name.

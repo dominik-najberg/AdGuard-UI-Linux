@@ -3,11 +3,16 @@
 //! The CLI is a user-local install on the reference machine
 //! (`~/.local/bin/adguard-cli` -> `~/.local/opt/adguard-cli/adguard-cli`),
 //! but it may equally be on `$PATH` or system-wide, so probe rather than assume.
+//! AdGuard's own installer, run as its knowledge base documents it, puts it in
+//! `/opt/adguard-cli` and only *offers* a link in `/usr/local/bin` — so an
+//! install whose owner answered no is on no `$PATH` at all.
 
 use std::env;
 use std::path::{Path, PathBuf};
 
 const BINARY: &str = "adguard-cli";
+/// AdGuard's installer's default directory when it is given no `-o`.
+const SYSTEM_INSTALL: &str = "/opt/adguard-cli";
 const ROOT_HELPER: &str = "adguard_root_helper";
 const CERT_INSTALLER: &str = "install_cert.sh";
 const DATA_SUBDIR: &str = "adguard-cli";
@@ -25,9 +30,9 @@ fn home() -> Option<PathBuf> {
 
 /// Locate the `adguard-cli` binary.
 ///
-/// Order: `$ADGUARD_CLI` override, then `$PATH`, then the known user-local
-/// install sites. Returns `None` when AdGuard CLI is not installed — callers
-/// must surface that as a clear message rather than panicking.
+/// Order: `$ADGUARD_CLI` override, then `$PATH`, then the known install sites
+/// ([`install_sites`]). Returns `None` when AdGuard CLI is not installed —
+/// callers must surface that as a clear message rather than panicking.
 pub fn cli_binary() -> Option<PathBuf> {
     if let Some(explicit) = env::var_os("ADGUARD_CLI") {
         let candidate = PathBuf::from(explicit);
@@ -45,13 +50,25 @@ pub fn cli_binary() -> Option<PathBuf> {
         }
     }
 
-    let home = home()?;
-    [
-        home.join(".local/bin").join(BINARY),
-        home.join(".local/opt/adguard-cli").join(BINARY),
-    ]
-    .into_iter()
-    .find(|candidate| candidate.is_file())
+    install_sites(home().as_deref())
+        .into_iter()
+        .find(|candidate| candidate.is_file())
+}
+
+/// Where AdGuard CLI lands when it is not on `$PATH`, most specific first.
+///
+/// The user-local pair is the reference machine's layout; `/opt/adguard-cli`
+/// is where AdGuard's installer puts it by default, and the one the *Install
+/// AdGuard CLI* button leads to. That one does not depend on `$HOME`, so a
+/// session without it still finds a system-wide install.
+fn install_sites(home: Option<&Path>) -> Vec<PathBuf> {
+    let mut sites = Vec::new();
+    if let Some(home) = home {
+        sites.push(home.join(".local/bin").join(BINARY));
+        sites.push(home.join(".local/opt/adguard-cli").join(BINARY));
+    }
+    sites.push(Path::new(SYSTEM_INSTALL).join(BINARY));
+    sites
 }
 
 /// AdGuard's own root helper, beside the **resolved** `adguard-cli` binary.
@@ -271,4 +288,30 @@ pub fn filters_db() -> Option<PathBuf> {
 /// SQLite catalogue of DNS filters. Open read-only.
 pub fn dns_filters_db() -> Option<PathBuf> {
     Some(data_dir()?.join("agflm_dns.db"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// AdGuard's installer, run as its knowledge base says, writes the binary
+    /// to `/opt/adguard-cli` and asks before linking it into `/usr/local/bin`.
+    /// Answering no must not leave this application saying it is not installed.
+    #[test]
+    fn the_installers_default_directory_is_probed_after_the_user_local_ones() {
+        let sites = install_sites(Some(Path::new("/home/u")));
+        assert_eq!(
+            sites,
+            [
+                PathBuf::from("/home/u/.local/bin/adguard-cli"),
+                PathBuf::from("/home/u/.local/opt/adguard-cli/adguard-cli"),
+                PathBuf::from("/opt/adguard-cli/adguard-cli"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_system_wide_install_is_found_without_a_home() {
+        assert_eq!(install_sites(None), [PathBuf::from("/opt/adguard-cli/adguard-cli")]);
+    }
 }
