@@ -133,7 +133,7 @@ pub fn search(live: &Path, query: &Query) -> Found {
             }
             found.hits.push(Hit {
                 at: request.at,
-                client: request.client.to_owned(),
+                client: request.client.into_owned(),
                 protocol: request.protocol.to_owned(),
                 target: request.target.map(str::to_owned),
                 host: request.host,
@@ -296,7 +296,7 @@ fn matches(request: &activity::Request, term: &str) -> bool {
     let fields = [
         request.target,
         request.host.as_deref(),
-        Some(request.client),
+        Some(&*request.client),
         request.rule,
         Some(request.protocol),
     ];
@@ -403,6 +403,19 @@ mod tests {
         ]);
         assert_eq!(targets(&search(&scratch.live(), &query("ADS chrome"))), ["https://ads.example.com/pixel"]);
         assert_eq!(search(&scratch.live(), &query("example")).hits.len(), 3);
+    }
+
+    /// A browser updated in place logs its name with an escaped
+    /// ` (deleted)`; it is found, and shown, under its own name.
+    #[test]
+    fn an_updated_browser_is_found_by_its_name() {
+        let scratch = Scratch::new("deleted");
+        scratch.write("access.log", &[
+            line("10:00:00", "chrome\\ (deleted)", "https://www.example.org/", "NONE", None),
+        ]);
+        let found = search(&scratch.live(), &query("chrome"));
+        assert_eq!(targets(&found), ["https://www.example.org/"]);
+        assert_eq!(found.hits[0].client, "chrome");
     }
 
     #[test]
