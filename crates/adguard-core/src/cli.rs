@@ -23,6 +23,7 @@ use crate::model::{
     ComponentUpdate, Consent, Filter, FilterAction, FilterSet, License, ProxyStatus, UpdatePart,
     UpdateReport, Verdict,
 };
+use crate::install::Channel;
 use crate::paths;
 
 /// Deadline for the local commands — `status`, `config get/set`.
@@ -276,12 +277,28 @@ pub enum Error {
     UnnamedUserscript,
 }
 
+/// What `--version` says about this install. See [`Cli::installed`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Installed {
+    /// The banner, `AdGuard CLI v1.4.13`.
+    pub banner: String,
+    /// A newer build on the configured update channel, as [`Output::newer`].
+    pub newer: Option<String>,
+}
+
 /// Captured, ANSI-stripped result of one invocation.
 #[derive(Debug, Clone)]
 pub struct Output {
+    /// Everything the command printed, less AdGuard's update hint — see
+    /// [`split_update_hint`] for why that is taken out here and not by each
+    /// parser.
     pub stdout: String,
     #[allow(dead_code)]
     pub stderr: String,
+    /// The AdGuard CLI version the hint said is available on the configured
+    /// update channel, as AdGuard spelled it (`1.5.0-nightly.8`). `None` when
+    /// there was no hint, which is the ordinary case on an up-to-date install.
+    pub newer: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -483,6 +500,9 @@ impl Cli {
         let until = Instant::now() + COLLECT_GRACE;
         let stdout = strip_ansi(&collect(stdout, until));
         let stderr = strip_ansi(&collect(stderr, until));
+        // Before anything reads it, failure classification included: the hint
+        // is appended to failures as well, and `last_line` would report it.
+        let (stdout, newer) = split_update_hint(&stdout);
 
         if !status.success() {
             // Exit 1 is not exclusively our own malformed command line, which
@@ -531,7 +551,11 @@ impl Cli {
             });
         }
 
-        Ok(Output { stdout, stderr })
+        Ok(Output {
+            stdout,
+            stderr,
+            newer,
+        })
     }
 
     /// The CLI's version banner, `AdGuard CLI v1.4.13`.
@@ -554,8 +578,48 @@ impl Cli {
     /// is refused. The licence could still be lost in the milliseconds between
     /// the two, but that is a window, not a certainty.
     pub fn version(&self) -> Result<String, Error> {
+        Ok(self.installed()?.banner)
+    }
+
+    /// [`Self::version`], with what AdGuard said about a newer build on the
+    /// configured update channel — which `--version` reports for free, as every
+    /// command does (contract §14), so the About page learns it without
+    /// `check-update` and its downloads. Same licence guard as [`Self::version`].
+    pub fn installed(&self) -> Result<Installed, Error> {
         self.license()?;
-        Ok(self.run(&["--version"])?.stdout.trim().to_owned())
+        let out = self.run(&["--version"])?;
+        Ok(Installed {
+            banner: out.stdout.trim().to_owned(),
+            newer: out.newer,
+        })
+    }
+
+    /// Point AdGuard CLI at an update channel.
+    ///
+    /// Always the lowercase name. The CLI **accepts** `NIGHTLY` — exit 0,
+    /// `Config has been updated`, and the file holds `'NIGHTLY'` — and then
+    /// reads it back as no channel at all: the very next invocation reports
+    /// `release` and rewrites the file to say so (contract §14). The same is
+    /// true of `default`, the fourth value it lists as valid. So the only
+    /// values worth writing are the three that survive a re-read.
+    ///
+    /// The CLI also accepts this key before `configure` has created
+    /// `proxy.yaml`, and stores it somewhere else then (contract §5); the
+    /// About page that calls this is only built once the file exists.
+    pub fn set_update_channel(&self, channel: Channel) -> Result<Applied, Error> {
+        self.config_set(crate::config::key::UPDATE_CHANNEL, channel.branch())
+    }
+
+    /// What AdGuard says is newer on the configured channel, if anything.
+    ///
+    /// Reads the hint off the cheapest command there is. **Not off the `config
+    /// set` that changed the channel**: that command prints the answer AdGuard
+    /// had cached for the channel it was leaving — switching beta to nightly
+    /// announced beta's `1.5.0-rc.2`, and switching to release announced it
+    /// again — and only the invocation after it speaks for the new one
+    /// (contract §14).
+    pub fn newer_release(&self) -> Result<Option<String>, Error> {
+        Ok(self.run(&["config", "get", crate::config::key::UPDATE_CHANNEL])?.newer)
     }
 
     pub fn status(&self) -> Result<ProxyStatus, Error> {
@@ -660,10 +724,12 @@ impl Cli {
     /// says a catalogue moved, and the catalogue itself says what it moved to.
     pub fn check_update(&self) -> Result<UpdateReport, Error> {
         let out = self.run_within(&["check-update"], NETWORK_TIMEOUT)?;
-        parse_update_report(&out.stdout).ok_or_else(|| Error::Unparseable {
-            args: "check-update".to_owned(),
-            output: out.stdout.clone(),
-        })
+        parse_update_report(&out.stdout)
+            .map(|report| answer_app(report, out.newer.as_deref()))
+            .ok_or_else(|| Error::Unparseable {
+                args: "check-update".to_owned(),
+                output: out.stdout.clone(),
+            })
     }
 
     /// Read the licence.
@@ -1974,6 +2040,85 @@ fn strip_ansi(raw: &[u8]) -> String {
     String::from_utf8_lossy(&strip_ansi_escapes::strip(raw)).into_owned()
 }
 
+/// What opens and closes AdGuard's update hint, and the line that follows it.
+const HINT_OPENS: &str = "> AdGuard CLI v";
+const HINT_CLOSES: &str = " is now available";
+const HINT_FOLLOWS: &str = "You can update AdGuard CLI by running";
+
+/// Take AdGuard's "newer version" hint out of a command's output.
+///
+/// Measured 15 October 2026 on v1.4.13 (contract §14): whenever the configured
+/// update channel has a build newer than the one installed, **every** command
+/// ends with
+///
+/// ```text
+///
+/// > AdGuard CLI v1.5.0-nightly.8 is now available
+/// You can update AdGuard CLI by running `/path/to/adguard-cli update`
+/// ```
+///
+/// `--version`, `status`, `license`, the lists, `config get` and `config set`
+/// alike, at exit 0 and otherwise. On the release channel nothing newer than
+/// 1.4.13 has existed since this project began, which is why no fixture held it
+/// — but it is a matter of time there too, and on beta or nightly it is the
+/// normal state. Left in, it is read as data: the About page's version row
+/// would carry it, and `start`, `stop` and `restart`, which report their last
+/// line, would answer every press with *You can update AdGuard CLI by running…*.
+///
+/// So it comes out here, once, before any parser sees the output, and what it
+/// said is kept as a value. Only the exact two-line shape is taken; anything
+/// else is left exactly where it was.
+fn split_update_hint(stdout: &str) -> (String, Option<String>) {
+    let lines: Vec<&str> = stdout.lines().collect();
+    let Some((at, newer)) = lines.iter().enumerate().find_map(|(at, line)| {
+        line.trim()
+            .strip_prefix(HINT_OPENS)
+            .and_then(|rest| rest.strip_suffix(HINT_CLOSES))
+            .filter(|version| !version.is_empty() && !version.contains(char::is_whitespace))
+            .map(|version| (at, version.to_owned()))
+    }) else {
+        return (stdout.to_owned(), None);
+    };
+
+    let follows = lines
+        .get(at + 1)
+        .is_some_and(|line| line.trim().starts_with(HINT_FOLLOWS));
+    let end = if follows { at + 2 } else { at + 1 };
+    let mut kept: Vec<&str> = lines[..at].to_vec();
+    // The blank line AdGuard puts in front of it goes with it.
+    if kept.last().is_some_and(|line| line.trim().is_empty()) {
+        kept.pop();
+    }
+    kept.extend_from_slice(&lines[end..]);
+
+    let mut text = kept.join("\n");
+    if !text.is_empty() && stdout.ends_with('\n') {
+        text.push('\n');
+    }
+    (text, Some(newer))
+}
+
+/// Give `check-update`'s app line back the answer [`split_update_hint`] took.
+///
+/// On a channel with something newer, the line after `Checking app updates...`
+/// *is* the hint — measured, a blank line and then the two hint lines — so
+/// once the hint is out the app header looks unanswered. It is put back as
+/// AdGuard's own sentence, less the `>`, and classified for what it says.
+fn answer_app(mut report: UpdateReport, newer: Option<&str>) -> UpdateReport {
+    let Some(newer) = newer else {
+        return report;
+    };
+    if let Some(app) = report
+        .components
+        .iter_mut()
+        .find(|component| component.part == UpdatePart::App && component.said.is_empty())
+    {
+        app.said = format!("AdGuard CLI v{newer}{HINT_CLOSES}");
+        app.verdict = Verdict::Available;
+    }
+    report
+}
+
 /// Recognise the CLI complaining that the install is not licensed.
 ///
 /// Measured on v1.4.13 against a sandbox `$XDG_DATA_HOME`, which is unlicensed
@@ -2326,6 +2471,76 @@ fn activation_url(stdout: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The tail every command carried on the nightly channel, measured
+    /// 15 October 2026 on v1.4.13 (contract §14).
+    const HINT: &str = "\n> AdGuard CLI v1.5.0-nightly.8 is now available\n\
+        You can update AdGuard CLI by running `/home/u/.local/bin/adguard-cli update`\n";
+
+    #[test]
+    fn the_update_hint_is_taken_off_the_version_banner() {
+        let (stdout, newer) = split_update_hint(&format!("AdGuard CLI v1.4.13\n{HINT}"));
+        assert_eq!(stdout, "AdGuard CLI v1.4.13\n");
+        assert_eq!(newer.as_deref(), Some("1.5.0-nightly.8"));
+    }
+
+    /// `start`, `stop` and `restart` report their last line. With the hint
+    /// left in, every press would be answered with the advice to update.
+    #[test]
+    fn the_last_line_after_the_hint_is_the_commands_own() {
+        let measured = format!(
+            "The AdGuard proxy server is not running\n\
+             You can start the proxy server by running `/home/u/.local/bin/adguard-cli start`\n{HINT}"
+        );
+        let (stdout, _) = split_update_hint(&measured);
+        assert_eq!(
+            last_line(&stdout).as_deref(),
+            Some("You can start the proxy server by running `/home/u/.local/bin/adguard-cli start`")
+        );
+        assert_eq!(parse_status(&stdout).map(|status| status.running), Some(false));
+    }
+
+    #[test]
+    fn output_without_the_hint_is_left_exactly_as_it_was() {
+        for stdout in ["AdGuard CLI v1.4.13\n", "", "update_channel = release\n", "no newline"] {
+            assert_eq!(split_update_hint(stdout), (stdout.to_owned(), None));
+        }
+    }
+
+    /// Only the exact shape is taken. A line that merely mentions a version
+    /// being available is someone else's sentence, and stays.
+    #[test]
+    fn a_look_alike_line_is_not_taken() {
+        let stdout = "> AdGuard CLI v is now available\nA new version 1.5.0 is now available\n";
+        assert_eq!(split_update_hint(stdout), (stdout.to_owned(), None));
+    }
+
+    /// `check-update` on the nightly channel, measured: the app header is
+    /// followed by a blank line and the hint. Once the hint is out, the app
+    /// line is answered from it, in AdGuard's words, and reaches the notice.
+    #[test]
+    fn check_update_answers_the_app_line_from_the_hint() {
+        let measured = format!(
+            "Checking filters updates...\n1 filter(s) updated\n\
+             Checking SafebrowsingV2 updates...\nUpdated\n\
+             Checking CRLite updates...\nUpdated\n\
+             Checking app updates...\n{HINT}"
+        );
+        let (stdout, newer) = split_update_hint(&measured);
+        let report = answer_app(parse_update_report(&stdout).unwrap(), newer.as_deref());
+        let app = report.part(&UpdatePart::App).unwrap();
+        assert_eq!(app.verdict, Verdict::Available);
+        assert_eq!(report.app_notice(), Some("AdGuard CLI v1.5.0-nightly.8 is now available"));
+        assert_eq!(report.failures().count(), 0);
+    }
+
+    /// An up-to-date app line is AdGuard's answer and is not overwritten.
+    #[test]
+    fn an_answered_app_line_is_left_alone() {
+        let report = parse_update_report("Checking app updates...\nUp to date\n").unwrap();
+        let report = answer_app(report, Some("9.9.9"));
+        assert_eq!(report.part(&UpdatePart::App).unwrap().verdict, Verdict::UpToDate);
+    }
 
     /// Real captured output, including the ANSI bold the CLI emits even when
     /// piped. Keep the escapes: the stripper is part of what is under test.

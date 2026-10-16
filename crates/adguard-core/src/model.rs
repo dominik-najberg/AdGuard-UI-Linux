@@ -212,13 +212,19 @@ pub enum Verdict {
     Changed,
     /// `Failed to update filters`, whichever component it was about.
     Failed,
+    /// The application line, saying a newer AdGuard CLI is available on the
+    /// configured update channel.
+    ///
+    /// Measured 15 October 2026 on the nightly channel (contract §14). It is
+    /// AdGuard's hint, which every command carries in that state, and
+    /// `check-update`'s app line is the same two lines; the parse takes it out
+    /// of the output and `Cli::check_update` puts it back here.
+    Available,
     /// A shape nobody has measured, including a header the CLI never answered.
     ///
-    /// Not an error and not silently discarded: shown as itself. **The
-    /// application line reaches the user through here by design** — what
-    /// `check-update` says when a newer AdGuard CLI exists has never been
-    /// observed (contract §14), so anything that is not `Up to date` is
-    /// repeated verbatim rather than interpreted.
+    /// Not an error and not silently discarded: shown as itself. Until the
+    /// [`Self::Available`] shape was measured, the application line reached the
+    /// user through here by design, and anything else it says still does.
     Unrecognised,
 }
 

@@ -24,7 +24,7 @@
 use std::path::{Path, PathBuf};
 
 use adguard_core::config::{key, listen_address_plan};
-use adguard_core::{AddressPlan, Cli, Config};
+use adguard_core::{AddressPlan, Channel, Cli, Config};
 
 /// A scratch `$XDG_DATA_HOME` seeded with a copy of the machine's `proxy.yaml`.
 ///
@@ -1178,4 +1178,29 @@ fn the_cli_does_not_range_check_the_dns_listen_port() {
         assert_eq!(sandbox.config().int_at(key::DNS_LISTEN_PORT), Some(expected));
         assert!(sandbox.config().dns_listen_port().is_some(), "{written} should read");
     }
+}
+
+/// `update_channel` keeps only its three lowercase names (contract §14).
+///
+/// `config set` accepts `NIGHTLY` and writes it, and the next invocation reads
+/// it as release and rewrites the file to say so. That is why the About page
+/// writes through `set_update_channel`, never a raw value, and why
+/// `Config::update_channel` reads case-sensitively.
+#[test]
+#[ignore = "invokes the real adguard-cli"]
+fn the_update_channel_keeps_only_lowercase_names() {
+    let Some(sandbox) = Sandbox::new("channel") else { return };
+
+    for channel in Channel::ALL {
+        sandbox.cli.set_update_channel(channel).expect("a lowercase channel is accepted");
+        assert_eq!(sandbox.config().update_channel(), channel);
+        // A second invocation, which is the one that would revert it.
+        let _ = sandbox.cli.newer_release();
+        assert_eq!(sandbox.config().update_channel(), channel, "{} survives a re-read", channel.branch());
+    }
+
+    sandbox.set(key::UPDATE_CHANNEL, "NIGHTLY");
+    assert_eq!(sandbox.config().str_at(key::UPDATE_CHANNEL), Some("NIGHTLY"), "written verbatim");
+    let _ = sandbox.cli.newer_release();
+    assert_eq!(sandbox.config().str_at(key::UPDATE_CHANNEL), Some("release"), "and then reverted");
 }
