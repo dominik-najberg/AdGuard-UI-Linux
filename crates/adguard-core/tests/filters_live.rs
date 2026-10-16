@@ -13,6 +13,8 @@ use adguard_core::paths;
 
 use std::path::PathBuf;
 
+use rusqlite::{Connection, OpenFlags};
+
 /// Returns the DB path, or `None` if this machine has no AdGuard install.
 fn catalogue_path(which: Option<PathBuf>) -> Option<PathBuf> {
     let path = which?;
@@ -335,39 +337,73 @@ fn reads_one_filter_state() {
 /// `-wal`/`-shm` pair appearing could only mean a read-write open, so their
 /// absence was the check. **1.5.0 converts both catalogues to WAL** —
 /// measured 17 October 2026 on v1.5.0-rc.2, byte 18 of each header reads 2 —
-/// and in WAL mode SQLite keeps those two files beside the database for every
-/// connection, read-only ones included, AdGuard's own among them. So the
-/// side-files are only evidence on a rollback database; the database file
-/// itself, unchanged in size and modification time, is the evidence on both.
+/// and in WAL mode SQLite gives every reader a `-shm` index and an empty
+/// `-wal`, read-only ones included, AdGuard's own among them. Neither URI flag
+/// gets round it against a live writer: `readonly_shm=1` refuses the open (and
+/// still leaves a `-wal`), and `immutable=1` would read straight past the
+/// daemon's own writes. So the side-files are only evidence on a rollback
+/// database; the database's bytes, and an empty `-wal`, are the evidence on
+/// both.
+///
+/// It reads a private snapshot, not the live file. The live side-files come
+/// and go with every `adguard-cli` call — a read-write close checkpoints and
+/// deletes them, measured with `filters list` — and a checkpoint rewrites the
+/// database itself, so any before-and-after check taken on the live file is a
+/// race against the daemon, one this suite lost intermittently.
 #[test]
 fn opening_does_not_write_the_catalogue() {
-    let Some(path) = catalogue_path(paths::filters_db()) else {
+    let Some(live) = catalogue_path(paths::filters_db()) else {
         return;
     };
+    let dir = std::env::temp_dir().join(format!("adguard-ui-filters-live-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create scratch dir");
+    let path = dir.join("agflm_standard.db");
+
+    // `VACUUM INTO` rather than a file copy: it is one read transaction, so a
+    // checkpoint landing mid-copy cannot tear the snapshot.
+    let source = Connection::open_with_flags(&live, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .expect("open the live catalogue");
+    let live_mode: String = source
+        .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+        .expect("read the live journal mode");
+    source
+        .execute("VACUUM INTO ?1", [path.to_str().expect("UTF-8 temp path")])
+        .expect("snapshot the live catalogue");
+    drop(source);
+
+    // The snapshot comes out in rollback-journal mode. Put a WAL catalogue's
+    // back in WAL, so the open below takes the same path the live one would;
+    // this writer is the last to close, so it takes its side-files with it.
+    let journal_is_wal = live_mode.eq_ignore_ascii_case("wal");
+    if journal_is_wal {
+        let writer = Connection::open(&path).expect("open the snapshot");
+        let mode: String = writer
+            .query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))
+            .expect("switch the snapshot to WAL");
+        assert_eq!(mode, "wal");
+        drop(writer);
+    }
+
     let wal = path.with_extension("db-wal");
     let shm = path.with_extension("db-shm");
-    let wal_before = wal.exists();
-    let shm_before = shm.exists();
-    let meta_before = std::fs::metadata(&path).expect("catalogue metadata");
-    let journal_is_wal = std::fs::read(&path)
-        .ok()
-        .and_then(|bytes| bytes.get(18).copied())
-        == Some(2);
+    assert!(!wal.exists() && !shm.exists(), "the snapshot should start without side-files");
+    let before = std::fs::read(&path).expect("read the snapshot");
 
     {
         let catalogue = Catalogue::open(&path).expect("should open read-only");
         let _ = catalogue.read(&Locale::from_env()).expect("should read");
     }
 
-    let meta_after = std::fs::metadata(&path).expect("catalogue metadata");
-    assert_eq!(meta_after.len(), meta_before.len(), "a read-only open changed the catalogue's size");
-    assert_eq!(
-        meta_after.modified().ok(),
-        meta_before.modified().ok(),
-        "a read-only open wrote the catalogue"
-    );
-    if !journal_is_wal {
-        assert_eq!(wal.exists(), wal_before, "read-only open created {wal:?}");
-        assert_eq!(shm.exists(), shm_before, "read-only open created {shm:?}");
+    let after = std::fs::read(&path).expect("read the snapshot");
+    assert!(after == before, "a read-only open wrote the catalogue {path:?}");
+    if journal_is_wal {
+        let wal_len = std::fs::metadata(&wal).map_or(0, |meta| meta.len());
+        assert_eq!(wal_len, 0, "a read-only open wrote to {wal:?}");
+    } else {
+        assert!(!wal.exists(), "read-only open created {wal:?}");
+        assert!(!shm.exists(), "read-only open created {shm:?}");
     }
+
+    let _ = std::fs::remove_dir_all(&dir);
 }
