@@ -62,7 +62,7 @@ jobs:
             ca-certificates curl git dbus-daemon
           pkg-config --modversion gtk4 libadwaita-1
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # rustup rather than the distribution's cargo: the gtk4 crates expect a
       # newer toolchain than Ubuntu packages (docs/building.md §1). The floor is
@@ -76,7 +76,7 @@ jobs:
       - name: Cargo version
         run: cargo --version && rustc --version
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index
@@ -107,7 +107,7 @@ jobs:
             gcc pkgconf-pkg-config gtk4-devel libadwaita-devel git curl dbus-daemon
           pkg-config --modversion gtk4 libadwaita-1
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust
         run: |
@@ -118,7 +118,7 @@ jobs:
       # Its own key: the first job's `target` was built against Ubuntu's
       # libraries, and restoring it here would make cargo rebuild everything
       # anyway while costing the download.
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index
