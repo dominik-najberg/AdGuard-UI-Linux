@@ -53,6 +53,12 @@
     application is its first release.
   -->
   <releases>
+    <release version="1.12.0" type="stable" date="2026-10-17">
+      <url type="details">https://github.com/dominik-najberg/AdGuard-UI-Linux/releases/tag/v1.12.0</url>
+      <description>
+        <p>When AdGuard CLI is missing, the window offers AdGuard's own installer in a terminal. The About page can switch AdGuard CLI between its release, beta and nightly update channels, and shows when a newer build is available, with the command that installs it.</p>
+      </description>
+    </release>
     <release version="1.11.2" type="stable" date="2026-10-15">
       <url type="details">https://github.com/dominik-najberg/AdGuard-UI-Linux/releases/tag/v1.11.2</url>
       <description>

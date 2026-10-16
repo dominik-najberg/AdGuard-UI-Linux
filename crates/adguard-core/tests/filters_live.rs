@@ -330,24 +330,28 @@ fn reads_one_filter_state() {
     );
 }
 
-/// The databases are the live daemon's. Opening one read-only must never write
-/// to it.
+/// The databases are the live daemon's, and opening them must not write to
+/// them.
 ///
-/// What it cannot promise is that no side-car files appear. The catalogues are
-/// in WAL mode, and SQLite gives every reader of a WAL database a `-shm` index
-/// and an empty `-wal`, read-only or not — measured, and neither URI flag gets
-/// round it against a live writer: `readonly_shm=1` refuses the open (and still
-/// leaves a `-wal`), and `immutable=1` would read straight past the daemon's
-/// own writes. The side-cars are SQLite's coordination, which the daemon makes
-/// itself every time it opens the file. The database's bytes are what is ours
-/// to leave alone.
+/// On AdGuard CLI 1.4.13 the catalogues used a rollback journal, where a
+/// `-wal`/`-shm` pair appearing could only mean a read-write open, so their
+/// absence was the check. **1.5.0 converts both catalogues to WAL** —
+/// measured 17 October 2026 on v1.5.0-rc.2, byte 18 of each header reads 2 —
+/// and in WAL mode SQLite gives every reader a `-shm` index and an empty
+/// `-wal`, read-only ones included, AdGuard's own among them. Neither URI flag
+/// gets round it against a live writer: `readonly_shm=1` refuses the open (and
+/// still leaves a `-wal`), and `immutable=1` would read straight past the
+/// daemon's own writes. So the side-files are only evidence on a rollback
+/// database; the database's bytes, and an empty `-wal`, are the evidence on
+/// both.
 ///
-/// So this reads a private snapshot, not the live file. The live side-cars come
+/// It reads a private snapshot, not the live file. The live side-files come
 /// and go with every `adguard-cli` call — a read-write close checkpoints and
-/// deletes them, measured with `filters list` — which made an existence check
-/// taken before and after the open a race this suite lost intermittently.
+/// deletes them, measured with `filters list` — and a checkpoint rewrites the
+/// database itself, so any before-and-after check taken on the live file is a
+/// race against the daemon, one this suite lost intermittently.
 #[test]
-fn opening_never_writes_the_database() {
+fn opening_does_not_write_the_catalogue() {
     let Some(live) = catalogue_path(paths::filters_db()) else {
         return;
     };
@@ -360,24 +364,30 @@ fn opening_never_writes_the_database() {
     // checkpoint landing mid-copy cannot tear the snapshot.
     let source = Connection::open_with_flags(&live, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .expect("open the live catalogue");
+    let live_mode: String = source
+        .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+        .expect("read the live journal mode");
     source
         .execute("VACUUM INTO ?1", [path.to_str().expect("UTF-8 temp path")])
         .expect("snapshot the live catalogue");
     drop(source);
 
-    // The snapshot comes out in rollback-journal mode. Put it back in WAL, as
-    // the live file is, so the open below takes the same path; this writer is
-    // the last to close, so it takes its side-cars with it.
-    let writer = Connection::open(&path).expect("open the snapshot");
-    let mode: String = writer
-        .query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))
-        .expect("switch the snapshot to WAL");
-    assert_eq!(mode, "wal");
-    drop(writer);
+    // The snapshot comes out in rollback-journal mode. Put a WAL catalogue's
+    // back in WAL, so the open below takes the same path the live one would;
+    // this writer is the last to close, so it takes its side-files with it.
+    let journal_is_wal = live_mode.eq_ignore_ascii_case("wal");
+    if journal_is_wal {
+        let writer = Connection::open(&path).expect("open the snapshot");
+        let mode: String = writer
+            .query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))
+            .expect("switch the snapshot to WAL");
+        assert_eq!(mode, "wal");
+        drop(writer);
+    }
 
     let wal = path.with_extension("db-wal");
     let shm = path.with_extension("db-shm");
-    assert!(!wal.exists() && !shm.exists(), "the snapshot should start without side-cars");
+    assert!(!wal.exists() && !shm.exists(), "the snapshot should start without side-files");
     let before = std::fs::read(&path).expect("read the snapshot");
 
     {
@@ -386,9 +396,14 @@ fn opening_never_writes_the_database() {
     }
 
     let after = std::fs::read(&path).expect("read the snapshot");
-    assert!(after == before, "read-only open wrote to {path:?}");
-    let wal_len = std::fs::metadata(&wal).map_or(0, |meta| meta.len());
-    assert_eq!(wal_len, 0, "read-only open wrote to {wal:?}");
+    assert!(after == before, "a read-only open wrote the catalogue {path:?}");
+    if journal_is_wal {
+        let wal_len = std::fs::metadata(&wal).map_or(0, |meta| meta.len());
+        assert_eq!(wal_len, 0, "a read-only open wrote to {wal:?}");
+    } else {
+        assert!(!wal.exists(), "read-only open created {wal:?}");
+        assert!(!shm.exists(), "read-only open created {shm:?}");
+    }
 
     let _ = std::fs::remove_dir_all(&dir);
 }

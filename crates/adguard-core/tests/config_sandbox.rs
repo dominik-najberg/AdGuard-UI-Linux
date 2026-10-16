@@ -1183,9 +1183,10 @@ fn the_cli_does_not_range_check_the_dns_listen_port() {
 /// `update_channel` keeps only its three lowercase names (contract §14).
 ///
 /// `config set` accepts `NIGHTLY` and writes it, and the next invocation reads
-/// it as release and rewrites the file to say so. That is why the About page
-/// writes through `set_update_channel`, never a raw value, and why
-/// `Config::update_channel` reads case-sensitively.
+/// it as no channel and rewrites the file to the build's own — release on
+/// v1.4.13, beta on v1.5.0-rc.2. That is why the About page writes through
+/// `set_update_channel`, never a raw value, and why `Config::update_channel`
+/// declines to read anything else.
 #[test]
 #[ignore = "invokes the real adguard-cli"]
 fn the_update_channel_keeps_only_lowercase_names() {
@@ -1193,14 +1194,18 @@ fn the_update_channel_keeps_only_lowercase_names() {
 
     for channel in Channel::ALL {
         sandbox.cli.set_update_channel(channel).expect("a lowercase channel is accepted");
-        assert_eq!(sandbox.config().update_channel(), channel);
+        assert_eq!(sandbox.config().update_channel(), Some(channel));
         // A second invocation, which is the one that would revert it.
         let _ = sandbox.cli.newer_release();
-        assert_eq!(sandbox.config().update_channel(), channel, "{} survives a re-read", channel.branch());
+        assert_eq!(sandbox.config().update_channel(), Some(channel), "{} survives a re-read", channel.branch());
     }
 
     sandbox.set(key::UPDATE_CHANNEL, "NIGHTLY");
     assert_eq!(sandbox.config().str_at(key::UPDATE_CHANNEL), Some("NIGHTLY"), "written verbatim");
-    let _ = sandbox.cli.newer_release();
-    assert_eq!(sandbox.config().str_at(key::UPDATE_CHANNEL), Some("release"), "and then reverted");
+    assert_eq!(sandbox.config().update_channel(), None, "and not read as a channel");
+    // AdGuard's answer, whichever channel this build falls back to, is one of
+    // the three — and it is what the file says afterwards.
+    let answered = sandbox.cli.update_channel().expect("config get").expect("a channel");
+    assert_ne!(answered, Channel::Nightly, "`NIGHTLY` is not nightly");
+    assert_eq!(sandbox.config().update_channel(), Some(answered), "the file was rewritten to match");
 }

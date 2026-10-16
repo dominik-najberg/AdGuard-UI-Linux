@@ -152,23 +152,22 @@ impl Config {
         }
     }
 
-    /// The update channel AdGuard CLI acts on.
+    /// The update channel in the file, when the file names one AdGuard keeps.
     ///
     /// **Exact and lowercase, unlike [`Self::choice_at`]** — and that is a
     /// measurement, not a style. The CLI accepts `config set update_channel
-    /// NIGHTLY` and writes `'NIGHTLY'`, then reads it as no channel: `config
-    /// get` answers `release`, and the same invocation rewrites the file to
-    /// `'release'`. `default`, which it also lists as valid, goes the same way
-    /// (contract §14). Every invocation rewrites `proxy.yaml`, so whatever else
-    /// is in the file is already release by the time the Status page's next
-    /// poll has run; answering that now is answering what AdGuard will do.
-    /// A missing key is release too — that is the stock value.
-    pub fn update_channel(&self) -> Channel {
-        let value = self.str_at(key::UPDATE_CHANNEL).unwrap_or_default();
-        Channel::ALL
-            .into_iter()
-            .find(|channel| channel.branch() == value)
-            .unwrap_or(Channel::Release)
+    /// NIGHTLY` and writes `'NIGHTLY'`, then reads it as no channel at all and
+    /// rewrites the file on its next invocation. `default`, which it also lists
+    /// as valid, goes the same way (contract §14).
+    ///
+    /// **What it rewrites it to depends on the build**, which is why anything
+    /// else is `None` rather than a guess: release on v1.4.13, a release build;
+    /// beta on v1.5.0-rc.2, a beta one — even for `'NIGHTLY'`. So for those the
+    /// answer is AdGuard's, through `Cli::update_channel`. A missing key is
+    /// `None` for the same reason.
+    pub fn update_channel(&self) -> Option<Channel> {
+        let value = self.str_at(key::UPDATE_CHANNEL)?;
+        Channel::ALL.into_iter().find(|channel| channel.branch() == value)
     }
 
     pub fn str_at(&self, key: &str) -> Option<&str> {
@@ -1483,21 +1482,21 @@ stealthmode:
     }
 
     /// Only the three lowercase names are a channel to AdGuard. `'NIGHTLY'`
-    /// and `'default'` are written by `config set` and then read by the CLI as
-    /// release, which rewrites the file to say so (contract §14) — so reading
-    /// them case-insensitively, as `choice_at` does, would show a channel
-    /// AdGuard is not on.
+    /// and `'default'` are written by `config set` and then rewritten by the
+    /// CLI to whatever channel its own build comes from (contract §14) — so
+    /// reading them case-insensitively, as `choice_at` does, would show a
+    /// channel AdGuard is not on, and so would picking one.
     #[test]
-    fn the_update_channel_is_what_adguard_acts_on() {
+    fn the_update_channel_is_read_only_when_adguard_would_keep_it() {
         let read = |yaml: &str| Config::parse(yaml, Path::new("t.yaml")).unwrap().update_channel();
 
-        assert_eq!(read("update_channel: 'release'"), Channel::Release);
-        assert_eq!(read("update_channel: 'beta'"), Channel::Beta);
-        assert_eq!(read("update_channel: nightly"), Channel::Nightly);
-        assert_eq!(read("update_channel: 'NIGHTLY'"), Channel::Release, "measured: read as release");
-        assert_eq!(read("update_channel: 'default'"), Channel::Release, "measured: read as release");
-        assert_eq!(read("update_channel: 'bogus'"), Channel::Release);
-        assert_eq!(read("log_level: 'info'"), Channel::Release, "a missing key is the stock value");
+        assert_eq!(read("update_channel: 'release'"), Some(Channel::Release));
+        assert_eq!(read("update_channel: 'beta'"), Some(Channel::Beta));
+        assert_eq!(read("update_channel: nightly"), Some(Channel::Nightly));
+        assert_eq!(read("update_channel: 'NIGHTLY'"), None, "AdGuard's to answer");
+        assert_eq!(read("update_channel: 'default'"), None, "AdGuard's to answer");
+        assert_eq!(read("update_channel: 'bogus'"), None);
+        assert_eq!(read("log_level: 'info'"), None);
     }
 
     /// The CLI writes an enum value back verbatim, so `'INFO'` and `'socks5'`

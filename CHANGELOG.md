@@ -11,6 +11,28 @@ This file is the one changelog.
 
 ---
 
+## 1.12.0 — 17 October 2026
+
+### Install AdGuard CLI from the window
+
+When AdGuard CLI is not installed, the window no longer just says so. It offers *Install AdGuard CLI…*, which opens a terminal running the command from AdGuard's knowledge base, unchanged. You can pick the release, beta or nightly version first. AdGuard's installer downloads AdGuard CLI from GitHub, asks for your password to create `/opt/adguard-cli`, and asks whether to link it into `/usr/local/bin`. The password goes to the terminal, never to AdGuard UI. If no terminal can be found, the command is copied instead. The window notices the install by itself and moves on to activation and setup. On CPUs AdGuard does not build for, the page explains why there is no button. ([#51](https://github.com/dominik-najberg/AdGuard-UI-Linux/issues/51))
+
+### AdGuard CLI in `/opt` is found
+
+AdGuard UI now also looks for AdGuard CLI in `/opt/adguard-cli`, where AdGuard's installer puts it. Before, an install whose `/usr/local/bin` link had been declined was reported as missing.
+
+### Switch AdGuard CLI's update channel
+
+The About page has an *AdGuard CLI channel* row under the CLI's version: Release, Beta or Nightly, AdGuard's own update channel setting. Switching downloads nothing. AdGuard UI asks AdGuard straight away whether that channel has a newer build, and shows the answer beside the version. When there is one, the command that installs it is directly below, with *Run in Terminal* to open it in a terminal. AdGuard UI never runs that update by itself.
+
+### AdGuard's update notice no longer shows up in the app
+
+When a newer AdGuard CLI is available, AdGuard adds a two-line notice to everything it prints. AdGuard UI read those lines as part of the output. The About page's version row would have carried them, and starting, stopping or restarting protection would have answered with "You can update AdGuard CLI by running…". AdGuard UI now takes the notice out before reading anything, and shows it once, on the About page. It appears on Beta and Nightly today, and on Release as soon as AdGuard publishes a version after 1.4.13.
+
+### The version row reads AdGuard CLI 1.5 correctly
+
+AdGuard CLI 1.5 prints a list of its internal components under its version number, and the About page showed the whole list in the version row. It now shows the version alone.
+
 ## 1.11.2 — 15 October 2026
 
 ### Activity counts the requests of a browser updated while it runs

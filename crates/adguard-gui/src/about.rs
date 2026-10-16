@@ -602,12 +602,24 @@ impl AboutPage {
         }
     }
 
-    /// Read the channel from `proxy.yaml`, as every other setting is read.
+    /// Read the channel from `proxy.yaml`, as every other setting is read —
+    /// and from AdGuard when the file holds something it will not keep, since
+    /// what it becomes depends on the build (contract §14).
     fn read_channel(self: &Rc<Self>) {
         let this = self.clone();
+        let cli = self.cli.clone();
         worker::run(
-            || Config::load().map(|config| config.update_channel()),
-            move |channel: Result<Channel, adguard_core::config::Error>| match channel {
+            move || {
+                let from_file = Config::load().map_err(|err| err.to_string())?.update_channel();
+                match from_file {
+                    Some(channel) => Ok(channel),
+                    None => cli
+                        .update_channel()
+                        .map_err(|err| err.to_string())?
+                        .ok_or_else(|| "AdGuard named no channel".to_owned()),
+                }
+            },
+            move |channel: Result<Channel, String>| match channel {
                 Ok(channel) => {
                     this.paint_channel(channel);
                     this.channel.set_sensitive(true);
