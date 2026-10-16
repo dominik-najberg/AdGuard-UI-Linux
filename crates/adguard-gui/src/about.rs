@@ -176,6 +176,8 @@ pub struct AboutPage {
     /// The CLI's own version banner, read off the main thread like everything
     /// else it says.
     cli_version: adw::ActionRow,
+    /// `1.5.0-rc.2 available` beside it, when AdGuard says so.
+    cli_standing: gtk::Label,
 
     /// Release, beta or nightly — the `update_channel` AdGuard offers itself
     /// from. Insensitive until the file has been read, and while a switch is
@@ -270,6 +272,11 @@ impl AboutPage {
         app_version.add_suffix(&ui_check);
 
         let cli_version = row("AdGuard CLI", PLACEHOLDER);
+        // A newer build AdGuard reports, beside the version it would replace,
+        // as AdGuard UI's own row shows its newer release. Blank otherwise.
+        let cli_standing = gtk::Label::builder().valign(gtk::Align::Center).build();
+        cli_standing.add_css_class("accent");
+        cli_version.add_suffix(&cli_standing);
         // Under the version, because it decides what the next one will be.
         let channel = adw::ComboRow::builder()
             .title("AdGuard CLI channel")
@@ -328,6 +335,43 @@ impl AboutPage {
         ui_notice.add(&ui_release);
         page.add(&ui_notice);
 
+        // ---- AdGuard CLI's own update, if AdGuard mentions one ----
+
+        // Directly under the versions, beside AdGuard UI's own notice, so the
+        // answer to a channel switch lands where the switch is. It used to sit
+        // below the update results, out of sight of the row that asks.
+
+        let notice = adw::PreferencesGroup::builder()
+            .title("AdGuard CLI update")
+            .description(WHY_NO_BUTTON)
+            .build();
+        notice.set_visible(false);
+        let notice_row = row("AdGuard reports", PLACEHOLDER);
+        notice_row.set_subtitle_lines(3);
+        notice_row.set_subtitle_selectable(true);
+        let command = row("To update, run", UPDATE_COMMAND);
+        command.set_subtitle_selectable(true);
+        let copy = gtk::Button::from_icon_name("edit-copy-symbolic");
+        copy.set_tooltip_text(Some("Copy the command"));
+        copy.set_valign(gtk::Align::Center);
+        copy.add_css_class("flat");
+        copy.connect_clicked({
+            let toasts = toasts.clone();
+            move |button| {
+                button.clipboard().set_text(UPDATE_COMMAND);
+                toasts.add_toast(toast("Command copied"));
+            }
+        });
+        command.add_suffix(&copy);
+        let run_update = gtk::Button::builder()
+            .label("Run in Terminal")
+            .valign(gtk::Align::Center)
+            .build();
+        command.add_suffix(&run_update);
+        notice.add(&notice_row);
+        notice.add(&command);
+        page.add(&notice);
+
         // ---- the update control ----
 
         let updates = adw::PreferencesGroup::builder()
@@ -375,39 +419,6 @@ impl AboutPage {
         results.set_visible(false);
         page.add(&results);
 
-        // ---- the application update, if AdGuard mentions one ----
-
-        let notice = adw::PreferencesGroup::builder()
-            .title("AdGuard CLI update")
-            .description(WHY_NO_BUTTON)
-            .build();
-        notice.set_visible(false);
-        let notice_row = row("AdGuard reports", PLACEHOLDER);
-        notice_row.set_subtitle_lines(3);
-        notice_row.set_subtitle_selectable(true);
-        let command = row("To update, run", UPDATE_COMMAND);
-        command.set_subtitle_selectable(true);
-        let copy = gtk::Button::from_icon_name("edit-copy-symbolic");
-        copy.set_tooltip_text(Some("Copy the command"));
-        copy.set_valign(gtk::Align::Center);
-        copy.add_css_class("flat");
-        copy.connect_clicked({
-            let toasts = toasts.clone();
-            move |button| {
-                button.clipboard().set_text(UPDATE_COMMAND);
-                toasts.add_toast(toast("Command copied"));
-            }
-        });
-        command.add_suffix(&copy);
-        let run_update = gtk::Button::builder()
-            .label("Run in Terminal")
-            .valign(gtk::Align::Center)
-            .build();
-        command.add_suffix(&run_update);
-        notice.add(&notice_row);
-        notice.add(&command);
-        page.add(&notice);
-
         // ---- the project ----
 
         // "Project", not "AdGuard UI": the Versions group above already has a
@@ -424,6 +435,7 @@ impl AboutPage {
             cli,
             toasts,
             cli_version,
+            cli_standing,
             channel: channel.clone(),
             channel_now: Cell::new(Channel::Release),
             painting: Cell::new(false),
@@ -578,10 +590,12 @@ impl AboutPage {
     fn render_newer(&self, newer: Option<&str>) {
         match newer {
             Some(newer) => {
+                self.cli_standing.set_label(&format!("{newer} available"));
                 self.notice_row.set_subtitle(&available(newer));
                 self.notice.set_visible(true);
             }
             None => {
+                self.cli_standing.set_label("");
                 self.notice.set_visible(false);
                 self.updating.set(false);
             }
