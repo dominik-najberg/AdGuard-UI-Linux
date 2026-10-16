@@ -13,6 +13,8 @@ use adguard_core::paths;
 
 use std::path::PathBuf;
 
+use rusqlite::{Connection, OpenFlags};
+
 /// Returns the DB path, or `None` if this machine has no AdGuard install.
 fn catalogue_path(which: Option<PathBuf>) -> Option<PathBuf> {
     let path = which?;
@@ -328,23 +330,65 @@ fn reads_one_filter_state() {
     );
 }
 
-/// The databases are the live daemon's. Opening read-only must not create
-/// side-car files (a read-write open would produce -wal/-shm).
+/// The databases are the live daemon's. Opening one read-only must never write
+/// to it.
+///
+/// What it cannot promise is that no side-car files appear. The catalogues are
+/// in WAL mode, and SQLite gives every reader of a WAL database a `-shm` index
+/// and an empty `-wal`, read-only or not — measured, and neither URI flag gets
+/// round it against a live writer: `readonly_shm=1` refuses the open (and still
+/// leaves a `-wal`), and `immutable=1` would read straight past the daemon's
+/// own writes. The side-cars are SQLite's coordination, which the daemon makes
+/// itself every time it opens the file. The database's bytes are what is ours
+/// to leave alone.
+///
+/// So this reads a private snapshot, not the live file. The live side-cars come
+/// and go with every `adguard-cli` call — a read-write close checkpoints and
+/// deletes them, measured with `filters list` — which made an existence check
+/// taken before and after the open a race this suite lost intermittently.
 #[test]
-fn opening_does_not_create_wal_files() {
-    let Some(path) = catalogue_path(paths::filters_db()) else {
+fn opening_never_writes_the_database() {
+    let Some(live) = catalogue_path(paths::filters_db()) else {
         return;
     };
+    let dir = std::env::temp_dir().join(format!("adguard-ui-filters-live-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create scratch dir");
+    let path = dir.join("agflm_standard.db");
+
+    // `VACUUM INTO` rather than a file copy: it is one read transaction, so a
+    // checkpoint landing mid-copy cannot tear the snapshot.
+    let source = Connection::open_with_flags(&live, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .expect("open the live catalogue");
+    source
+        .execute("VACUUM INTO ?1", [path.to_str().expect("UTF-8 temp path")])
+        .expect("snapshot the live catalogue");
+    drop(source);
+
+    // The snapshot comes out in rollback-journal mode. Put it back in WAL, as
+    // the live file is, so the open below takes the same path; this writer is
+    // the last to close, so it takes its side-cars with it.
+    let writer = Connection::open(&path).expect("open the snapshot");
+    let mode: String = writer
+        .query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))
+        .expect("switch the snapshot to WAL");
+    assert_eq!(mode, "wal");
+    drop(writer);
+
     let wal = path.with_extension("db-wal");
     let shm = path.with_extension("db-shm");
-    let wal_before = wal.exists();
-    let shm_before = shm.exists();
+    assert!(!wal.exists() && !shm.exists(), "the snapshot should start without side-cars");
+    let before = std::fs::read(&path).expect("read the snapshot");
 
     {
         let catalogue = Catalogue::open(&path).expect("should open read-only");
         let _ = catalogue.read(&Locale::from_env()).expect("should read");
     }
 
-    assert_eq!(wal.exists(), wal_before, "read-only open created {wal:?}");
-    assert_eq!(shm.exists(), shm_before, "read-only open created {shm:?}");
+    let after = std::fs::read(&path).expect("read the snapshot");
+    assert!(after == before, "read-only open wrote to {path:?}");
+    let wal_len = std::fs::metadata(&wal).map_or(0, |meta| meta.len());
+    assert_eq!(wal_len, 0, "read-only open wrote to {wal:?}");
+
+    let _ = std::fs::remove_dir_all(&dir);
 }

@@ -322,7 +322,28 @@ fn map_filter(row: &rusqlite::Row<'_>) -> rusqlite::Result<Filter> {
 
 #[cfg(test)]
 mod tests {
-    use super::is_rule;
+    use super::{is_rule, Catalogue};
+
+    /// The handle cannot write, whatever a later query tries: the open flags,
+    /// asserted rather than taken on trust. `filters_live` checks the other
+    /// half, that reading a real catalogue leaves its bytes alone.
+    #[test]
+    fn the_handle_refuses_writes() {
+        let dir = std::env::temp_dir().join(format!("adguard-ui-filters-ro-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create scratch dir");
+        let path = dir.join("catalogue.db");
+        rusqlite::Connection::open(&path)
+            .and_then(|conn| conn.execute_batch("CREATE TABLE filter (filter_id INTEGER);"))
+            .expect("create a database");
+
+        let catalogue = Catalogue::open(&path).expect("should open read-only");
+        assert!(catalogue.conn.is_readonly(rusqlite::MAIN_DB).expect("main is attached"));
+        assert!(catalogue.conn.execute("INSERT INTO filter VALUES (1)", []).is_err());
+
+        drop(catalogue);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn blank_lines_and_bang_comments_are_not_rules() {
