@@ -63,7 +63,7 @@ jobs:
             libgtk-4-dev libadwaita-1-dev ca-certificates curl git
           pkg-config --modversion gtk4 libadwaita-1
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # The checkout is owned by a different uid than the one this container
       # runs as, which git refuses to look at. deb.sh reads the maintainer from
@@ -117,7 +117,7 @@ jobs:
           dpkg-deb --info target/package/*.deb
           dpkg-deb --contents target/package/*.deb
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: packages
           path: target/package/*.*
@@ -139,7 +139,7 @@ jobs:
             rpm-build binutils make git curl
           pkg-config --modversion gtk4 libadwaita-1
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Trust the checkout
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
@@ -187,7 +187,7 @@ jobs:
           rpm -V adguard-ui
           ! ldd /usr/bin/adguard-ui | grep 'not found'
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: rpm
           path: target/package/*.rpm
@@ -206,14 +206,14 @@ jobs:
       # For CHANGELOG.md — the release notes are the section already written
       # there, rather than a second description of the same release maintained
       # in a different file.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: packages
           path: packages
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: rpm
           path: packages
