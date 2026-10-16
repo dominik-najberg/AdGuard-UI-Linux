@@ -29,13 +29,13 @@ Every release carries a `.deb`, an `.rpm` and a tarball for `~/.local`, each bui
 On Ubuntu and Debian:
 
 ```bash
-sudo apt-get install ./adguard-ui_1.11.2_amd64.deb
+sudo apt-get install ./adguard-ui_1.12.0_amd64.deb
 ```
 
 On Fedora:
 
 ```bash
-sudo dnf install ./adguard-ui-1.11.2-1.x86_64.rpm
+sudo dnf install ./adguard-ui-1.12.0-1.x86_64.rpm
 ```
 
 [**Releases**](https://github.com/dominik-najberg/AdGuard-UI-Linux/releases) · [`CHANGELOG.md`](CHANGELOG.md). `apt-get install` and `dnf install` rather than `dpkg -i` or `rpm -i`, because they resolve the dependencies the package declares; the path has to start with `./` or they look the name up in the distribution's repositories instead. The tarball is the unprivileged route: extract it and run its `install.sh`, which writes under `~/.local` and never asks for a password.
@@ -138,7 +138,7 @@ Three groups at the foot of that page do more than set a key:
 
 ![The Diagnostics page](docs/screenshots/diagnostics.png)
 
-**About** — the two version numbers this application had never shown anywhere: its own, and the AdGuard CLI's, with the path the CLI was found at. Below them, one button that updates AdGuard's filter lists, DNS filter lists, userscripts, Safe Browsing data and certificate revocation data, and asks whether a newer AdGuard CLI has been released.
+**About** — the two version numbers this application had never shown anywhere: its own, and the AdGuard CLI's, with AdGuard CLI's update channel and the path the CLI was found at. The frame is the reference machine on the beta channel, running AdGuard CLI 1.5.0-rc.2. Below them, one button that updates AdGuard's filter lists, DNS filter lists, userscripts, Safe Browsing data and certificate revocation data, and asks whether a newer AdGuard CLI has been released.
 
 ![The About page](docs/screenshots/about.png)
 
