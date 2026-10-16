@@ -589,7 +589,7 @@ impl Cli {
         self.license()?;
         let out = self.run(&["--version"])?;
         Ok(Installed {
-            banner: out.stdout.trim().to_owned(),
+            banner: banner(&out.stdout),
             newer: out.newer,
         })
     }
@@ -608,6 +608,17 @@ impl Cli {
     /// About page that calls this is only built once the file exists.
     pub fn set_update_channel(&self, channel: Channel) -> Result<Applied, Error> {
         self.config_set(crate::config::key::UPDATE_CHANNEL, channel.branch())
+    }
+
+    /// The update channel AdGuard is on, in its own words.
+    ///
+    /// For when `proxy.yaml` holds something [`crate::Config::update_channel`]
+    /// will not read: AdGuard settles it on whatever channel its build comes
+    /// from (contract §14), and this command both says which and rewrites the
+    /// file to match. `None` for an answer that is not one of the three.
+    pub fn update_channel(&self) -> Result<Option<Channel>, Error> {
+        let out = self.run(&["config", "get", crate::config::key::UPDATE_CHANNEL])?;
+        Ok(parse_update_channel(&out.stdout))
     }
 
     /// What AdGuard says is newer on the configured channel, if anything.
@@ -2040,6 +2051,28 @@ fn strip_ansi(raw: &[u8]) -> String {
     String::from_utf8_lossy(&strip_ansi_escapes::strip(raw)).into_owned()
 }
 
+/// The version line of `--version`, and only that.
+///
+/// 1.4.13 printed the one line. **1.5.0 adds a blank line and a list under
+/// it** — measured 17 October 2026 on v1.5.0-rc.2, `Dependencies versions:`
+/// followed by nine `name vX.Y.Z` lines (core-libs, dns-libs, scriptlets and
+/// the rest) — and the About page showed every one of them in the version
+/// row. The first non-empty line is the banner on both; the list is AdGuard's
+/// internals, not the version anyone asked for.
+fn banner(stdout: &str) -> String {
+    first_line(stdout).unwrap_or_default()
+}
+
+/// `update_channel = beta` -> `Channel::Beta`. Exact, for the reason
+/// [`crate::Config::update_channel`] is.
+fn parse_update_channel(stdout: &str) -> Option<Channel> {
+    let value = stdout
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("update_channel = "))?
+        .trim();
+    Channel::ALL.into_iter().find(|channel| channel.branch() == value)
+}
+
 /// What opens and closes AdGuard's update hint, and the line that follows it.
 const HINT_OPENS: &str = "> AdGuard CLI v";
 const HINT_CLOSES: &str = " is now available";
@@ -2477,6 +2510,17 @@ mod tests {
     const HINT: &str = "\n> AdGuard CLI v1.5.0-nightly.8 is now available\n\
         You can update AdGuard CLI by running `/home/u/.local/bin/adguard-cli update`\n";
 
+    /// `--version` on v1.5.0-rc.2, measured 17 October 2026.
+    #[test]
+    fn the_banner_is_the_version_line_without_1_5s_dependency_list() {
+        let measured = "AdGuard CLI v1.5.0-rc.2\n\nDependencies versions:\n\
+            core-libs v1.23.0-5-gc275f598c\ncontent-script v3.2.1\n\
+            filter-list-manager v2.7.0\n";
+        assert_eq!(banner(measured), "AdGuard CLI v1.5.0-rc.2");
+        assert_eq!(banner("AdGuard CLI v1.4.13\n"), "AdGuard CLI v1.4.13", "1.4.13's single line");
+        assert_eq!(banner(""), "");
+    }
+
     #[test]
     fn the_update_hint_is_taken_off_the_version_banner() {
         let (stdout, newer) = split_update_hint(&format!("AdGuard CLI v1.4.13\n{HINT}"));
@@ -2498,6 +2542,15 @@ mod tests {
             Some("You can start the proxy server by running `/home/u/.local/bin/adguard-cli start`")
         );
         assert_eq!(parse_status(&stdout).map(|status| status.running), Some(false));
+    }
+
+    /// `config get update_channel`, measured on v1.4.13 and v1.5.0-rc.2.
+    #[test]
+    fn config_get_names_the_channel() {
+        assert_eq!(parse_update_channel("update_channel = beta\n"), Some(Channel::Beta));
+        assert_eq!(parse_update_channel("update_channel = release\n"), Some(Channel::Release));
+        assert_eq!(parse_update_channel("update_channel = NIGHTLY\n"), None);
+        assert_eq!(parse_update_channel("No configuration YAML file\n"), None);
     }
 
     #[test]
