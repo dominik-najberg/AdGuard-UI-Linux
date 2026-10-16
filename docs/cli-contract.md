@@ -666,7 +666,7 @@ Two measured facts for whoever builds against this:
 
 **Open these read-only** (`file:...?mode=ro`, `rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY`). They are the daemon's live databases; never write to them. All mutations go through `filters add|remove|enable|disable|set-trusted|set-title`.
 
-Opening read-only is also verified not to create `-wal`/`-shm` side-car files next to the daemon's databases.
+Opening read-only is also verified not to write the daemon's databases. On v1.4.13 that meant no `-wal`/`-shm` side-car files appearing beside them. **v1.5.0 converts both catalogues to WAL mode** (measured 17 October 2026 on v1.5.0-rc.2: byte 18 of each file's header is 2), and in WAL mode SQLite keeps those side files for every connection, read-only ones and AdGuard's own included. So on a WAL catalogue the check is that the database file's size and modification time do not move; reading works unchanged.
 
 `sqlite3` CLI is not installed on this machine, but that is irrelevant to us — `rusqlite` bundles its own SQLite. It only matters for manual inspection (use `python3 -c` with the stdlib `sqlite3` module).
 
@@ -2004,11 +2004,11 @@ Measured 15 October 2026 on v1.4.13, in the sandbox above. It is the key the Abo
 | `config set update_channel …` | Prints | Exit | File afterwards | Next invocation |
 | --- | --- | --- | --- | --- |
 | `release`, `beta`, `nightly` | echo + `Config has been updated` | 0 | the value, quoted | reads it back |
-| `NIGHTLY` | echo + `Config has been updated` | 0 | `'NIGHTLY'` | `config get` answers **`release`**, and the file is rewritten to `'release'` |
-| `default` | echo + `Config has been updated` | 0 | `'default'` | the same: **`release`** |
+| `NIGHTLY` | echo + `Config has been updated` | 0 | `'NIGHTLY'` | `config get` answers the **build's own channel** and the file is rewritten to it: `release` on v1.4.13, **`beta`** on v1.5.0-rc.2 |
+| `default`, `Beta` | echo + `Config has been updated` | 0 | the value, verbatim | the same: the build's own channel |
 | `bogus` | `Invalid value for key `update_channel`. Valid values are: release, nightly, beta, default` | 0 | unchanged | — |
 
-**Accepted is not kept.** `config set` matches the value case-insensitively and writes it verbatim, as it does for `log_level`; but unlike `log_level` the reader does not, so anything but the three lowercase names is read as release and rewritten on the next invocation — which, with the Status page polling, is within two seconds. `Cli::set_update_channel` therefore writes only the three lowercase names, and `Config::update_channel` reads case-*sensitively*, answering release for anything else, because that is what AdGuard will do with it. `default`, the fourth value the CLI lists, is the same trap under a friendlier name.
+**Accepted is not kept.** `config set` matches the value case-insensitively and writes it verbatim, as it does for `log_level`; but unlike `log_level` the reader does not, so anything but the three lowercase names is read as no channel and rewritten on the next invocation — which, with the Status page polling, is within two seconds. **What it is rewritten to is the channel the installed build came from**, so it differs by version: release on v1.4.13, beta on v1.5.0-rc.2 (re-measured 17 October 2026, after this machine took the beta through the About page's own *Run in Terminal*). `default`, the fourth value the CLI lists, is that fallback by name. `Cli::set_update_channel` therefore writes only the three lowercase names, and `Config::update_channel` reads case-*sensitively* and returns `None` for anything else, rather than guessing a fallback that depends on the build; the About page then asks `Cli::update_channel`, whose `config get` both answers and rewrites the file.
 
 It is one of the two keys `config set` accepts before `configure` has created `proxy.yaml`, and it is stored somewhere else until then (§5); the About page, which writes it, is only built once the file exists. Switching it downloads and installs nothing; it changes what AdGuard says is available, and only `adguard-cli update` acts on that.
 

@@ -328,10 +328,19 @@ fn reads_one_filter_state() {
     );
 }
 
-/// The databases are the live daemon's. Opening read-only must not create
-/// side-car files (a read-write open would produce -wal/-shm).
+/// The databases are the live daemon's, and opening them must not write to
+/// them.
+///
+/// On AdGuard CLI 1.4.13 the catalogues used a rollback journal, where a
+/// `-wal`/`-shm` pair appearing could only mean a read-write open, so their
+/// absence was the check. **1.5.0 converts both catalogues to WAL** —
+/// measured 17 October 2026 on v1.5.0-rc.2, byte 18 of each header reads 2 —
+/// and in WAL mode SQLite keeps those two files beside the database for every
+/// connection, read-only ones included, AdGuard's own among them. So the
+/// side-files are only evidence on a rollback database; the database file
+/// itself, unchanged in size and modification time, is the evidence on both.
 #[test]
-fn opening_does_not_create_wal_files() {
+fn opening_does_not_write_the_catalogue() {
     let Some(path) = catalogue_path(paths::filters_db()) else {
         return;
     };
@@ -339,12 +348,26 @@ fn opening_does_not_create_wal_files() {
     let shm = path.with_extension("db-shm");
     let wal_before = wal.exists();
     let shm_before = shm.exists();
+    let meta_before = std::fs::metadata(&path).expect("catalogue metadata");
+    let journal_is_wal = std::fs::read(&path)
+        .ok()
+        .and_then(|bytes| bytes.get(18).copied())
+        == Some(2);
 
     {
         let catalogue = Catalogue::open(&path).expect("should open read-only");
         let _ = catalogue.read(&Locale::from_env()).expect("should read");
     }
 
-    assert_eq!(wal.exists(), wal_before, "read-only open created {wal:?}");
-    assert_eq!(shm.exists(), shm_before, "read-only open created {shm:?}");
+    let meta_after = std::fs::metadata(&path).expect("catalogue metadata");
+    assert_eq!(meta_after.len(), meta_before.len(), "a read-only open changed the catalogue's size");
+    assert_eq!(
+        meta_after.modified().ok(),
+        meta_before.modified().ok(),
+        "a read-only open wrote the catalogue"
+    );
+    if !journal_is_wal {
+        assert_eq!(wal.exists(), wal_before, "read-only open created {wal:?}");
+        assert_eq!(shm.exists(), shm_before, "read-only open created {shm:?}");
+    }
 }
