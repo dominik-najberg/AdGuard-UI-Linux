@@ -563,6 +563,15 @@ fn a_blank_name_is_refused_and_changes_nothing() {
 /// It also pins the thing a catalogue offering four scripts together may not
 /// assume: that none of them collides with another by substring, leaving one
 /// installed and unswitchable (contract §15).
+///
+/// Asserted about the four and nothing else. The sandbox is seeded from this
+/// machine's install, which may hold scripts its owner added — measured 17
+/// October 2026 on a box carrying `adguard-ui-install-links` and a Greasy Fork
+/// script beside AdGuard's, where counting every row read six and failed with
+/// all four installed correctly. So each id is looked for rather than the rows
+/// counted, and the collision check reads the four pairs on their own: whether
+/// AdGuard's scripts can be named together is a property of AdGuard's scripts,
+/// and one the owner's other installs should neither mask nor break.
 #[test]
 #[ignore = "invokes the real adguard-cli and reaches AdGuard's CDN"]
 fn the_recommended_scripts_install_in_the_state_adguard_ships_them() {
@@ -586,13 +595,17 @@ fn the_recommended_scripts_install_in_the_state_adguard_ships_them() {
     }
 
     let installed = sandbox.read();
-    assert_eq!(installed.len(), 4, "expected all four, got {installed:?}");
 
     for entry in &adguard_core::RECOMMENDED {
-        let script = installed
-            .iter()
-            .find(|s| s.id == entry.id)
+        let mut landed = installed.iter().filter(|s| s.id == entry.id);
+        let script = landed
+            .next()
             .unwrap_or_else(|| panic!("{} did not land under id {}", entry.name, entry.id));
+        assert!(
+            landed.next().is_none(),
+            "{} is on the page twice: {installed:?}",
+            entry.name
+        );
 
         assert_eq!(script.name, entry.name, "the catalogue's name matches AdGuard's");
         assert_eq!(
@@ -606,10 +619,26 @@ fn the_recommended_scripts_install_in_the_state_adguard_ships_them() {
             "{} carried no version to render",
             entry.name
         );
+    }
+
+    // The four pairs copied out on their own and read the way the page reads
+    // them, so the substring rule runs over AdGuard's scripts and no one else's.
+    let alone = sandbox.root.join("recommended-alone");
+    std::fs::create_dir_all(&alone).expect("create the four's directory");
+    for entry in &adguard_core::RECOMMENDED {
+        for suffix in [".meta.json", ".user.js"] {
+            let file = format!("{}{suffix}", entry.id);
+            std::fs::copy(sandbox.scripts_dir().join(&file), alone.join(&file))
+                .unwrap_or_else(|err| panic!("copy {file}: {err}"));
+        }
+    }
+    let four = userscripts::read(&alone, &[], &Locale::english());
+    assert_eq!(four.len(), 4, "the copy holds the four and nothing else: {four:?}");
+    for script in &four {
         assert!(
             script.actionable(),
             "{} cannot be switched while the other three are installed",
-            entry.name
+            script.name
         );
     }
 
