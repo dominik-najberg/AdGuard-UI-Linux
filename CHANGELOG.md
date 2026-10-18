@@ -11,6 +11,16 @@ This file is the one changelog.
 
 ---
 
+## Unreleased
+
+### A licence wiped out with AdGuard's settings file comes back by itself
+
+AdGuard CLI keeps its licence, the device identity it is registered under, and its HTTPS certificate in one file, `adguard.conf`, which it rewrites on every command. On a machine that freezes under memory pressure or runs out of disk, that file was left empty, and AdGuard CLI started over without a licence. Re-activating meant replacing a device on the AdGuard account, and often a new certificate.
+
+AdGuard UI now keeps a private copy of that file while the licence works, in `~/.local/state/adguard-ui/`, readable only by you. If AdGuard CLI loses its licence and the file has changed, the copy is put back. If that brings the licence back, a notice says so. If it does not, as when AdGuard's servers deactivated the device, the file is returned to how it was found. It also no longer runs two AdGuard CLI commands at once, and no longer cuts off one that takes too long, because cutting one off mid-save is what can empty the file.
+
+---
+
 ## 1.12.0 — 17 October 2026
 
 ### Install AdGuard CLI from the window

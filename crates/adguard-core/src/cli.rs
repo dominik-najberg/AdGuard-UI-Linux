@@ -25,13 +25,16 @@ use crate::model::{
 };
 use crate::install::Channel;
 use crate::paths;
+use crate::slot::{self, Slot};
 
 /// Deadline for the local commands — `status`, `config get/set`.
 ///
 /// They cost 10–30 ms measured, so this is not a performance budget; it is the
-/// point past which the command is not coming back and the UI should say so
-/// rather than hold a worker thread. Generous enough that a machine under load
-/// does not trip it.
+/// point past which the UI should say the command is not coming back rather
+/// than hold a worker thread. Generous enough that a machine under load does
+/// not trip it. It did trip on 18 October 2026, with swap full and the desktop
+/// freezing, which is why a command past it is no longer killed (see
+/// [`Error::TimedOut`]).
 const LOCAL_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Deadline for `start` and `restart`, which are local but not quick when they
@@ -189,15 +192,26 @@ pub enum Error {
     #[error("{message}")]
     LicenceCheckFailed { message: String },
 
-    /// The command outlived its deadline and was killed. Distinct from
+    /// The command outlived its deadline. Distinct from
     /// [`Self::BadInvocation`] because nothing was rejected and nothing is
     /// known: the command may equally have done its work and hung on the way
     /// out, so a caller must re-read state rather than assume it did nothing.
-    #[error("`adguard-cli {args}` did not finish within {}s and was stopped", timeout.as_secs())]
+    ///
+    /// **It is not killed.** It is left to finish, and no other invocation of
+    /// ours runs against the same data directory until it has (see
+    /// `slot.rs`). A kill between the CLI's truncate and its write of
+    /// `adguard.conf` leaves the licence file empty.
+    #[error("`adguard-cli {args}` did not finish within {}s; it was left to finish on its own", timeout.as_secs())]
     TimedOut {
         args: String,
         timeout: std::time::Duration,
     },
+
+    /// Not run, because an earlier `adguard-cli` of ours against the same
+    /// data directory was still running at the deadline. Most often one that
+    /// timed out and was left to finish. Nothing happened.
+    #[error("`adguard-cli {args}` was not run: an earlier AdGuard CLI command is still running")]
+    Busy { args: String },
 
     /// A command the CLI would not carry out, in its own words.
     ///
@@ -325,6 +339,21 @@ impl Cli {
         &self.binary
     }
 
+    /// The `$XDG_DATA_HOME` override, if [`Self::with_xdg_data_home`] set one.
+    pub fn xdg_data_home(&self) -> Option<&Path> {
+        self.xdg_data_home.as_deref()
+    }
+
+    /// Run `body` with no other `adguard-cli` of ours running against this
+    /// data directory, its own invocations included (see `slot.rs`). For file
+    /// work that has to sit between invocations without one slipping in.
+    ///
+    /// `None` when an earlier invocation still held the slot after `wait`;
+    /// `body` did not run.
+    pub fn exclusively<T>(&self, wait: Duration, body: impl FnOnce() -> T) -> Option<T> {
+        slot::exclusively(&self.xdg_data_home, Instant::now() + wait, body)
+    }
+
     /// Run every invocation against a different `$XDG_DATA_HOME`.
     ///
     /// Measured: the CLI resolves its data directory as
@@ -427,6 +456,12 @@ impl Cli {
         timeout: Duration,
         answer: Option<&str>,
     ) -> Result<Output, Error> {
+        // One at a time per data directory (see `slot.rs`), waiting no longer
+        // than this command would have been given to run.
+        let Some(slot) = Slot::acquire(&self.xdg_data_home, Instant::now() + timeout) else {
+            return Err(Error::Busy { args: args.join(" ") });
+        };
+
         let mut command = Command::new(&self.binary);
         command
             .args(args)
@@ -477,12 +512,13 @@ impl Cli {
         };
 
         let Some(status) = status else {
-            // Kill the child — but only the child. Never the process group:
-            // `adguard-cli start` deliberately leaves the proxy daemon behind,
-            // and killing the group would take down the very thing the user
-            // asked to start.
-            let _ = child.kill();
-            let _ = child.wait();
+            // Left to finish, not killed (see `Error::TimedOut`). A thread of
+            // its own reaps it, so it does not linger as a zombie, and holds
+            // the slot until then, so nothing of ours runs beside it.
+            std::thread::spawn(move || {
+                let _ = child.wait();
+                drop(slot);
+            });
             // Nothing is collected. The readers cannot be waited on here: a
             // descendant may still hold the pipe (see `COLLECT_GRACE`), and a
             // timeout that can itself block is not a timeout. Dropping the
@@ -854,9 +890,16 @@ impl Cli {
     /// daemons, by pid *and* start time, so a restart reads as a change even
     /// when the pid is reused.
     ///
+    /// `adguard.conf` is in it too, by content. `status` does not report from
+    /// it, but a `status` refused for want of a licence is what a reseeded
+    /// file looks like, and seeing that within a tick rather than a heartbeat
+    /// is what lets `ConfBackup` put the licence back before anything else
+    /// runs against the new file.
+    ///
     /// Not covered, and the reason the caller still runs `status` on a slow
     /// heartbeat: a proxy that binds its ports some time after its process
-    /// appears, and a licence that lapses. Neither shows up here.
+    /// appears, and a licence that lapses on AdGuard's side. Neither shows up
+    /// here.
     ///
     /// `None` when `proxy.yaml` cannot be read. The caller then has nothing to
     /// compare and must ask the CLI.
@@ -866,6 +909,10 @@ impl Cli {
         let config = std::fs::read(self.config_path()?).ok()?;
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         config.hash(&mut hasher);
+        // Missing reads the same as empty: both are what a reseed looks like
+        // from outside, and either is a change from a file that had content.
+        let licence_file = self.config_path()?.with_file_name("adguard.conf");
+        std::fs::read(licence_file).unwrap_or_default().hash(&mut hasher);
         // Sorted, because `/proc` promises no order and the same processes
         // listed differently are not a change.
         let mut daemons = crate::orphan::daemons(&self.binary);
@@ -1784,6 +1831,9 @@ fn redact_error(err: Error, secret: &str) -> Error {
         Error::TimedOut { args, timeout } => Error::TimedOut {
             args: redact(&args, secret),
             timeout,
+        },
+        Error::Busy { args } => Error::Busy {
+            args: redact(&args, secret),
         },
         // Quotes no argument of ours today, but it carries a string the CLI
         // wrote and this match is the place that assumption gets checked.
@@ -3078,26 +3128,45 @@ mod tests {
         }
     }
 
-    /// The point of the whole exercise: a command that would never return is
-    /// stopped, and says so, rather than holding the worker thread that ran it.
+    /// A command that outlives its deadline is reported at the deadline and
+    /// left to finish, not killed. A kill between AdGuard CLI's truncate and
+    /// its write of `adguard.conf` loses the licence (`slot.rs`).
+    ///
+    /// Its own data directory, so the other tests here, which share the
+    /// inherited one, never wait behind it.
     #[test]
-    fn a_command_that_hangs_is_killed_and_reported() {
-        let started = Instant::now();
-        let err = cli_for("/bin/sleep")
-            .run_within(&["60"], Duration::from_millis(300))
-            .expect_err("sleep 60 should not finish inside 300ms");
+    fn a_command_that_hangs_is_reported_and_left_to_finish() {
+        let home = std::env::temp_dir().join(format!("adguard-ui-hang-{}", std::process::id()));
+        let cli = cli_for("/bin/sleep").with_xdg_data_home(&home);
+        let marker = home.join("finished");
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
 
+        let started = Instant::now();
+        let err = cli_for("/bin/sh")
+            .with_xdg_data_home(&home)
+            .run_within(
+                &["-c", &format!("sleep 1; touch '{}'", marker.display())],
+                Duration::from_millis(200),
+            )
+            .expect_err("a second of sleep should not finish inside 200ms");
+        assert!(matches!(err, Error::TimedOut { .. }), "expected a timeout, got {err:?}");
         assert!(
-            matches!(err, Error::TimedOut { .. }),
-            "expected a timeout, got {err:?}"
-        );
-        // Generously bounded: the assertion is that it returned near the
-        // deadline rather than near the sleep, not that the timer is precise.
-        assert!(
-            started.elapsed() < Duration::from_secs(10),
+            started.elapsed() < Duration::from_millis(900),
             "returned after {:?}, so it waited for the command",
             started.elapsed()
         );
+
+        // Still running, so the next command for this directory is not run.
+        let busy = cli
+            .run_within(&["0"], Duration::from_millis(100))
+            .expect_err("the slot should still be held");
+        assert!(matches!(busy, Error::Busy { .. }), "expected Busy, got {busy:?}");
+
+        // It was not killed: it finished its work, and the slot came back.
+        cli.run_within(&["0"], Duration::from_secs(10)).expect("slot freed once it exited");
+        assert!(marker.exists(), "the timed-out command was killed before finishing");
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     /// The deadline must not cost anything in the ordinary case.
