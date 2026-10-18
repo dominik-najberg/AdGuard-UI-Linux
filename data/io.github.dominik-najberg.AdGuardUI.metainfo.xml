@@ -53,6 +53,12 @@
     application is its first release.
   -->
   <releases>
+    <release version="1.12.1" type="stable" date="2026-10-18">
+      <url type="details">https://github.com/dominik-najberg/AdGuard-UI-Linux/releases/tag/v1.12.1</url>
+      <description>
+        <p>AdGuard UI keeps a private copy of AdGuard CLI's settings file while the licence works, and puts it back if AdGuard CLI loses the file and its licence with it, so the licence returns without activating again. It no longer runs two AdGuard CLI commands at once, and no longer cuts off one that takes too long.</p>
+      </description>
+    </release>
     <release version="1.12.0" type="stable" date="2026-10-17">
       <url type="details">https://github.com/dominik-najberg/AdGuard-UI-Linux/releases/tag/v1.12.0</url>
       <description>
