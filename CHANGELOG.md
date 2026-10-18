@@ -11,7 +11,7 @@ This file is the one changelog.
 
 ---
 
-## Unreleased
+## 1.12.1 — 18 October 2026
 
 ### A licence wiped out with AdGuard's settings file comes back by itself
 
