@@ -73,8 +73,8 @@ use std::time::{Duration, Instant, SystemTime};
 use adguard_core::config::key;
 use adguard_core::rejected::{self, Rejections};
 use adguard_core::{
-    access, helper, orphan, Activation, Autostart, Catalogue, Cli, Config, Daemon, FilterSet,
-    Filtering, HelperProcess, InUse, License, ProxyStatus, RootHelper, StatusInputs, Toggle,
+    access, helper, orphan, Activation, Autostart, Catalogue, Cli, ConfBackup, Config, Daemon, FilterSet,
+    Filtering, HelperProcess, InUse, License, ProxyStatus, Restore, RootHelper, StatusInputs, Toggle,
 };
 use adw::prelude::*;
 use gtk::glib;
@@ -103,6 +103,14 @@ const POLL_INTERVAL: Duration = Duration::from_secs(2);
 /// lapsed, or anything else that changes `status`'s answer without touching
 /// `proxy.yaml` or the process list. A minute is how late such news can be,
 /// against thirty invocations a minute saved.
+/// How often a copy of `adguard.conf` is attempted while it keeps differing
+/// from the one on disk. Each attempt runs `license`.
+const BACKUP_RETRY: Duration = Duration::from_secs(60);
+
+/// Said when the copy of `adguard.conf` brought the licence back.
+const RESTORED: &str = "AdGuard CLI had lost its settings file, and with it the licence. \
+    AdGuard UI put back the copy it keeps, and the licence is active again";
+
 const STATUS_HEARTBEAT: Duration = Duration::from_secs(60);
 
 /// How long a *failed* reading is reused.
@@ -385,6 +393,19 @@ pub struct StatusPage {
     /// The last `status` reading and what it was taken against. What lets a
     /// poll tick reuse it instead of running the CLI (see [`POLL_INTERVAL`]).
     last_status: RefCell<Option<StatusReading>>,
+    /// A `status` reading is on a worker. The poll waits for it rather than
+    /// starting a second: two of ours at once is the overlap that can meet
+    /// AdGuard's own rewrite of `adguard.conf` (`adguard_core::ConfBackup`).
+    status_in_flight: Cell<bool>,
+    /// A forced reading was asked for while one was in flight. Run when it
+    /// lands, so an action's re-read is never just dropped.
+    status_pending: Cell<bool>,
+    /// When a copy of `adguard.conf` was last attempted, so a file that keeps
+    /// differing from the copy costs a `license` a minute at most.
+    backup_tried: Cell<Option<Instant>>,
+    /// Whether the copy has been offered back during this run of refusals.
+    /// Once per run: a restore that did not help will not help a tick later.
+    restore_tried: Cell<bool>,
 
     /// Set while a lifecycle command — or an activation — is in flight.
     ///
@@ -792,6 +813,10 @@ impl StatusPage {
             status_unlicensed: Cell::new(false),
             resume_after_activation: Cell::new(false),
             last_status: RefCell::new(None),
+            status_in_flight: Cell::new(false),
+            status_pending: Cell::new(false),
+            backup_tried: Cell::new(None),
+            restore_tried: Cell::new(false),
             busy: Cell::new(false),
             filtering: Cell::new(None),
             filtering_read: Cell::new(None),
@@ -1062,21 +1087,81 @@ impl StatusPage {
     }
 
     fn read_status(self: &Rc<Self>, force: bool) {
+        if self.status_in_flight.get() {
+            if force {
+                self.status_pending.set(true);
+            }
+            return;
+        }
+        self.status_in_flight.set(true);
+
         let cli = self.cli.clone();
         let (log_due, cached) = self.access_log_due();
         let refused = self.rejected.borrow().clone();
         let previous = self.last_status.borrow().clone();
+        // A copy of `adguard.conf` is checked for on every reading that
+        // worked, since comparing two small files costs nothing. Taking one
+        // runs `license`, so that is tried once a minute at most.
+        let backup_due = self
+            .backup_tried
+            .get()
+            .is_none_or(|tried| tried.elapsed() >= BACKUP_RETRY);
         let this = self.clone();
         worker::run(
             move || {
                 let reading = StatusReading::take(&cli, previous, force);
                 let evidence = read_evidence(&cli, &reading.result, log_due, cached, refused);
-                (reading, evidence)
+                let backup = (backup_due && reading.result.is_ok())
+                    .then(|| ConfBackup::for_cli(&cli))
+                    .flatten()
+                    .filter(ConfBackup::stale)
+                    .map(|pair| pair.keep(&cli));
+                (reading, evidence, backup)
             },
-            move |(reading, evidence): (StatusReading, Evidence)| {
+            move |(reading, evidence, backup): (StatusReading, Evidence, Option<Result<bool, String>>)| {
+                this.status_in_flight.set(false);
+                if let Some(kept) = backup {
+                    this.backup_tried.set(Some(Instant::now()));
+                    if let Err(err) = kept {
+                        eprintln!("adguard-ui: could not keep a copy of adguard.conf: {err}");
+                    }
+                }
                 let status = reading.result.clone();
                 this.last_status.replace(Some(reading));
                 this.settle_status(status, evidence);
+                if this.status_pending.replace(false) {
+                    this.refresh();
+                }
+            },
+        );
+    }
+
+    /// Put the copy of `adguard.conf` back, once per run of refusals, unless
+    /// the user is in the middle of activating (the file then holds the
+    /// device id they are logging in for).
+    fn try_restore(self: &Rc<Self>) {
+        if self.restore_tried.replace(true)
+            || matches!(*self.licence.borrow(), Licence::AwaitingLogin { .. })
+        {
+            return;
+        }
+        let cli = self.cli.clone();
+        let this = self.clone();
+        worker::run(
+            move || match ConfBackup::for_cli(&cli) {
+                Some(pair) => pair.restore(&cli),
+                None => Restore::NothingToDo,
+            },
+            move |outcome| match outcome {
+                Restore::Restored => {
+                    this.toasts.add_toast(toast(RESTORED));
+                    this.refresh();
+                    this.read_licence();
+                }
+                Restore::NothingToDo | Restore::DidNotHelp => {}
+                Restore::Failed(err) => {
+                    eprintln!("adguard-ui: could not restore adguard.conf: {err}");
+                }
             },
         );
     }
@@ -1355,8 +1440,17 @@ impl StatusPage {
                 if self.status_unlicensed.replace(false) && !self.claims_active_licence() {
                     self.read_licence();
                 }
+                // A later loss is a new run of refusals and may try again.
+                self.restore_tried.set(false);
             }
             Err((unlicensed, message)) => {
+                // AdGuard CLI may have thrown its config away, which is what
+                // every reset in its log so far has been. Our copy brings the
+                // licence, the device id and the CA back if so, and is undone
+                // by itself if not (`adguard_core::ConfBackup`).
+                if unlicensed {
+                    self.try_restore();
+                }
                 // Raised only, never lowered here: a check that fails to reach
                 // AdGuard in the middle of the wait says nothing about whether
                 // the licence is back, and must not hide its return.
