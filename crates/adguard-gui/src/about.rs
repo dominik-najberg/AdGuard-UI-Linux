@@ -153,6 +153,11 @@ const WHY_NOT_THIS_COPY: &str =
 /// drives (contract §14).
 const UPDATE_COMMAND: &str = "adguard-cli update";
 
+/// The button beside it, and what it becomes when the channel cannot deliver
+/// what AdGuard offers (see [`short_of`]).
+const RUN_UPDATE: &str = "Run in Terminal";
+const RUN_UPDATE_ON_RELEASE: &str = "Switch to Release and Update";
+
 /// What *Run in Terminal* runs, given the resolved binary already quoted.
 ///
 /// AdGuard refuses to update under a running proxy — *"You can't update while
@@ -197,7 +202,8 @@ fn short_of(installed: &str, newer: &str, channel: Channel) -> Option<String> {
     }
     Some(format!(
         "v{newer} is a stable release. Updating on the {} channel installs that channel's \
-         newest build, which may be older — switch the update channel to Release to get v{newer}.",
+         newest build, which may be older, so the button switches the update channel to \
+         Release first.",
         channel.label()
     ))
 }
@@ -296,6 +302,10 @@ pub struct AboutPage {
     /// AdGuard's word about the application, shown only when it has one.
     notice: adw::PreferencesGroup,
     notice_row: adw::ActionRow,
+    run_update: gtk::Button,
+    /// The notice is showing [`short_of`]'s explanation, so the button moves
+    /// the channel to Release before it runs the update.
+    to_release: Cell<bool>,
 
     /// Notified after every successful run, so the window can re-read the
     /// catalogues that moved.
@@ -425,7 +435,7 @@ impl AboutPage {
         });
         command.add_suffix(&copy);
         let run_update = gtk::Button::builder()
-            .label("Run in Terminal")
+            .label(RUN_UPDATE)
             .valign(gtk::Align::Center)
             .build();
         command.add_suffix(&run_update);
@@ -518,6 +528,8 @@ impl AboutPage {
             rows: RefCell::new(Vec::new()),
             notice,
             notice_row,
+            run_update: run_update.clone(),
+            to_release: Cell::new(false),
             checked: RefCell::new(None),
         });
 
@@ -667,6 +679,9 @@ impl AboutPage {
                 let why = installed
                     .as_deref()
                     .and_then(|installed| short_of(installed, newer, self.channel_now.get()));
+                self.to_release.set(why.is_some());
+                let label = if why.is_some() { RUN_UPDATE_ON_RELEASE } else { RUN_UPDATE };
+                self.run_update.set_label(label);
                 self.notice_row.set_subtitle(&match why {
                     Some(why) => format!("{}\n{why}", available(newer)),
                     None => available(newer),
@@ -675,6 +690,8 @@ impl AboutPage {
             }
             None => {
                 self.cli_standing.set_label("");
+                self.to_release.set(false);
+                self.run_update.set_label(RUN_UPDATE);
                 self.notice.set_visible(false);
                 self.updating.set(false);
             }
@@ -778,12 +795,38 @@ impl AboutPage {
     /// see [`update_script`]. A status that cannot be read counts as stopped:
     /// starting a proxy the user may have turned off is the worse mistake, and
     /// if it was running AdGuard says so in the terminal.
+    ///
+    /// When the notice says the channel cannot deliver what AdGuard offers, the
+    /// channel is moved to Release first, as the button then says. Otherwise
+    /// the button runs an update that installs the same build again and leaves
+    /// the page exactly as it was — which is what it did, twice, on 22 October
+    /// 2026, with the explanation in plain view above it.
     fn run_update(self: &Rc<Self>) {
         let cli = self.cli.clone();
         let this = self.clone();
+        let to_release = self.to_release.get();
+        self.run_update.set_sensitive(false);
         worker::run(
-            move || cli.status().is_ok_and(|status| status.running),
-            move |running| this.open_update(running),
+            move || {
+                if to_release {
+                    cli.set_update_channel(Channel::Release)?;
+                }
+                Ok(cli.status().is_ok_and(|status| status.running))
+            },
+            move |running: Result<bool, adguard_core::Error>| {
+                this.run_update.set_sensitive(true);
+                match running {
+                    Ok(running) => {
+                        if to_release {
+                            this.paint_channel(Channel::Release);
+                        }
+                        this.open_update(running);
+                    }
+                    Err(err) => this
+                        .toasts
+                        .add_toast(toast(&format!("Channel not changed, nothing run: {err}"))),
+                }
+            },
         );
     }
 
@@ -1254,7 +1297,7 @@ mod tests {
     fn a_stable_release_offered_to_a_beta_says_where_it_is() {
         let why = short_of("1.5.0-rc.3", "1.5.0", Channel::Beta).unwrap();
         assert!(why.contains("Beta channel"), "{why}");
-        assert!(why.contains("switch the update channel to Release to get v1.5.0"), "{why}");
+        assert!(why.contains("switches the update channel to Release"), "{why}");
         assert!(short_of("1.5.0-nightly.10", "1.5.0", Channel::Nightly).is_some());
         assert_eq!(short_of("1.5.0-rc.3", "1.5.0-rc.4", Channel::Beta), None);
         assert_eq!(short_of("1.5.0-rc.3", "1.5.0", Channel::Release), None);
