@@ -100,7 +100,9 @@ const WHAT_IT_DOES: &str =
 const WHY_NO_BUTTON: &str =
     "Updating AdGuard CLI re-runs its installer over AdGuard's privileged helper, which \
      is AdGuard's to change rather than this application's — so this one is yours to run. \
-     Run in Terminal opens it in a terminal, where it asks for anything it needs.";
+     Run in Terminal opens it in a terminal, where it asks for anything it needs. AdGuard \
+     will not update while protection is on, so the terminal pauses it first and turns it \
+     back on afterwards.";
 
 /// Beside the "last changed" figure, and load-bearing rather than decorative:
 /// the column behind that figure moves only when data arrives, so a long gap is
@@ -150,6 +152,27 @@ const WHY_NOT_THIS_COPY: &str =
 /// The command that does it. Named, and only ever run in a terminal the user
 /// drives (contract §14).
 const UPDATE_COMMAND: &str = "adguard-cli update";
+
+/// What *Run in Terminal* runs, given the resolved binary already quoted.
+///
+/// AdGuard refuses to update under a running proxy — *"You can't update while
+/// the proxy server is running, please stop the proxy server first"*, exit 0 —
+/// so handing it `update` alone, with protection on, only ever showed that.
+/// With the proxy running the script stops it, updates, and starts it again
+/// whether or not the update went through: protection was on when the button
+/// was pressed and is left that way. With it stopped, nothing is started that
+/// the user had not.
+///
+/// `;` rather than `&&` throughout: `stop` and `update` both exit 0 whatever
+/// happened (contract rule 3), so `&&` would decide nothing, and the start must
+/// follow a failed update as much as a good one.
+fn update_script(binary: &str, running: bool) -> String {
+    if running {
+        format!("{binary} stop; {binary} update; {binary} start")
+    } else {
+        format!("{binary} update")
+    }
+}
 
 /// What each update channel is, as the row under the CLI's version says it.
 fn channel_meaning(channel: Channel) -> &'static str {
@@ -690,14 +713,30 @@ impl AboutPage {
     /// Hand `adguard-cli update` to a terminal, as *Fix certificate* does
     /// `cert`. The binary is the resolved one, quoted, so the terminal runs the
     /// copy this page describes rather than whichever `$PATH` finds first.
-    fn run_update(&self) {
-        let command = format!(
-            "{} update",
-            glib::shell_quote(self.cli.binary()).to_string_lossy()
+    ///
+    /// `status` is asked first, because what the terminal runs depends on it —
+    /// see [`update_script`]. A status that cannot be read counts as stopped:
+    /// starting a proxy the user may have turned off is the worse mistake, and
+    /// if it was running AdGuard says so in the terminal.
+    fn run_update(self: &Rc<Self>) {
+        let cli = self.cli.clone();
+        let this = self.clone();
+        worker::run(
+            move || cli.status().is_ok_and(|status| status.running),
+            move |running| this.open_update(running),
         );
+    }
+
+    fn open_update(&self, running: bool) {
+        let binary = glib::shell_quote(self.cli.binary()).to_string_lossy().into_owned();
+        let command = update_script(&binary, running);
         if crate::terminal::open(&command) {
             self.updating.set(true);
-            self.toasts.add_toast(toast("Follow AdGuard's update in the terminal"));
+            self.toasts.add_toast(toast(if running {
+                "Protection is paused while AdGuard updates in the terminal"
+            } else {
+                "Follow AdGuard's update in the terminal"
+            }));
         } else {
             // No terminal we know how to drive: the command is still the way,
             // so hand it over to be pasted into one.
@@ -1136,6 +1175,16 @@ mod tests {
         assert!(why.contains("yours to run"));
         assert!(why.contains("terminal"));
         assert_eq!(UPDATE_COMMAND, "adguard-cli update");
+    }
+
+    /// AdGuard will not update under a running proxy, so the script stops it,
+    /// and starts it again even after an update that failed. A stopped proxy
+    /// is left stopped.
+    #[test]
+    fn the_update_steps_around_a_running_proxy() {
+        assert_eq!(update_script("'/a b/adguard-cli'", false), "'/a b/adguard-cli' update");
+        assert_eq!(update_script("cli", true), "cli stop; cli update; cli start");
+        assert!(WHY_NO_BUTTON.contains("pauses it first"));
     }
 
     /// The notice repeats AdGuard's sentence, so it reads the same whether it
