@@ -11,6 +11,18 @@ This file is the one changelog.
 
 ---
 
+## 1.12.2 — 22 October 2026
+
+### Updating AdGuard CLI from the About page works with protection on
+
+*Run in Terminal* handed AdGuard CLI's `update` to a terminal on its own, and AdGuard CLI will not update while protection is on. So with protection on, the terminal only ever said "You can't update while the proxy server is running". The terminal now turns protection off, runs the update, and turns protection back on. Protection stays on when you close the terminal: before this fix, a proxy started from that terminal stopped as soon as it closed. With protection off, the update runs on its own and protection stays off. When the update lands, a notice names the version now installed.
+
+### A stable AdGuard CLI offered on the Beta channel
+
+On Beta or Nightly, AdGuard offers a stable release as soon as one is out, but its update installs that channel's newest build, which can be older. On 22 October it offered 1.5.0 and installed 1.5.0-rc.3, every time it was asked. When that happens the About page now says so, and the button becomes *Switch to Release and Update*. It moves AdGuard CLI's update channel to Release, then runs the update.
+
+---
+
 ## 1.12.1 — 18 October 2026
 
 ### A licence wiped out with AdGuard's settings file comes back by itself
