@@ -171,9 +171,24 @@ const RUN_UPDATE_ON_RELEASE: &str = "Switch to Release and Update";
 /// `;` rather than `&&` throughout: `stop` and `update` both exit 0 whatever
 /// happened (contract rule 3), so `&&` would decide nothing, and the start must
 /// follow a failed update as much as a good one.
+///
+/// # The start is taken out of the terminal's session
+///
+/// A plain `start` here left protection **off**, every time. The daemon it
+/// forks stays in the terminal's session, and closing the terminal — *Press
+/// Enter to close* — hangs it up: three updates on 22 October 2026 each
+/// started a proxy that stopped two seconds later, at the Enter, and the same
+/// happened to a `start` in a `script` pty the moment it closed. `setsid -w`
+/// gives it a session of its own, the way the application's own start has
+/// one, and survived the same test. Its output goes nowhere, since the daemon
+/// would otherwise hold a terminal that is about to disappear; `status`
+/// afterwards says in the terminal whether it took.
 fn update_script(binary: &str, running: bool) -> String {
     if running {
-        format!("{binary} stop; {binary} update; {binary} start")
+        format!(
+            "{binary} stop; {binary} update; \
+             setsid -w {binary} start </dev/null >/dev/null 2>&1; {binary} status"
+        )
     } else {
         format!("{binary} update")
     }
@@ -1287,7 +1302,10 @@ mod tests {
     #[test]
     fn the_update_steps_around_a_running_proxy() {
         assert_eq!(update_script("'/a b/adguard-cli'", false), "'/a b/adguard-cli' update");
-        assert_eq!(update_script("cli", true), "cli stop; cli update; cli start");
+        assert_eq!(
+            update_script("cli", true),
+            "cli stop; cli update; setsid -w cli start </dev/null >/dev/null 2>&1; cli status"
+        );
         assert!(WHY_NO_BUTTON.contains("pauses it first"));
     }
 
