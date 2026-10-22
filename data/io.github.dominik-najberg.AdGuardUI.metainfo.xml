@@ -53,6 +53,12 @@
     application is its first release.
   -->
   <releases>
+    <release version="1.12.2" type="stable" date="2026-10-22">
+      <url type="details">https://github.com/dominik-najberg/AdGuard-UI-Linux/releases/tag/v1.12.2</url>
+      <description>
+        <p>Updating AdGuard CLI from the About page works with protection on: the terminal turns protection off for the update and back on afterwards, and it stays on when the terminal is closed. When AdGuard offers a stable release to a Beta or Nightly install, the button switches the update channel to Release before updating.</p>
+      </description>
+    </release>
     <release version="1.12.1" type="stable" date="2026-10-18">
       <url type="details">https://github.com/dominik-najberg/AdGuard-UI-Linux/releases/tag/v1.12.1</url>
       <description>
