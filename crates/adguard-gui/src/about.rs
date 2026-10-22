@@ -174,6 +174,34 @@ fn update_script(binary: &str, running: bool) -> String {
     }
 }
 
+/// Why updating may not bring the version AdGuard offers, when the reason is
+/// known.
+///
+/// `update` runs the `install.sh` on the channel's own branch of AdGuard's
+/// repository, and that script pins one version. AdGuard's notice, though,
+/// offers anything newer, a stable release included. Measured on 22 October
+/// 2026: on Beta, with v1.5.0 out the evening before, the notice said
+/// *"AdGuard CLI v1.5.0 is now available"*, `update` went from 1.5.0-rc.2 to
+/// 1.5.0-rc.3 — the version the `beta` branch's script names — and the notice
+/// said the same thing again. Pressing the button again installs rc.3 again,
+/// and nothing on the page changes — so the notice says where the stable build
+/// is, before the button is pressed rather than after it has failed.
+///
+/// "May be older", not "is": the branch's script is bumped by AdGuard, and
+/// once it names the stable build the advice is merely unnecessary. Only for a
+/// stable version offered to a pre-release on another channel, the one case
+/// measured; anything else is left as AdGuard's sentence alone.
+fn short_of(installed: &str, newer: &str, channel: Channel) -> Option<String> {
+    if channel == Channel::Release || newer.contains('-') || !installed.contains('-') {
+        return None;
+    }
+    Some(format!(
+        "v{newer} is a stable release. Updating on the {} channel installs that channel's \
+         newest build, which may be older — switch the update channel to Release to get v{newer}.",
+        channel.label()
+    ))
+}
+
 /// What each update channel is, as the row under the CLI's version says it.
 fn channel_meaning(channel: Channel) -> &'static str {
     match channel {
@@ -215,6 +243,16 @@ pub struct AboutPage {
     /// was available. The version is read again each time the window comes
     /// back into focus until it says nothing is — see [`Self::recheck_update`].
     updating: Cell<bool>,
+    /// The version the last read found, and the one it was when *Run in
+    /// Terminal* was pressed. A read that finds them different is the update
+    /// landing, which is said in a toast: the version row changing by itself
+    /// is easy to miss, and the notice may well stay up (see [`short_of`]).
+    version_now: RefCell<Option<String>>,
+    version_before: RefCell<Option<String>>,
+    /// What AdGuard last said was newer, kept so the notice can be redrawn
+    /// when the channel arrives: [`short_of`] depends on both, and the two are
+    /// read in parallel.
+    newer_now: RefCell<Option<String>>,
 
     /// When new filter data last arrived, from the catalogues themselves.
     ///
@@ -370,7 +408,7 @@ impl AboutPage {
             .build();
         notice.set_visible(false);
         let notice_row = row("AdGuard reports", PLACEHOLDER);
-        notice_row.set_subtitle_lines(3);
+        notice_row.set_subtitle_lines(6);
         notice_row.set_subtitle_selectable(true);
         let command = row("To update, run", UPDATE_COMMAND);
         command.set_subtitle_selectable(true);
@@ -463,6 +501,9 @@ impl AboutPage {
             channel_now: Cell::new(Channel::Release),
             painting: Cell::new(false),
             updating: Cell::new(false),
+            version_now: RefCell::new(None),
+            version_before: RefCell::new(None),
+            newer_now: RefCell::new(None),
             ui_standing: ui_standing.clone(),
             ui_check: ui_check.clone(),
             ui_notice,
@@ -597,7 +638,14 @@ impl AboutPage {
             move || cli.installed(),
             move |installed: Result<adguard_core::Installed, adguard_core::Error>| match installed {
                 Ok(installed) => {
-                    this.cli_version.set_subtitle(short_version(&installed.banner));
+                    let version = short_version(&installed.banner).to_owned();
+                    this.cli_version.set_subtitle(&version);
+                    let before = this.version_before.borrow().clone();
+                    if this.updating.get() && before.is_some_and(|before| before != version) {
+                        this.updating.set(false);
+                        this.toasts.add_toast(toast(&format!("AdGuard CLI updated to v{version}")));
+                    }
+                    this.version_now.replace(Some(version));
                     // `--version` carries AdGuard's word on a newer build for
                     // free, so the notice is current without `check-update`.
                     this.render_newer(installed.newer.as_deref());
@@ -611,10 +659,18 @@ impl AboutPage {
 
     /// Show AdGuard's word on a newer build of itself, or take it away.
     fn render_newer(&self, newer: Option<&str>) {
+        self.newer_now.replace(newer.map(str::to_owned));
         match newer {
             Some(newer) => {
                 self.cli_standing.set_label(&format!("{newer} available"));
-                self.notice_row.set_subtitle(&available(newer));
+                let installed = self.version_now.borrow();
+                let why = installed
+                    .as_deref()
+                    .and_then(|installed| short_of(installed, newer, self.channel_now.get()));
+                self.notice_row.set_subtitle(&match why {
+                    Some(why) => format!("{}\n{why}", available(newer)),
+                    None => available(newer),
+                });
                 self.notice.set_visible(true);
             }
             None => {
@@ -646,6 +702,10 @@ impl AboutPage {
                 Ok(channel) => {
                     this.paint_channel(channel);
                     this.channel.set_sensitive(true);
+                    let newer = this.newer_now.borrow().clone();
+                    if newer.is_some() {
+                        this.render_newer(newer.as_deref());
+                    }
                 }
                 Err(err) => {
                     this.channel.set_sensitive(false);
@@ -732,6 +792,7 @@ impl AboutPage {
         let command = update_script(&binary, running);
         if crate::terminal::open(&command) {
             self.updating.set(true);
+            self.version_before.replace(self.version_now.borrow().clone());
             self.toasts.add_toast(toast(if running {
                 "Protection is paused while AdGuard updates in the terminal"
             } else {
@@ -1185,6 +1246,19 @@ mod tests {
         assert_eq!(update_script("'/a b/adguard-cli'", false), "'/a b/adguard-cli' update");
         assert_eq!(update_script("cli", true), "cli stop; cli update; cli start");
         assert!(WHY_NO_BUTTON.contains("pauses it first"));
+    }
+
+    /// A stable release offered to a beta build is explained; a newer
+    /// pre-release, or anything on Release, is left to AdGuard's sentence.
+    #[test]
+    fn a_stable_release_offered_to_a_beta_says_where_it_is() {
+        let why = short_of("1.5.0-rc.3", "1.5.0", Channel::Beta).unwrap();
+        assert!(why.contains("Beta channel"), "{why}");
+        assert!(why.contains("switch the update channel to Release to get v1.5.0"), "{why}");
+        assert!(short_of("1.5.0-nightly.10", "1.5.0", Channel::Nightly).is_some());
+        assert_eq!(short_of("1.5.0-rc.3", "1.5.0-rc.4", Channel::Beta), None);
+        assert_eq!(short_of("1.5.0-rc.3", "1.5.0", Channel::Release), None);
+        assert_eq!(short_of("1.4.13", "1.5.0", Channel::Beta), None);
     }
 
     /// The notice repeats AdGuard's sentence, so it reads the same whether it
