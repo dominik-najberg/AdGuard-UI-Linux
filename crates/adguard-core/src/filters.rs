@@ -254,9 +254,10 @@ impl Catalogue {
     /// rather than the tens of megabytes of text.
     ///
     /// The file's modification time would not do: the catalogue is in WAL
-    /// mode on 1.5.0 (contract §6), so a write lands in `-wal` and reaches the
-    /// file only at a checkpoint, and every reader, this one included, touches
-    /// `-wal`.
+    /// mode on 1.5.0 — measured 24 October 2026, `PRAGMA journal_mode` answers
+    /// `wal`, with `-wal` and `-shm` beside the file — so a write lands in
+    /// `-wal` and reaches the file only at a checkpoint, and every reader, this
+    /// one included, touches `-wal`.
     pub fn installed_rules_stamp(&self) -> Result<Vec<RulesStamp>, Error> {
         let mut stmt = self.conn.prepare(
             "SELECT f.filter_id, f.is_enabled, r.text_hash, IFNULL(r.rules_count, 0),
