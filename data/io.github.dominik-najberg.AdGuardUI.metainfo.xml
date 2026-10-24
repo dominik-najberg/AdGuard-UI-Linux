@@ -53,6 +53,12 @@
     application is its first release.
   -->
   <releases>
+    <release version="1.13.0" type="stable" date="2026-10-25">
+      <url type="details">https://github.com/dominik-najberg/AdGuard-UI-Linux/releases/tag/v1.13.0</url>
+      <description>
+        <p>Check a Website on the Diagnostics page takes a full address and says which rule in your filter lists blocks it and which list the rule is in, even for a site you have not opened yet. An Allow button switches filtering off on the site with one rule added to your own rules, and Remove takes it back. The check also lists the addresses that were blocked, each name under the site and the newest requests. The Activity page has two tabs, Overview and Requests, with the request search at the top of its own tab. Rules you wrote are shown as yours rather than as AdGuard Base filter's.</p>
+      </description>
+    </release>
     <release version="1.12.2" type="stable" date="2026-10-22">
       <url type="details">https://github.com/dominik-najberg/AdGuard-UI-Linux/releases/tag/v1.12.2</url>
       <description>
