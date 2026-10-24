@@ -19,7 +19,7 @@ This file is the one changelog.
 
 Beside that, an *Allowlist* row has an **Allow** button. It switches filtering off on the site with one rule added to your own rules, and AdGuard applies it straight away; **Remove** takes it back. The rule is `@@||site^$document,important`. Without `important`, a blocking rule marked important still wins.
 
-A rule from your own rules was shown as belonging to AdGuard Base filter, because AdGuard's log gives it that list's number. It is now shown as yours.
+A rule from your own rules was shown as belonging to AdGuard Base filter, because AdGuard's log gives it that list's number. It is now shown as yours, in the website check and on the Activity page, in *Rules That Matched Most* and in the request search alike. A rule that is no longer in the list the log names, nor in your own rules, is shown as no longer there.
 
 ---
 

@@ -24,13 +24,13 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use adguard_core::activity::{self, Bucket, Span, Store, Summary};
-use adguard_core::{access, Catalogue, FilterSet, Locale};
+use adguard_core::{access, rules, Catalogue, FilterSet, Locale};
 use adw::prelude::*;
 use gtk::glib;
 use gtk4 as gtk;
 use libadwaita as adw;
 
-use crate::requests::RequestSearch;
+use crate::requests::{self, RequestSearch};
 use crate::{style, toast, worker};
 
 /// How often [`keep_up`] reads the log.
@@ -450,11 +450,11 @@ impl ActivityPage {
                 "Rules That Matched Most",
                 search,
                 summary.rules.iter().map(|rule| {
-                    let list = loaded
-                        .names
-                        .get(&rule.filter)
-                        .cloned()
-                        .unwrap_or_else(|| format!("Filter list {}", rule.filter));
+                    let mut list = requests::list_name(&loaded.names, rule.filter, rule.gone);
+                    // It starts the line here.
+                    if let Some(first) = list.get_mut(..1) {
+                        first.make_ascii_uppercase();
+                    }
                     (rule.text.clone(), Some(format!("{list} · {}", verb(rule.action))), rule.requests)
                 }),
             ),
@@ -590,7 +590,15 @@ fn load(span: Span) -> Result<Loaded, String> {
     if let Some(live) = access::path() {
         store.ingest(&live).map_err(|err| err.to_string())?;
     }
-    let summary = store.summary(span).map_err(|err| err.to_string())?;
+    let mut summary = store.summary(span).map_err(|err| err.to_string())?;
+    // AdGuard logs the user's own rules under AdGuard Base filter's id; the
+    // lists say where each rule really is. Lists that cannot be read leave
+    // each rule under the list the log names.
+    if !summary.rules.is_empty() {
+        if let Ok(lists) = rules::Lists::current() {
+            summary.attribute(&lists);
+        }
+    }
 
     // Names for the lists the rules came from. A catalogue that cannot be read
     // costs the names and nothing else.
