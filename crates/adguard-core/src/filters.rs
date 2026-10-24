@@ -58,6 +58,20 @@ pub struct Catalogue {
     conn: Connection,
 }
 
+/// One installed list in [`Catalogue::installed_rules_stamp`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RulesStamp {
+    pub filter: i64,
+    pub enabled: bool,
+    /// `rules_list.text_hash`, which AdGuard keeps for every list it
+    /// downloaded; `None` for the user-rules row.
+    pub hash: Option<String>,
+    pub count: i64,
+    /// The rules switched off in the list, in full: they are few, and a
+    /// length would miss one swapped for another as long.
+    pub disabled: String,
+}
+
 impl Catalogue {
     /// Open a filter database read-only.
     pub fn open(path: &Path) -> Result<Self, Error> {
@@ -195,27 +209,29 @@ impl Catalogue {
         Ok(newest)
     }
 
-    /// The rules of every list that is switched on and installed, by filter id,
-    /// as AdGuard stores them — for [`crate::rules`] to match an address against.
+    /// The rules of every installed list, by filter id, whether it is switched
+    /// on, and its text as AdGuard stores it — for [`crate::rules`] to match an
+    /// address against the lists that are on, and to find which list a rule
+    /// from the log is in, on or not.
     ///
     /// Rules the user disabled in a list (`disabled_rules_text`, one per line)
     /// are taken out. The user-rules pseudo-filter's row holds no text: its
     /// rules are `user.txt`, which the caller reads itself.
-    pub fn enabled_rules(&self) -> Result<Vec<(i64, String)>, Error> {
+    pub fn installed_rules(&self) -> Result<Vec<(i64, bool, String)>, Error> {
         let mut stmt = self.conn.prepare(
-            "SELECT f.filter_id, r.rules_text, r.disabled_rules_text
+            "SELECT f.filter_id, f.is_enabled, r.rules_text, r.disabled_rules_text
              FROM filter f JOIN rules_list r ON r.filter_id = f.filter_id
-             WHERE f.is_enabled = 1 AND f.is_installed = 1 AND f.filter_id != ?1
+             WHERE f.is_installed = 1 AND f.filter_id != ?1
              ORDER BY f.filter_id",
         )?;
         let rows = stmt.query_map([Filter::USER_RULES_ID], |row| {
-            let text: Option<String> = row.get(1)?;
-            let disabled: Option<String> = row.get(2)?;
-            Ok((row.get::<_, i64>(0)?, text.unwrap_or_default(), disabled.unwrap_or_default()))
+            let text: Option<String> = row.get(2)?;
+            let disabled: Option<String> = row.get(3)?;
+            Ok((row.get::<_, i64>(0)?, row.get::<_, bool>(1)?, text.unwrap_or_default(), disabled.unwrap_or_default()))
         })?;
         let mut lists = Vec::new();
         for row in rows {
-            let (id, text, disabled) = row?;
+            let (id, enabled, text, disabled) = row?;
             let disabled: std::collections::HashSet<&str> =
                 disabled.lines().map(str::trim).filter(|line| !line.is_empty()).collect();
             let text = if disabled.is_empty() {
@@ -226,9 +242,40 @@ impl Catalogue {
                     .collect::<Vec<_>>()
                     .join("\n")
             };
-            lists.push((id, text));
+            lists.push((id, enabled, text));
         }
         Ok(lists)
+    }
+
+    /// What [`Self::installed_rules`] would read, in a few bytes a list: which
+    /// lists are installed and which are on, the user-rules pseudo-filter
+    /// among them, and each one's `text_hash`, rule count and switched-off
+    /// rules. It changes when that would, and reading it costs a millisecond
+    /// rather than the tens of megabytes of text.
+    ///
+    /// The file's modification time would not do: the catalogue is in WAL
+    /// mode on 1.5.0 — measured 24 October 2026, `PRAGMA journal_mode` answers
+    /// `wal`, with `-wal` and `-shm` beside the file — so a write lands in
+    /// `-wal` and reaches the file only at a checkpoint, and every reader, this
+    /// one included, touches `-wal`.
+    pub fn installed_rules_stamp(&self) -> Result<Vec<RulesStamp>, Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT f.filter_id, f.is_enabled, r.text_hash, IFNULL(r.rules_count, 0),
+                    IFNULL(r.disabled_rules_text, '')
+             FROM filter f LEFT JOIN rules_list r ON r.filter_id = f.filter_id
+             WHERE f.is_installed = 1
+             ORDER BY f.filter_id",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(RulesStamp {
+                filter: row.get(0)?,
+                enabled: row.get(1)?,
+                hash: row.get(2)?,
+                count: row.get(3)?,
+                disabled: row.get(4)?,
+            })
+        })?;
+        rows.collect::<Result<_, _>>().map_err(Into::into)
     }
 
     /// The lists the user installed by URL.
@@ -378,6 +425,49 @@ mod tests {
         assert!(catalogue.conn.execute("INSERT INTO filter VALUES (1)", []).is_err());
 
         drop(catalogue);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The stamp moves with every change [`Catalogue::installed_rules`] would
+    /// see, and not otherwise.
+    #[test]
+    fn the_rules_stamp_follows_what_would_be_read() {
+        let dir = std::env::temp_dir().join(format!("adguard-ui-filters-stamp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create scratch dir");
+        let path = dir.join("catalogue.db");
+        let writer = rusqlite::Connection::open(&path).expect("create a database");
+        writer
+            .execute_batch(
+                "CREATE TABLE filter (filter_id INTEGER PRIMARY KEY, is_enabled BOOLEAN, is_installed BOOLEAN,
+                                      last_download_time INTEGER);
+                 CREATE TABLE rules_list (filter_id INTEGER, rules_text TEXT, disabled_rules_text TEXT,
+                                          rules_count INTEGER, text_hash TEXT);
+                 INSERT INTO filter VALUES (-2147483648, 1, 1, 0), (2, 1, 1, 0), (3, 0, 1, 0), (4, 0, 0, 0);
+                 INSERT INTO rules_list VALUES (-2147483648, NULL, NULL, 0, NULL),
+                                               (2, '||a.example^', '', 1, 'aa'), (3, '||b.example^', '', 1, 'bb');",
+            )
+            .expect("fill it");
+        let stamp = || Catalogue::open(&path).unwrap().installed_rules_stamp().unwrap();
+
+        let first = stamp();
+        assert_eq!(first.iter().map(|row| row.filter).collect::<Vec<_>>(), [-2147483648, 2, 3], "installed");
+        writer.execute("UPDATE filter SET last_download_time = 1", []).unwrap();
+        assert_eq!(stamp(), first, "a download that changed nothing");
+        for change in [
+            "UPDATE rules_list SET text_hash = 'ab' WHERE filter_id = 2",
+            "UPDATE rules_list SET disabled_rules_text = '||a.example^' WHERE filter_id = 2",
+            "UPDATE rules_list SET disabled_rules_text = '||b.example^' WHERE filter_id = 2",
+            "UPDATE filter SET is_enabled = 1 WHERE filter_id = 3",
+            "UPDATE filter SET is_installed = 1 WHERE filter_id = 4",
+            "UPDATE filter SET is_enabled = 0 WHERE filter_id = -2147483648",
+        ] {
+            let before = stamp();
+            writer.execute(change, []).unwrap();
+            assert_ne!(stamp(), before, "{change}");
+        }
+
+        drop(writer);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -14,6 +14,7 @@ use std::rc::Rc;
 use adguard_core::access;
 use adguard_core::activity::Action;
 use adguard_core::requests::{self, Found, Hit, Query};
+use adguard_core::rules;
 use adw::prelude::*;
 use gtk::glib;
 use gtk4 as gtk;
@@ -130,7 +131,19 @@ impl RequestSearch {
         };
         let this = self.clone();
         worker::run(
-            move || access::path().map(|live| requests::search(&live, &query)),
+            move || {
+                access::path().map(|live| {
+                    let mut found = requests::search(&live, &query);
+                    // Lists that cannot be read leave each rule under the
+                    // list the log names.
+                    if found.hits.iter().any(|hit| hit.rule.is_some()) {
+                        if let Ok(lists) = rules::Lists::current() {
+                            found.attribute(&lists);
+                        }
+                    }
+                    found
+                })
+            },
             move |found: Option<Found>| {
                 this.busy.set(false);
                 if this.again.take() {
@@ -241,10 +254,26 @@ fn subtitle(hit: &Hit, names: &HashMap<i64, String>) -> String {
     line.push_str(" · ");
     line.push_str(outcome(hit.action));
     if let (Some(filter), Some(rule)) = (hit.filter, hit.rule.as_deref()) {
-        let list = names.get(&filter).cloned().unwrap_or_else(|| format!("filter list {filter}"));
-        line.push_str(&format!("\n{rule}  — {list}"));
+        line.push_str(&format!("\n{rule}  — {}", list_name(names, filter, hit.gone)));
     }
     line
+}
+
+/// The list a rule is in, as the Activity page names it: the catalogue's
+/// name, "Your rules", or the id when neither is known. For a rule that is
+/// in neither the list the log names nor the user's own rules any more,
+/// that it is no longer there — not the list the log pinned it on.
+pub(crate) fn list_name(names: &HashMap<i64, String>, filter: i64, gone: bool) -> String {
+    let list = match names.get(&filter) {
+        Some(name) => name.clone(),
+        None if filter == rules::USER_RULES => "Your rules".to_owned(),
+        None => format!("filter list {filter}"),
+    };
+    if gone {
+        format!("no longer in {list} or your rules")
+    } else {
+        list
+    }
 }
 
 fn outcome(action: Action) -> &'static str {
@@ -293,6 +322,7 @@ mod tests {
             action,
             filter: rule.map(|(id, _)| id),
             rule: rule.map(|(_, text)| text.to_owned()),
+            gone: false,
         }
     }
 
@@ -305,6 +335,19 @@ mod tests {
         assert!(line.contains("AdGuard Base filter"), "{line}");
         let unnamed = subtitle(&hit(Action::Blocked, Some((9, "||a.example^"))), &HashMap::new());
         assert!(unnamed.contains("filter list 9"), "{unnamed}");
+    }
+
+    /// Measured: AdGuard logs a rule from `user.txt` as `ID=2`. Once
+    /// attributed, it is the user's; a rule no list holds is not pinned on 2.
+    #[test]
+    fn an_attributed_rule_names_where_it_is_now() {
+        let names = HashMap::from([(2, "AdGuard Base filter".to_owned())]);
+        let mine = subtitle(&hit(Action::Blocked, Some((rules::USER_RULES, "||a.example^"))), &names);
+        assert!(mine.ends_with("— Your rules"), "{mine}");
+        let mut taken_back = hit(Action::Allowed, Some((2, "@@||a.example^$document,important")));
+        taken_back.gone = true;
+        let line = subtitle(&taken_back, &names);
+        assert!(line.ends_with("— no longer in AdGuard Base filter or your rules"), "{line}");
     }
 
     #[test]

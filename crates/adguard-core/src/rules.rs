@@ -6,7 +6,7 @@
 //! address" — `--help-all` on 1.5.0 lists none — and its log knows only the
 //! requests that were made, for as long as it keeps them. So this reads the
 //! rule text AdGuard stores for every list that is on (`rules_list` in
-//! `agflm_standard.db`, [`Catalogue::enabled_rules`]) and `user.txt`, and
+//! `agflm_standard.db`, [`Catalogue::installed_rules`]) and `user.txt`, and
 //! matches the address against them with AdGuard's basic-rule syntax as its
 //! knowledge base describes it. **It is this application's reading of that
 //! syntax, not AdGuard's engine**, and the page that shows it says so; where
@@ -50,12 +50,19 @@
 //!   website check's name lookup is what sees it.
 
 use std::collections::HashSet;
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::SystemTime;
 
+use crate::filters::RulesStamp;
 use crate::model::Filter;
 use crate::{Catalogue, FilterSet, Locale};
 
 /// The user's own rules, as the log and the catalogue number them.
 pub const USER_RULES: i64 = Filter::USER_RULES_ID;
+
+/// What [`Lists::current`] compares: the catalogue's stamp, and `user.txt`'s
+/// modification time and length.
+type Stamp = (Vec<RulesStamp>, Option<(SystemTime, u64)>);
 
 /// How many rules besides the deciding ones [`Check::matches`] keeps.
 const MATCHES: usize = 8;
@@ -173,11 +180,14 @@ pub struct Check {
     pub rules: usize,
 }
 
-/// The rules of every list that is on, `user.txt` among them when the user's
-/// rules are on.
+/// The rules of every installed list and `user.txt`. Those switched off are
+/// kept to say which list a logged rule is in ([`Self::source`]) and left out
+/// of matching ([`Self::check`]).
 #[derive(Debug, Default)]
 pub struct Lists {
     lists: Vec<(i64, String)>,
+    /// The lists in [`Self::lists`] that are switched off.
+    off: HashSet<i64>,
 }
 
 impl Lists {
@@ -185,23 +195,69 @@ impl Lists {
     /// few tens of megabytes of text.
     pub fn read() -> Result<Self, String> {
         let catalogue = Catalogue::open_set(FilterSet::Http).map_err(|err| err.to_string())?;
-        let mut lists = catalogue.enabled_rules().map_err(|err| err.to_string())?;
+        let mut lists = Vec::new();
+        let mut off = HashSet::new();
+        for (id, enabled, text) in catalogue.installed_rules().map_err(|err| err.to_string())? {
+            if !enabled {
+                off.insert(id);
+            }
+            lists.push((id, text));
+        }
         let user_rules_on = catalogue
             .user_rules(&Locale::from_env())
             .ok()
             .flatten()
             .is_some_and(|filter| filter.enabled);
-        if user_rules_on {
-            if let Some(text) = crate::paths::user_rules_file().and_then(|path| std::fs::read_to_string(path).ok()) {
-                lists.push((USER_RULES, text));
+        if let Some(text) = crate::paths::user_rules_file().and_then(|path| std::fs::read_to_string(path).ok()) {
+            if !user_rules_on {
+                off.insert(USER_RULES);
             }
+            lists.push((USER_RULES, text));
         }
-        Ok(Self { lists })
+        Ok(Self { lists, off })
     }
 
-    /// From lists already in hand, for tests.
+    /// From lists already in hand, all switched on, for tests.
     pub fn from_lists(lists: Vec<(i64, String)>) -> Self {
-        Self { lists }
+        Self { lists, off: HashSet::new() }
+    }
+
+    /// As [`Self::from_lists`], with the lists `off` switched off.
+    pub fn with_off(mut self, off: impl IntoIterator<Item = i64>) -> Self {
+        self.off.extend(off);
+        self
+    }
+
+    /// The lists that are switched on, for matching.
+    fn on(&self) -> impl Iterator<Item = &(i64, String)> {
+        self.lists.iter().filter(|(id, _)| !self.off.contains(id))
+    }
+
+    /// [`Self::read`], kept for as long as the lists that are on and
+    /// `user.txt` are unchanged. The Activity page asks on every refresh and
+    /// every search, and a read takes a tenth of a second to a second.
+    ///
+    /// Unchanged is [`Catalogue::installed_rules_stamp`] — a list installed,
+    /// switched on or off, updated or with a rule switched off in it — and
+    /// `user.txt`'s modification time and length. Callers wait for a read already under
+    /// way rather than start a second one.
+    pub fn current() -> Result<Arc<Self>, String> {
+        static CACHE: Mutex<Option<(Stamp, Arc<Lists>)>> = Mutex::new(None);
+        let catalogue = Catalogue::open_set(FilterSet::Http).map_err(|err| err.to_string())?;
+        let user = crate::paths::user_rules_file()
+            .and_then(|path| std::fs::metadata(path).ok())
+            .and_then(|meta| Some((meta.modified().ok()?, meta.len())));
+        let stamp = (catalogue.installed_rules_stamp().map_err(|err| err.to_string())?, user);
+        drop(catalogue);
+        let mut cache = CACHE.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some((seen, lists)) = cache.as_ref() {
+            if *seen == stamp {
+                return Ok(lists.clone());
+            }
+        }
+        let lists = Arc::new(Self::read()?);
+        *cache = Some((stamp, lists.clone()));
+        Ok(lists)
     }
 
     /// The list a rule from AdGuard's log is really in.
@@ -212,7 +268,8 @@ impl Lists {
     /// under their own ids. So a rule the logged list does not hold and
     /// `user.txt` does is the user's own. `None` when neither holds it any
     /// more — an exception the user allowed and took back is in the log under
-    /// `ID=2` for days afterwards.
+    /// `ID=2` for days afterwards. A list switched off since still holds its
+    /// rules: the log is history, and the rule was that list's.
     pub fn source(&self, logged: i64, rule: &str) -> Option<i64> {
         let holds = |id: i64| {
             self.lists
@@ -235,7 +292,7 @@ impl Lists {
         let mut found: Vec<Match> = Vec::new();
         let mut regex = 0;
         let mut rules = 0;
-        for (filter, text) in &self.lists {
+        for (filter, text) in self.on() {
             for line in text.lines() {
                 let line = line.trim();
                 let Some(rule) = Rule::parse(line) else { continue };
@@ -270,7 +327,7 @@ impl Lists {
     /// The rules a `$badfilter` rule switches off, as their text.
     fn badfiltered(&self) -> HashSet<String> {
         let mut off = HashSet::new();
-        for (_, text) in &self.lists {
+        for (_, text) in self.on() {
             for line in text.lines().map(str::trim).filter(|line| line.contains("badfilter")) {
                 let Some((head, modifiers)) = line.rsplit_once('$') else { continue };
                 let kept: Vec<&str> = modifiers.split(',').filter(|m| m.trim() != "badfilter").collect();
@@ -796,5 +853,16 @@ mod tests {
         assert_eq!(lists.source(2, "||example.com^"), Some(USER_RULES), "measured: logged as ID=2");
         assert_eq!(lists.source(2, "||ads.example.net^"), Some(2));
         assert_eq!(lists.source(2, "@@||taken.back^$document,important"), None);
+    }
+
+    /// A list switched off decides nothing, and still holds the rules the log
+    /// has from it; so do the user's rules, switched off.
+    #[test]
+    fn a_list_switched_off_still_holds_its_rules() {
+        let off = lists("||mine.example^").with_off([2, USER_RULES]);
+        assert_eq!(off.check(&address("ads.example.net")).verdict, Verdict::Clear);
+        assert_eq!(off.check(&address("mine.example")).verdict, Verdict::Clear);
+        assert_eq!(off.source(2, "||ads.example.net^"), Some(2));
+        assert_eq!(off.source(2, "||mine.example^"), Some(USER_RULES));
     }
 }

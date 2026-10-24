@@ -299,11 +299,16 @@ pub struct Client {
 /// A rule that decided requests, and the list it came from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rule {
-    /// The filter list's id in `agflm_standard.db`, from `ID=<n>`.
+    /// The filter list's id in `agflm_standard.db`: the log's `ID=<n>`, which
+    /// is the store's, until [`Summary::attribute`] names the list the rule
+    /// is really in.
     pub filter: i64,
     pub text: String,
     pub action: Action,
     pub requests: u64,
+    /// Neither the logged list nor `user.txt` holds the rule any more, by
+    /// [`Summary::attribute`]. [`Self::filter`] is then the logged one.
+    pub gone: bool,
 }
 
 /// Everything the page shows for one [`Span`].
@@ -327,6 +332,24 @@ pub struct Summary {
     pub recorded_since: Option<i64>,
     /// How many days of counts are kept — [`Store::retention`].
     pub retention_days: i64,
+}
+
+impl Summary {
+    /// Name the list each rule is really in, by [`crate::rules::Lists::source`]:
+    /// AdGuard logs the user's own rules as `ID=2`, AdGuard Base filter's id.
+    ///
+    /// Done when the counts are shown rather than when they are stored. The
+    /// store keeps what the log said, so a rule moved into or out of
+    /// `user.txt` is shown where it is now, and nothing stored needs
+    /// rewriting.
+    pub fn attribute(&mut self, lists: &crate::rules::Lists) {
+        for rule in &mut self.rules {
+            match lists.source(rule.filter, &rule.text) {
+                Some(source) => rule.filter = source,
+                None => rule.gone = true,
+            }
+        }
+    }
 }
 
 /// What one [`Store::ingest`] did.
@@ -645,6 +668,7 @@ impl Store {
                     text,
                     action: Action::from_key(&key)?,
                     requests: requests.max(0) as u64,
+                    gone: false,
                 })),
                 Err(err) => Some(Err(err)),
             })
@@ -1572,6 +1596,7 @@ mod tests {
         assert_eq!(summary.hosts[1], Ranked { name: "example.com".into(), requests: 2 });
         assert_eq!(summary.rules[0].text, "||ads.example.net^");
         assert_eq!((summary.rules[0].filter, summary.rules[0].requests), (2, 2));
+        assert!(!summary.rules[0].gone);
         assert_eq!(summary.clients[0].name, "firefox");
         assert_eq!((summary.clients[0].requests, summary.clients[0].blocked), (4, 2));
         assert_eq!(summary.recorded_since, Some(at("09:00:00")));
@@ -1581,6 +1606,39 @@ mod tests {
         assert_eq!(week.buckets.len(), 7);
         assert_eq!(week.buckets[6].start, at("00:00:00"));
         assert_eq!(week.buckets[6].counts.total(), 7);
+    }
+
+    /// Measured: a rule from `user.txt` is logged as `ID=2`, AdGuard Base
+    /// filter's id. The store keeps what the log said; the summary is
+    /// attributed when it is shown.
+    #[test]
+    fn a_user_rule_logged_as_base_is_shown_as_the_users() {
+        use crate::rules::{Lists, USER_RULES};
+        let scratch = Scratch::new("attribute");
+        scratch.write("access.log", &[
+            decided("10:05:00", "https://ads.example.net/1.js", "BLOCKED", 2, "||ads.example.net^"),
+            decided("10:06:00", "https://mine.example/", "BLOCKED", 2, "||mine.example^"),
+            decided("10:06:01", "https://mine.example/", "BLOCKED", 2, "||mine.example^"),
+            decided("10:07:00", "https://taken.example/", "WHITELISTED", 2, "@@||taken.example^$important"),
+        ]);
+        let mut store = scratch.store();
+        store.ingest_at(&scratch.live(), noon()).unwrap();
+        let mut summary = store.summary_at(Span::Today, noon()).unwrap();
+        assert!(summary.rules.iter().all(|rule| rule.filter == 2), "stored as logged");
+
+        summary.attribute(&Lists::from_lists(vec![
+            (2, "! Title: AdGuard Base filter\n||ads.example.net^\n".to_owned()),
+            (USER_RULES, "||mine.example^\n".to_owned()),
+        ]));
+        let find = |text: &str| summary.rules.iter().find(|rule| rule.text == text).unwrap();
+        assert_eq!((find("||mine.example^").filter, find("||mine.example^").gone), (USER_RULES, false));
+        assert_eq!(find("||mine.example^").requests, 2);
+        assert_eq!((find("||ads.example.net^").filter, find("||ads.example.net^").gone), (2, false));
+        assert_eq!(
+            (find("@@||taken.example^$important").filter, find("@@||taken.example^$important").gone),
+            (2, true),
+            "in neither list any more: still the logged id, and gone"
+        );
     }
 
     /// **The other half of the privacy decision.** Neither the path, the query

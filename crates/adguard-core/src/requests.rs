@@ -19,6 +19,7 @@
 //!
 //! [issue #21]: https://github.com/dominik-najberg/AdGuard-UI-Linux/issues/21
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use crate::activity::{self, Action, Clock};
@@ -56,9 +57,14 @@ pub struct Hit {
     pub host: Option<String>,
     pub status: Option<u16>,
     pub action: Action,
-    /// The filter list's id in `agflm_standard.db`, when a rule decided it.
+    /// The filter list's id in `agflm_standard.db`, when a rule decided it:
+    /// the log's `ID=<n>` until [`Found::attribute`] names the list the rule
+    /// is really in.
     pub filter: Option<i64>,
     pub rule: Option<String>,
+    /// Neither the logged list nor `user.txt` holds the rule any more, by
+    /// [`Found::attribute`]. [`Self::filter`] is then the logged one.
+    pub gone: bool,
 }
 
 /// What a search found.
@@ -73,6 +79,26 @@ pub struct Found {
     /// The oldest request AdGuard still has, in microseconds: the earliest a
     /// hit could possibly be. `None` when there is no log.
     pub reaches_back: Option<i64>,
+}
+
+impl Found {
+    /// Name the list each hit's rule is really in, by
+    /// [`crate::rules::Lists::source`]: AdGuard logs the user's own rules as
+    /// `ID=2`, AdGuard Base filter's id. Each rule is looked up once however
+    /// many hits it decided, and only the hits found are, never the log.
+    pub fn attribute(&mut self, lists: &crate::rules::Lists) {
+        let mut known: HashMap<(i64, String), Option<i64>> = HashMap::new();
+        for hit in &mut self.hits {
+            let (Some(filter), Some(rule)) = (hit.filter, hit.rule.as_deref()) else { continue };
+            let source = *known
+                .entry((filter, rule.to_owned()))
+                .or_insert_with(|| lists.source(filter, rule));
+            match source {
+                Some(source) => hit.filter = Some(source),
+                None => hit.gone = true,
+            }
+        }
+    }
 }
 
 /// Search the log whose live file is `live`, newest request first.
@@ -141,6 +167,7 @@ pub fn search(live: &Path, query: &Query) -> Found {
                 action: request.action,
                 filter: request.filter,
                 rule: request.rule.map(str::to_owned),
+                gone: false,
             });
         }
     }
@@ -430,6 +457,33 @@ mod tests {
         assert_eq!(found.hits[0].filter, Some(7));
         assert_eq!(found.hits[0].rule.as_deref(), Some("/tracking-pixel/"));
         assert_eq!(found.hits[0].action, Action::Blocked);
+    }
+
+    /// Measured: a rule from `user.txt` is logged as `ID=2`, AdGuard Base
+    /// filter's id.
+    #[test]
+    fn a_user_rule_logged_as_base_is_attributed_to_the_user() {
+        use crate::rules::{Lists, USER_RULES};
+        let scratch = Scratch::new("attribute");
+        scratch.write("access.log", &[
+            line("10:00:00", "firefox", "https://ads.example/", "BLOCKED", Some((2, "||ads.example^"))),
+            line("10:00:01", "firefox", "https://mine.example/", "BLOCKED", Some((2, "||mine.example^"))),
+            line("10:00:02", "firefox", "https://mine.example/a", "BLOCKED", Some((2, "||mine.example^"))),
+            line("10:00:03", "firefox", "https://taken.example/", "WHITELISTED", Some((2, "@@||taken.example^"))),
+            line("10:00:04", "firefox", "https://www.example/", "NONE", None),
+        ]);
+        let mut found = search(&scratch.live(), &Query::default());
+        assert!(found.hits.iter().all(|hit| hit.filter.is_none_or(|id| id == 2)), "as logged");
+        found.attribute(&Lists::from_lists(vec![
+            (2, "||ads.example^\n".to_owned()),
+            (USER_RULES, "||mine.example^\n".to_owned()),
+        ]));
+        let lists: Vec<_> = found.hits.iter().map(|hit| (hit.filter, hit.gone)).collect();
+        assert_eq!(
+            lists,
+            [(None, false), (Some(2), true), (Some(USER_RULES), false), (Some(USER_RULES), false), (Some(2), false)],
+            "newest first"
+        );
     }
 
     /// The cheap test reads the whole line; the exact one must not, or a word

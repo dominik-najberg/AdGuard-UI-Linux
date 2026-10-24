@@ -48,3 +48,22 @@ fn the_real_lists_decide_well_known_addresses() {
         assert!(check.rules > 0, "no rules were read");
     }
 }
+
+/// The Activity page asks for the lists on every refresh and every search;
+/// the second ask, with nothing changed, is the first one's answer.
+#[test]
+fn the_lists_are_read_once_while_nothing_changes() {
+    let started = Instant::now();
+    let first = match Lists::current() {
+        Ok(lists) => lists,
+        Err(err) => {
+            eprintln!("skipping: the lists could not be read: {err}");
+            return;
+        }
+    };
+    let read = started.elapsed();
+    let started = Instant::now();
+    let second = Lists::current().unwrap();
+    eprintln!("read in {read:?}, then {:?}", started.elapsed());
+    assert!(std::sync::Arc::ptr_eq(&first, &second));
+}
