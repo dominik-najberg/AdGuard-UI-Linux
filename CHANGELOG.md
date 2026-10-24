@@ -11,7 +11,7 @@ This file is the one changelog.
 
 ---
 
-## Unreleased
+## 1.13.0 — 25 October 2026
 
 ### Find the rule that blocks a site, and allow the site
 
