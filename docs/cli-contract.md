@@ -867,6 +867,28 @@ Two consequences for the UI, and the first is not about this row:
 - **The removal dialog is now describing the weaker action.** It names the URL and asks for confirmation, which reads as the more serious choice; for a *language* filter with this setting on, it is the one that does not stick.
 - **The row's subtitle has to carry the asymmetry**, because nothing else in the flow would: turning this on can restore lists you removed, and will not re-enable lists you disabled. That is one sentence and it is the whole reason the row needed a measurement before it could ship.
 
+### Allowing a site: `user.txt`, its reload, and the rule that wins
+
+The website check's *Allowlist* row (`allowlist.rs`) writes one line to `user.txt`. There is no CLI command for a user rule — `--help-all` on v1.5.0 has none, and no command that says what AdGuard would do with an address either — so this is the one file the application edits itself. Measured **24 October 2026 against v1.5.0** on the reference machine, through the manual HTTP proxy (`curl -x http://127.0.0.1:3129` with `Accept: text/html` and `Sec-Fetch-Dest: document`), with `user.txt` saved first and put back after each step. The proxy answers a blocked page with **500** and its own block page (~128 KB); a request it lets through answers whatever the site does.
+
+**AdGuard does not watch `user.txt`.** With `||example.com^` appended, requests went on answering 200 for seventy seconds. The first request after `adguard-cli filters enable -2147483648` was blocked — with the user-rules row **already on**, so the command reads the file again and does not merely flip a switch. `Cli::reload_user_rules` is that command; it also turns the user's rules on if they were off, which a rule written there needs anyway.
+
+**`$document` lets the page through, and `$important` is not optional:**
+
+| `user.txt` | Answer | Logged as |
+| --- | --- | --- |
+| `\|\|example.com^` | 500 | `BLOCKED … ID=2 … -- \|\|example.com^` |
+| `\|\|example.com^` + `@@\|\|example.com^$document` | 200 | `WHITELISTED` |
+| `\|\|example.com^$important` + `@@\|\|example.com^$document` | **500** | `BLOCKED` by the `$important` rule |
+| `\|\|example.com^$important` + `@@\|\|example.com^$document,important` | 200 | `WHITELISTED` |
+| `\|\|example.com^$script` | 200 | not blocked — a page is not a script |
+
+So the row writes `@@||<site>^$document,important`, and `rules.rs` ranks an `$important` exception over an `$important` block over any exception over a block.
+
+**`ID=2` in the log is not always AdGuard Base.** Every rule from `user.txt` above was logged as `ID=2`, which is AdGuard Base's `filter_id` — while rules from the catalogue's lists, checked over the whole log, were logged under their own ids. So the log's id cannot say a rule is the user's. `rules::Lists::source` reads it the other way round: a rule the logged list does not hold and `user.txt` does is the user's, and one that neither holds any more is said to be gone rather than pinned on the list the id names.
+
+**The lists the check matches against are compiled for the CLI.** `rules_list.rules_text` holds each list as downloaded from `filters.adtidy.org/cli/filters/<id>.txt`, `has_directives` is 0 for every list that is on, and there is no `!#if` left in any of them — so nothing needs a preprocessor. Of the 129,138 network rules in the lists on, 469 are regular expressions, which the check counts and does not read.
+
 ---
 
 ## 7. Commands that need a TTY
@@ -1309,7 +1331,7 @@ Measured 30 September 2026 against `adguard-cli` 1.4.13 at `log_level: 'info'`, 
 
 **A client name can hold an escaped space.** Measured 15 October 2026, after Chrome and Claude Desktop had been updated while running: 9,589 lines carried `"chrome\ (deleted)"` or `"claude-desktop\ (deleted)"`. AdGuard names the client after `/proc/<pid>/exe`, and that link gains ` (deleted)` once the binary behind a running process has been replaced, until the program restarts. It was the only escape found, and no client field held an unescaped space. Split on whitespace, every later column on those lines moves one place right, so `activity.rs` reads field 3 from its opening quote to its closing one, takes `\ ` as a space and nothing else, and files the client under the name without ` (deleted)`. `access.rs` needs no change: only `"internal_proxy_client"` matters to it, and a line with any other client is someone else's traffic whatever its field count.
 
-**Blocking is attributable to a filter list**, which is the finding that decides whether "top blocking rules" is buildable. Of 44,690 `BLOCKED` lines, 44,284 carry `ID=`, which joins against the catalogue for the list's name, and the rule text itself. The 406 without it are all `TLS` or `IQUIC`, and what blocked them is not identified.
+**Blocking is attributable to a filter list**, with one exception measured later: a rule from `user.txt` is logged as `ID=2`, AdGuard Base's id ([§6, *Allowing a site*](#allowing-a-site-usertxt-its-reload-and-the-rule-that-wins)). That is the finding that decides whether "top blocking rules" is buildable. Of 44,690 `BLOCKED` lines, 44,284 carry `ID=`, which joins against the catalogue for the list's name, and the rule text itself. The 406 without it are all `TLS` or `IQUIC`, and what blocked them is not identified.
 
 **Counts are not a steady rate.** `BLOCKED` ran from 73 of 14,924 lines in one generation to 9,856 of 18,123 in another. In the five heavy generations every blocked line came from one client. In the one examined closely, all 9,575 also came from one filter list, and each was to a **different host**, so one source of requests was enough to multiply the figure a hundredfold. A dashboard that shows a raw total will mostly be showing whatever that source is.
 

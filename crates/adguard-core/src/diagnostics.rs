@@ -135,6 +135,21 @@ pub struct Remedy {
     pub page: Option<FixedOn>,
 }
 
+/// Something a row does itself, rather than lead to the page that does it.
+///
+/// The exception to [`Remedy`]'s rule, and there is one: allowing a site has
+/// no other page to live on, since AdGuard keeps it in `user.txt` and nothing
+/// else in this application writes that file ([`crate::allowlist`]). Only the
+/// website check sets one, on its *Allowlist* row; the machine-wide report
+/// never does.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RowAction {
+    /// Switch filtering off on this site.
+    Allow(String),
+    /// Take the site's exception back out.
+    Disallow(String),
+}
+
 /// One line of the report.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Finding {
@@ -145,6 +160,8 @@ pub struct Finding {
     pub level: Level,
     /// Set on every [`Level::Problem`] this application knows a fix for.
     pub remedy: Option<Remedy>,
+    /// See [`RowAction`].
+    pub action: Option<RowAction>,
 }
 
 impl Finding {
@@ -154,12 +171,19 @@ impl Finding {
             value: value.into(),
             level,
             remedy: None,
+            action: None,
         }
     }
 
     /// Attach a fix. Only meaningful on a problem, and only ever called on one.
     pub(crate) fn fixed(mut self, hint: &'static str, page: Option<FixedOn>) -> Self {
         self.remedy = Some(Remedy { hint, page });
+        self
+    }
+
+    /// Attach something the row does itself.
+    pub(crate) fn acting(mut self, action: RowAction) -> Self {
+        self.action = Some(action);
         self
     }
 }
