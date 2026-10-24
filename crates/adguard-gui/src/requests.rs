@@ -1,4 +1,10 @@
-//! The request search on the Activity page.
+//! The request search: the Activity page's *Requests* tab.
+//!
+//! The field and the outcome filter sit above the results and stay there
+//! while they scroll. It began as a group at the foot of the counts, below
+//! four lists of ten, and its first user asked what the sense was in typing
+//! at the bottom of a page: every link to it — a site in a list, the website
+//! check — landed on a search the page then had to scroll down to.
 //!
 //! Over AdGuard's own log, read in place, and never over anything this
 //! application keeps: `adguard_core::requests` says why, and the group's
@@ -37,6 +43,8 @@ const ACTIONS: [(Option<Action>, &str); 5] = [
 ];
 
 pub struct RequestSearch {
+    /// The whole tab: the controls, then the results scrolling under them.
+    view: gtk::Box,
     group: adw::PreferencesGroup,
     entry: gtk::SearchEntry,
     outcome: gtk::DropDown,
@@ -54,21 +62,35 @@ impl RequestSearch {
         let outcome = gtk::DropDown::from_strings(&ACTIONS.map(|(_, label)| label));
         outcome.set_valign(gtk::Align::Center);
         outcome.set_tooltip_text(Some("Only requests that ended this way"));
-        let group = adw::PreferencesGroup::builder()
-            .title("Requests")
-            .description(WHAT_IT_IS)
-            .header_suffix(&outcome)
-            .build();
         let entry = gtk::SearchEntry::builder()
             .placeholder_text("Site, address, app or rule")
             .search_delay(300)
             .hexpand(true)
-            .margin_bottom(12)
             .build();
         entry.update_property(&[gtk::accessible::Property::Label("Search requests")]);
-        group.add(&entry);
+        let controls = gtk::Box::builder().spacing(6).build();
+        controls.append(&entry);
+        controls.append(&outcome);
+        // The width the results below are clamped to, so the field lines up
+        // with the rows it searches.
+        let bar = adw::Clamp::builder()
+            .maximum_size(600)
+            .tightening_threshold(400)
+            .margin_top(18)
+            .margin_start(12)
+            .margin_end(12)
+            .child(&controls)
+            .build();
+
+        let group = adw::PreferencesGroup::builder().description(WHAT_IT_IS).build();
+        let results = adw::PreferencesPage::builder().vexpand(true).build();
+        results.add(&group);
+        let view = gtk::Box::builder().orientation(gtk::Orientation::Vertical).build();
+        view.append(&bar);
+        view.append(&results);
 
         let this = Rc::new(Self {
+            view,
             group,
             entry,
             outcome,
@@ -96,8 +118,13 @@ impl RequestSearch {
         this
     }
 
-    pub fn widget(&self) -> &adw::PreferencesGroup {
-        &self.group
+    pub fn widget(&self) -> &gtk::Box {
+        &self.view
+    }
+
+    /// Put the cursor in the search field.
+    pub fn focus(&self) {
+        self.entry.grab_focus();
     }
 
     /// The filter list names the rule lines are shown with.
