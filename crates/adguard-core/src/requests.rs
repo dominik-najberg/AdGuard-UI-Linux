@@ -19,7 +19,7 @@
 //!
 //! [issue #21]: https://github.com/dominik-najberg/AdGuard-UI-Linux/issues/21
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 
 use crate::activity::{self, Action, Clock};
@@ -157,21 +157,25 @@ pub fn search(live: &Path, query: &Query) -> Found {
                 found.more = true;
                 break 'files;
             }
-            found.hits.push(Hit {
-                at: request.at,
-                client: request.client.into_owned(),
-                protocol: request.protocol.to_owned(),
-                target: request.target.map(str::to_owned),
-                host: request.host,
-                status: request.status,
-                action: request.action,
-                filter: request.filter,
-                rule: request.rule.map(str::to_owned),
-                gone: false,
-            });
+            found.hits.push(hit(request));
         }
     }
     found
+}
+
+fn hit(request: activity::Request<'_>) -> Hit {
+    Hit {
+        at: request.at,
+        client: request.client.into_owned(),
+        protocol: request.protocol.to_owned(),
+        target: request.target.map(str::to_owned),
+        host: request.host,
+        status: request.status,
+        action: request.action,
+        filter: request.filter,
+        rule: request.rule.map(str::to_owned),
+        gone: false,
+    }
 }
 
 /// Everything AdGuard's log says about one site, for the website check.
@@ -197,10 +201,76 @@ pub struct Seen {
     pub last: Option<i64>,
     /// As [`Found::reaches_back`].
     pub reaches_back: Option<i64>,
+    /// The newest requests, newest first, at most [`SEEN_RECENT`].
+    pub recent: Vec<Hit>,
+    /// The site and each name under it that was asked for, most requests
+    /// first, at most [`SEEN_NAMES`].
+    pub names: Vec<(String, activity::Counts)>,
+    /// The addresses that were blocked, most often first, at most
+    /// [`SEEN_BLOCKED`].
+    pub blocked: Vec<Blocked>,
+}
+
+/// One address the website check found blocked, and by what.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Blocked {
+    /// A full URL when AdGuard decrypted the connection, the name otherwise.
+    /// A query is cut off and stands as `?…`, so a tracker's beacon with a
+    /// fresh query each time is one address and not one per request.
+    pub address: String,
+    /// As [`Hit::filter`].
+    pub filter: Option<i64>,
+    pub rule: Option<String>,
+    pub requests: u64,
+    /// As [`Hit::gone`].
+    pub gone: bool,
+}
+
+impl Seen {
+    /// Name the list each rule is really in, as [`Found::attribute`] does,
+    /// across [`Self::rules`], [`Self::recent`] and [`Self::blocked`]. Returns
+    /// the rules in [`Self::rules`] that neither the list the log names nor
+    /// `user.txt` holds any more, whose ids are left as logged.
+    pub fn attribute(&mut self, lists: &crate::rules::Lists) -> Vec<String> {
+        let mut known: HashMap<(i64, String), Option<i64>> = HashMap::new();
+        let mut source = |filter: i64, rule: &str| {
+            *known
+                .entry((filter, rule.to_owned()))
+                .or_insert_with(|| lists.source(filter, rule))
+        };
+        let mut gone = Vec::new();
+        for (filter, rule, _, _) in &mut self.rules {
+            match source(*filter, rule) {
+                Some(found) => *filter = found,
+                None => gone.push(rule.clone()),
+            }
+        }
+        for hit in &mut self.recent {
+            let (Some(filter), Some(rule)) = (hit.filter, hit.rule.as_deref()) else { continue };
+            match source(filter, rule) {
+                Some(found) => hit.filter = Some(found),
+                None => hit.gone = true,
+            }
+        }
+        for blocked in &mut self.blocked {
+            let (Some(filter), Some(rule)) = (blocked.filter, blocked.rule.as_deref()) else { continue };
+            match source(filter, rule) {
+                Some(found) => blocked.filter = Some(found),
+                None => blocked.gone = true,
+            }
+        }
+        gone
+    }
 }
 
 /// How many rules [`Seen::rules`] keeps.
 const SEEN_RULES: usize = 5;
+/// How many requests [`Seen::recent`] keeps.
+pub const SEEN_RECENT: usize = 10;
+/// How many names [`Seen::names`] keeps.
+pub const SEEN_NAMES: usize = 8;
+/// How many addresses [`Seen::blocked`] keeps.
+pub const SEEN_BLOCKED: usize = 8;
 
 /// Read every line of the log for requests to `host` or a name under it.
 ///
@@ -212,7 +282,11 @@ pub fn seen(live: &Path, host: &str) -> Seen {
     let suffix = format!(".{host}");
     let mut seen = Seen::default();
     let mut clock = Clock::default();
-    let mut rules: std::collections::HashMap<(i64, String, Action), u64> = Default::default();
+    let mut rules: HashMap<(i64, String, Action), u64> = Default::default();
+    let mut names: HashMap<String, activity::Counts> = Default::default();
+    let mut blocked: HashMap<(String, Option<i64>, Option<String>), u64> = Default::default();
+    // The log is read oldest first, so the newest are the last ones kept.
+    let mut recent: VecDeque<Hit> = VecDeque::with_capacity(SEEN_RECENT + 1);
 
     let generations = activity::generations(live);
     if let Some(oldest) = generations.first() {
@@ -256,8 +330,34 @@ pub fn seen(live: &Path, host: &str) -> Seen {
             if let (Some(filter), Some(rule)) = (request.filter, request.rule) {
                 *rules.entry((filter, rule.to_owned(), request.action)).or_default() += 1;
             }
+            names.entry(name.to_owned()).or_default().add(request.action, 1);
+            if request.action == Action::Blocked {
+                let full = request.target.unwrap_or(name);
+                let address = match full.find(['?', '#']) {
+                    Some(at) => format!("{}?…", &full[..at]),
+                    None => full.to_owned(),
+                };
+                let key = (address, request.filter, request.rule.map(str::to_owned));
+                *blocked.entry(key).or_default() += 1;
+            }
+            recent.push_back(hit(request));
+            if recent.len() > SEEN_RECENT {
+                recent.pop_front();
+            }
         }
     }
+    seen.recent = recent.into_iter().rev().collect();
+    let mut names: Vec<_> = names.into_iter().collect();
+    names.sort_by(|a, b| b.1.total().cmp(&a.1.total()).then_with(|| a.0.cmp(&b.0)));
+    names.truncate(SEEN_NAMES);
+    seen.names = names;
+    let mut blocked: Vec<Blocked> = blocked
+        .into_iter()
+        .map(|((address, filter, rule), requests)| Blocked { address, filter, rule, requests, gone: false })
+        .collect();
+    blocked.sort_by(|a, b| b.requests.cmp(&a.requests).then_with(|| a.address.cmp(&b.address)));
+    blocked.truncate(SEEN_BLOCKED);
+    seen.blocked = blocked;
     let mut rules: Vec<_> = rules
         .into_iter()
         .map(|((filter, rule, action), count)| (filter, rule, action, count))
@@ -560,6 +660,43 @@ mod tests {
         assert_eq!((seen.quic, seen.quic_uninspected, seen.quic_blocked), (2, 1, 1));
         assert_eq!(seen.rules, vec![(2, "||ads.example.com^".to_owned(), Action::Blocked, 1)]);
         assert!(seen.last.is_some());
+    }
+
+    /// The website check's detail: the newest requests, each name under the
+    /// site, and what was blocked where.
+    #[test]
+    fn seen_keeps_the_newest_requests_each_name_and_the_blocked_addresses() {
+        use crate::rules::{Lists, USER_RULES};
+        let scratch = Scratch::new("seen-detail");
+        let mut lines = vec![
+            line("09:00:00", "chrome", "https://ads.example.com/a.js", "BLOCKED", Some((2, "||ads.example.com^"))),
+            line("09:00:01", "chrome", "https://ads.example.com/a.js", "BLOCKED", Some((2, "||ads.example.com^"))),
+            line("09:00:02", "firefox", "https://example.com/p?a=1", "BLOCKED", Some((2, "||example.com/p"))),
+            line("09:00:03", "firefox", "https://example.com/p?a=2", "BLOCKED", Some((2, "||example.com/p"))),
+        ];
+        for second in 0..12 {
+            lines.push(line(&format!("10:00:{second:02}"), "chrome", "https://www.example.com/", "NONE", None));
+        }
+        scratch.write("access.log", &lines);
+        let mut seen = seen(&scratch.live(), "example.com");
+
+        assert_eq!(seen.recent.len(), SEEN_RECENT);
+        assert!(seen.recent.windows(2).all(|pair| pair[0].at >= pair[1].at), "newest first");
+        assert_eq!(seen.recent[0].target.as_deref(), Some("https://www.example.com/"));
+
+        let names: Vec<_> = seen.names.iter().map(|(name, counts)| (name.as_str(), counts.total(), counts.blocked)).collect();
+        assert_eq!(names, [("www.example.com", 12, 0), ("ads.example.com", 2, 2), ("example.com", 2, 2)]);
+
+        let blocked: Vec<_> = seen.blocked.iter().map(|blocked| (blocked.address.as_str(), blocked.requests)).collect();
+        assert_eq!(blocked, [("https://ads.example.com/a.js", 2), ("https://example.com/p?…", 2)], "queries folded");
+
+        let gone = seen.attribute(&Lists::from_lists(vec![
+            (2, "||ads.example.com^\n".to_owned()),
+            (USER_RULES, "||example.com/p\n".to_owned()),
+        ]));
+        assert!(gone.is_empty(), "{gone:?}");
+        assert_eq!(seen.blocked[1].filter, Some(USER_RULES), "logged as ID=2, held by user.txt");
+        assert_eq!(seen.blocked[0].filter, Some(2));
     }
 
     #[test]

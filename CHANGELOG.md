@@ -19,6 +19,14 @@ This file is the one changelog.
 
 Beside that, an *Allowlist* row has an **Allow** button. It switches filtering off on the site with one rule added to your own rules, and AdGuard applies it straight away; **Remove** takes it back. The rule is `@@||site^$document,important`. Without `important`, a blocking rule marked important still wins.
 
+The check also lists, from AdGuard's log, the addresses on the site that were blocked and the rule for each, every name under the site with how many of its requests were blocked, and the newest requests, so you no longer have to go to the Activity page for them.
+
+### The request search has a tab of its own
+
+The Activity page now has two tabs. *Overview* has the counts, the chart and the lists. *Requests* has the search, with the field at the top and the results below it. Before this, the search sat at the very bottom of the page, under four lists of ten. Clicking a site, rule or app in a list opens *Requests* with it already searched for, and so does the website check's link.
+
+### Your own rules are shown as yours
+
 A rule from your own rules was shown as belonging to AdGuard Base filter, because AdGuard's log gives it that list's number. It is now shown as yours, in the website check and on the Activity page, in *Rules That Matched Most* and in the request search alike. A rule that is no longer in the list the log names, nor in your own rules, is shown as no longer there.
 
 ---

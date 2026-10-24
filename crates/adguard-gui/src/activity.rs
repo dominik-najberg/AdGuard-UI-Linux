@@ -1,5 +1,10 @@
 //! The Activity page: what the proxy has been doing, counted.
 //!
+//! Two tabs. *Overview* is the counts, the chart, the four top lists and the
+//! history settings; *Requests* is single requests searched in AdGuard's log
+//! ([`RequestSearch`]). Clicking an entry in a list, or the website check's
+//! link, opens *Requests* with it already searched for.
+//!
 //! The first item of [issue #21]. Everything shown here comes from
 //! `adguard_core::activity`, which keeps counts and never requests — the
 //! decision, and what it leaves out, are that module's header. This page's job
@@ -51,6 +56,10 @@ const WHAT_IS_KEPT: &str = "Kept on this computer only, and readable only by you
                             hour, and per day for each site, rule and app. Never the address \
                             of a page, what was searched, or when in a day a site was visited.";
 
+/// The two tabs' names in the view stack.
+const OVERVIEW: &str = "overview";
+const REQUESTS: &str = "requests";
+
 /// The client name AdGuard gives its own requests (contract §9).
 const INTERNAL_CLIENT: &str = "internal_proxy_client";
 
@@ -95,6 +104,10 @@ struct Loaded {
 
 pub struct ActivityPage {
     toasts: adw::ToastOverlay,
+    /// The tab switcher over the two tabs.
+    root: gtk::Box,
+    tabs: adw::ViewStack,
+    /// The *Overview* tab.
     page: adw::PreferencesPage,
     header: adw::PreferencesGroup,
     range: adw::ToggleGroup,
@@ -111,8 +124,7 @@ pub struct ActivityPage {
     unread: adw::ActionRow,
     /// The four top lists. Rebuilt whole on every reading.
     lists: RefCell<Vec<adw::PreferencesGroup>>,
-    /// Single requests, from AdGuard's log in place. Below the lists and above
-    /// History.
+    /// Single requests, from AdGuard's log in place: the *Requests* tab.
     search: Rc<RequestSearch>,
     privacy: adw::PreferencesGroup,
     /// How long counts are kept, one of `activity::RETENTION_CHOICES`.
@@ -265,12 +277,25 @@ impl ActivityPage {
             .selected(retention_index(activity::DEFAULT_RETENTION_DAYS))
             .build();
         privacy.add(&retention);
-        let search = RequestSearch::new();
-        page.add(search.widget());
         page.add(&privacy);
+
+        let search = RequestSearch::new();
+        let tabs = adw::ViewStack::builder().vexpand(true).build();
+        tabs.add_titled(&page, Some(OVERVIEW), "Overview");
+        tabs.add_titled(search.widget(), Some(REQUESTS), "Requests");
+        let switcher = adw::InlineViewSwitcher::builder()
+            .stack(&tabs)
+            .halign(gtk::Align::Center)
+            .margin_top(12)
+            .build();
+        let root = gtk::Box::builder().orientation(gtk::Orientation::Vertical).build();
+        root.append(&switcher);
+        root.append(&tabs);
 
         let this = Rc::new(Self {
             toasts,
+            root,
+            tabs,
             page,
             header,
             range,
@@ -323,16 +348,28 @@ impl ActivityPage {
                 glib::spawn_future_local(async move { this.choose_retention(days).await });
             }
         });
+        this.tabs.connect_visible_child_name_notify({
+            let search = Rc::downgrade(&this.search);
+            move |tabs| {
+                if tabs.visible_child_name().as_deref() == Some(REQUESTS) {
+                    if let Some(search) = search.upgrade() {
+                        search.focus();
+                    }
+                }
+            }
+        });
         this.describe_privacy();
         this
     }
 
-    pub fn widget(&self) -> &adw::PreferencesPage {
-        &self.page
+    pub fn widget(&self) -> &gtk::Box {
+        &self.root
     }
 
-    /// Search AdGuard's log for `text`. For links from other pages.
+    /// Open the *Requests* tab searching AdGuard's log for `text`. For links
+    /// from other pages.
     pub fn search_for(&self, text: &str) {
+        self.tabs.set_visible_child_name(REQUESTS);
         self.search.search_for(text);
     }
 
@@ -434,7 +471,7 @@ impl ActivityPage {
         for group in self.lists.take() {
             self.page.remove(&group);
         }
-        let search = &self.search;
+        let search = (&self.tabs, &self.search);
         let groups = vec![
             ranked_group(
                 "Most Blocked Sites",
@@ -470,13 +507,11 @@ impl ActivityPage {
                 }),
             ),
         ];
-        // Above the search and the history group, which stay last.
-        self.page.remove(self.search.widget());
+        // Above the history group, which stays last.
         self.page.remove(&self.privacy);
         for group in &groups {
             self.page.add(group);
         }
-        self.page.add(self.search.widget());
         self.page.add(&self.privacy);
         self.lists.replace(groups);
         self.search.set_names(loaded.names.clone());
@@ -617,12 +652,12 @@ fn load(span: Span) -> Result<Loaded, String> {
 
 /// A top list: one row per entry, the count on the right.
 ///
-/// Every entry leads to its requests: clicking it searches AdGuard's log for
-/// it, below. Not selectable for that reason — a selectable title swallows the
-/// click that should activate the row.
+/// Every entry leads to its requests: clicking it opens the *Requests* tab
+/// searching AdGuard's log for it. Not selectable for that reason — a
+/// selectable title swallows the click that should activate the row.
 fn ranked_group(
     title: &str,
-    search: &Rc<RequestSearch>,
+    (tabs, search): (&adw::ViewStack, &Rc<RequestSearch>),
     entries: impl Iterator<Item = (String, Option<String>, u64)>,
 ) -> adw::PreferencesGroup {
     let group = adw::PreferencesGroup::builder().title(title).build();
@@ -638,10 +673,12 @@ fn ranked_group(
         row.set_activatable(true);
         row.set_tooltip_text(Some("Show these requests in AdGuard's log"));
         row.connect_activated({
+            let tabs = tabs.downgrade();
             let search = Rc::downgrade(search);
             let name = name.clone();
             move |_| {
-                if let Some(search) = search.upgrade() {
+                if let (Some(tabs), Some(search)) = (tabs.upgrade(), search.upgrade()) {
+                    tabs.set_visible_child_name(REQUESTS);
                     search.search_for(&name);
                 }
             }

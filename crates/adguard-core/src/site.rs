@@ -164,15 +164,10 @@ impl Inputs {
 
         let lists = rules::Lists::read();
         let mut seen = crate::access::path().map(|live| requests::seen(&live, host));
-        let mut gone = Vec::new();
-        if let (Some(seen), Ok(lists)) = (seen.as_mut(), lists.as_ref()) {
-            for (filter, rule, _, _) in &mut seen.rules {
-                match lists.source(*filter, rule) {
-                    Some(source) => *filter = source,
-                    None => gone.push(rule.clone()),
-                }
-            }
-        }
+        let gone = match (seen.as_mut(), lists.as_ref()) {
+            (Some(seen), Ok(lists)) => seen.attribute(lists),
+            _ => Vec::new(),
+        };
         let allowed = crate::paths::user_rules_file().map(|path| {
             fs::read_to_string(path).is_ok_and(|text| allowlist::is_allowed(&text, host))
         });
@@ -195,17 +190,25 @@ impl Inputs {
 }
 
 /// The report for one site. Its sections are shown below the site's name, in
-/// the order a failing page is usually traced.
+/// the order a failing page is usually traced. The three from the log's single
+/// requests — what was blocked, under which names, and the newest — are left
+/// out when the log has nothing for them.
 pub fn report(inputs: &Inputs) -> Report {
     let config = inputs.machine.config.as_ref().ok();
     Report {
         sections: vec![
-            machine_section(inputs),
-            lookup_section(inputs, config),
-            filtering_section(inputs, config),
-            https_section(inputs, config),
-            quic_section(inputs, config),
-        ],
+            Some(machine_section(inputs)),
+            Some(lookup_section(inputs, config)),
+            Some(filtering_section(inputs, config)),
+            blocked_section(inputs),
+            names_section(inputs),
+            recent_section(inputs),
+            Some(https_section(inputs, config)),
+            Some(quic_section(inputs, config)),
+        ]
+        .into_iter()
+        .flatten()
+        .collect(),
     }
 }
 
@@ -301,31 +304,16 @@ fn filtering_section(inputs: &Inputs, config: Option<&Config>) -> Section {
             Level::Unknown,
         )),
         Some(seen) => {
-            let counts = &seen.counts;
-            let mut parts = vec![format!("{} passed", counts.passed)];
-            for (count, word) in [
-                (counts.blocked, "blocked"),
-                (counts.modified, "modified"),
-                (counts.allowed, "allowed by an exception"),
-                (counts.uninspected, "logged with no action"),
-            ] {
-                if count > 0 {
-                    parts.push(format!("{count} {word}"));
-                }
-            }
             findings.push(
                 Finding::new(
                     "Requests",
-                    format!("{}{}: {}", seen.total, since(seen.reaches_back), parts.join(", ")),
+                    format!("{}{}: {}", seen.total, since(seen.reaches_back), breakdown(&seen.counts)),
                     Level::Fact,
                 )
-                .fixed("Every one of them is on the Activity page.", Some(FixedOn::Activity)),
+                .fixed("Every one of them is on the Activity page's Requests tab.", Some(FixedOn::Activity)),
             );
             for (filter, rule, action, count) in &seen.rules {
-                let mut list = list_name(&inputs.names, *filter);
-                if inputs.gone.contains(rule) {
-                    list = format!("no longer in {list} or your rules");
-                }
+                let list = logged_list(&inputs.names, *filter, inputs.gone.contains(rule));
                 let finding = Finding::new(
                     "Rule",
                     format!("{rule} — {list}, {} {count} time{}", verb(*action), plural(*count)),
@@ -433,6 +421,88 @@ fn list_name(names: &std::collections::HashMap<i64, String>, filter: i64) -> Str
         None if filter == rules::USER_RULES => "Your rules".to_owned(),
         None => format!("filter list {filter}"),
     }
+}
+
+/// The addresses AdGuard blocked, most often first, with the rule for each.
+fn blocked_section(inputs: &Inputs) -> Option<Section> {
+    let seen = inputs.seen.as_ref().filter(|seen| !seen.blocked.is_empty())?;
+    let findings = seen
+        .blocked
+        .iter()
+        .map(|blocked| {
+            let mut value = format!("Blocked {} time{}", blocked.requests, plural(blocked.requests));
+            if let (Some(filter), Some(rule)) = (blocked.filter, blocked.rule.as_deref()) {
+                value.push_str(&format!(" by {rule} — {}", logged_list(&inputs.names, filter, blocked.gone)));
+            }
+            Finding::new(shorten(&blocked.address), value, Level::Fact)
+        })
+        .collect();
+    Some(Section {
+        title: "Blocked Addresses",
+        note: Some(
+            "What AdGuard blocked on this site and the names under it, most often first. The full \
+             address is known only for a connection AdGuard decrypted; otherwise it is the name. \
+             If one of these breaks the site, Allow on the Allowlist row above switches filtering \
+             off on it.",
+        ),
+        findings,
+    })
+}
+
+/// The site and each name under it that was asked for, with what became of
+/// the requests — so which part of a site is blocked shows at a glance.
+fn names_section(inputs: &Inputs) -> Option<Section> {
+    let seen = inputs.seen.as_ref()?;
+    if seen.names.iter().all(|(name, _)| *name == inputs.host) {
+        // One name: the Requests line above already says all of it.
+        return None;
+    }
+    let findings = seen
+        .names
+        .iter()
+        .map(|(name, counts)| {
+            Finding::new(name.clone(), format!("{}: {}", counts.total(), breakdown(counts)), Level::Fact)
+        })
+        .collect();
+    Some(Section {
+        title: "Names Under It",
+        note: Some("Each name AdGuard's log has requests to, most requests first."),
+        findings,
+    })
+}
+
+/// The newest single requests, as the Activity page's Requests tab shows them.
+fn recent_section(inputs: &Inputs) -> Option<Section> {
+    let seen = inputs.seen.as_ref().filter(|seen| !seen.recent.is_empty())?;
+    let findings = seen
+        .recent
+        .iter()
+        .map(|hit| {
+            let address = hit.target.as_deref().or(hit.host.as_deref()).unwrap_or("(no address)");
+            let client = match hit.client.as_str() {
+                "internal_proxy_client" => "AdGuard itself",
+                name => name,
+            };
+            let mut value = format!(
+                "{} · {client} · {} · {}",
+                when(hit.at).unwrap_or_default(),
+                hit.protocol,
+                outcome(hit.action)
+            );
+            if let (Some(filter), Some(rule)) = (hit.filter, hit.rule.as_deref()) {
+                value.push_str(&format!("\n{rule} — {}", logged_list(&inputs.names, filter, hit.gone)));
+            }
+            Finding::new(shorten(address), value, Level::Fact)
+        })
+        .collect();
+    Some(Section {
+        title: "Recent Requests",
+        note: Some(
+            "The newest requests to the site and every name under it, newest first, read from \
+             AdGuard's log and not kept.",
+        ),
+        findings,
+    })
 }
 
 fn https_section(inputs: &Inputs, config: Option<&Config>) -> Section {
@@ -589,23 +659,74 @@ fn list(ips: &[IpAddr]) -> String {
 
 /// ` since Sun 27 Sep`, from a microsecond timestamp.
 fn since(micros: Option<i64>) -> String {
-    let Some(micros) = micros else { return String::new() };
+    micros.and_then(when).map(|at| format!(" since {at}")).unwrap_or_default()
+}
+
+/// `27 Sep 14:05`, in local time, from a microsecond timestamp.
+fn when(micros: i64) -> Option<String> {
     let time = micros.div_euclid(1_000_000) as libc::time_t;
     // SAFETY: a zeroed `tm` is valid, and `localtime_r` writes only into it.
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
     // SAFETY: both pointers are to live locals.
     if unsafe { libc::localtime_r(&time, &mut tm) }.is_null() {
-        return String::new();
+        return None;
     }
     const MONTHS: [&str; 12] =
         ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-    format!(
-        " since {} {} {:02}:{:02}",
+    Some(format!(
+        "{} {} {:02}:{:02}",
         tm.tm_mday,
         MONTHS.get(tm.tm_mon as usize).unwrap_or(&"?"),
         tm.tm_hour,
         tm.tm_min
-    )
+    ))
+}
+
+/// `3 passed, 2 blocked`: every outcome that happened, passed always first.
+fn breakdown(counts: &crate::activity::Counts) -> String {
+    let mut parts = vec![format!("{} passed", counts.passed)];
+    for (count, word) in [
+        (counts.blocked, "blocked"),
+        (counts.modified, "modified"),
+        (counts.allowed, "allowed by an exception"),
+        (counts.uninspected, "logged with no action"),
+    ] {
+        if count > 0 {
+            parts.push(format!("{count} {word}"));
+        }
+    }
+    parts.join(", ")
+}
+
+/// A list's name for a rule from the log, saying so when no list holds the
+/// rule any more.
+fn logged_list(names: &std::collections::HashMap<i64, String>, filter: i64, gone: bool) -> String {
+    let list = list_name(names, filter);
+    if gone {
+        format!("no longer in {list} or your rules")
+    } else {
+        list
+    }
+}
+
+/// What became of a request, in the Requests tab's words.
+fn outcome(action: Action) -> &'static str {
+    match action {
+        Action::Passed => "passed",
+        Action::Blocked => "blocked",
+        Action::Modified => "modified",
+        Action::Allowed => "allowed by an exception",
+        Action::Uninspected => "no action logged",
+    }
+}
+
+/// An address cut to a length a row can show, with an ellipsis where it was cut.
+fn shorten(address: &str) -> String {
+    const LONGEST: usize = 120;
+    match address.char_indices().nth(LONGEST) {
+        Some((at, _)) => format!("{}…", &address[..at]),
+        None => address.to_owned(),
+    }
 }
 
 fn verb(action: Action) -> &'static str {
@@ -833,5 +954,50 @@ mod tests {
         let report = report(&taken_back);
         let rule = find(&report, "Filtering", "Rule");
         assert!(rule.value.contains("no longer in AdGuard Base filter or your rules"), "{}", rule.value);
+    }
+
+    #[test]
+    fn the_logs_detail_is_shown_only_when_there_is_some() {
+        let quiet = report(&inputs(Some(Seen::default()), true));
+        for title in ["Blocked Addresses", "Names Under It", "Recent Requests"] {
+            assert!(quiet.sections.iter().all(|section| section.title != title), "{title} with nothing in it");
+        }
+
+        let hit = requests::Hit {
+            at: 0,
+            client: "internal_proxy_client".to_owned(),
+            protocol: "HTTP2".to_owned(),
+            target: Some(format!("https://ads.example.com/{}", "x".repeat(200))),
+            host: Some("ads.example.com".to_owned()),
+            status: None,
+            action: Action::Blocked,
+            filter: Some(2),
+            rule: Some("||ads.example.com^".to_owned()),
+            gone: false,
+        };
+        let seen = Seen {
+            total: 3,
+            counts: crate::activity::Counts { passed: 2, blocked: 1, ..Default::default() },
+            recent: vec![hit],
+            names: vec![
+                ("example.com".to_owned(), crate::activity::Counts { passed: 2, ..Default::default() }),
+                ("ads.example.com".to_owned(), crate::activity::Counts { blocked: 1, ..Default::default() }),
+            ],
+            blocked: vec![requests::Blocked {
+                address: "https://ads.example.com/a.js".to_owned(),
+                filter: Some(2),
+                rule: Some("||ads.example.com^".to_owned()),
+                requests: 1,
+                gone: false,
+            }],
+            ..Seen::default()
+        };
+        let report = report(&inputs(Some(seen), true));
+        let blocked = find(&report, "Blocked Addresses", "https://ads.example.com/a.js");
+        assert_eq!(blocked.value, "Blocked 1 time by ||ads.example.com^ — AdGuard Base filter");
+        assert_eq!(find(&report, "Names Under It", "ads.example.com").value, "1: 0 passed, 1 blocked");
+        let recent = &report.sections.iter().find(|section| section.title == "Recent Requests").unwrap().findings[0];
+        assert!(recent.label.ends_with('…') && recent.label.chars().count() == 121, "{}", recent.label);
+        assert!(recent.value.contains("AdGuard itself · HTTP2 · blocked\n||ads.example.com^ — AdGuard Base filter"), "{}", recent.value);
     }
 }
