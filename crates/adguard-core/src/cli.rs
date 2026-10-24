@@ -1129,6 +1129,20 @@ impl Cli {
         }
     }
 
+    /// Make the running proxy read `user.txt` again, after this application
+    /// wrote to it ([`crate::allowlist`]).
+    ///
+    /// **AdGuard does not watch the file.** Measured 24 October 2026 on v1.5.0,
+    /// through the manual proxy: a blocking rule appended to `user.txt` changed
+    /// nothing over seventy seconds of requests, and the request straight after
+    /// `filters enable -2147483648` was decided by it — with the row already on,
+    /// so the command is a reload and not only a switch. It also switches the
+    /// user's rules on if they were off, which a rule written there needs to do
+    /// anything at all.
+    pub fn reload_user_rules(&self) -> Result<(), Error> {
+        self.filter_action(FilterSet::Http, FilterAction::Enable, Filter::USER_RULES_ID, Consent::Withheld)
+    }
+
     /// Subscribe to a list AdGuard's catalogue does not carry.
     ///
     /// Takes a URL, or a path to a local file — the CLI accepts both through

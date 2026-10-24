@@ -7,6 +7,7 @@
 
 pub mod access;
 pub mod activity;
+pub mod allowlist;
 pub mod autostart;
 pub mod browser;
 pub mod cli;
@@ -28,6 +29,7 @@ mod slot;
 pub mod rejected;
 pub mod release;
 pub mod requests;
+pub mod rules;
 pub mod site;
 pub mod trust;
 pub mod update;

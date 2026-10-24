@@ -11,6 +11,18 @@ This file is the one changelog.
 
 ---
 
+## Unreleased
+
+### Find the rule that blocks a site, and allow the site
+
+*Check a Website*, on the Diagnostics page, now takes a full address as well as a site's name, and says which rule in your filter lists blocks it and which list the rule is in. It matches the address against the lists that are on, so it answers for a site you have not opened yet, not only for one in AdGuard's log. Rules that apply only to a site's scripts, pop-ups or requests from other sites are listed with when they apply.
+
+Beside that, an *Allowlist* row has an **Allow** button. It switches filtering off on the site with one rule added to your own rules, and AdGuard applies it straight away; **Remove** takes it back. The rule is `@@||site^$document,important`. Without `important`, a blocking rule marked important still wins.
+
+A rule from your own rules was shown as belonging to AdGuard Base filter, because AdGuard's log gives it that list's number. It is now shown as yours.
+
+---
+
 ## 1.12.2 — 22 October 2026
 
 ### Updating AdGuard CLI from the About page works with protection on

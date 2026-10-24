@@ -17,8 +17,16 @@
 //! the system uses — and **one TCP connection** to port 443, closed as soon as
 //! it opens. Nothing is sent over it. Everything else is read: the machine-wide
 //! checks are [`diagnostics`]'s, the history is AdGuard's own log read in place
-//! ([`requests::seen`]), and the exclusion list and the user's rules are files
-//! in AdGuard's data directory. Nothing is written and nothing is kept.
+//! ([`requests::seen`]), the rules that would decide the address are matched
+//! against the lists that are on ([`rules`]), and the exclusion list and the
+//! user's rules are files in AdGuard's data directory. Nothing is kept.
+//!
+//! # The one thing it can write
+//!
+//! The *Allowlist* row switches filtering off on the site, or back on, at a
+//! press of its button ([`allowlist`], [`RowAction`]). That is a line in
+//! `user.txt`, and the check itself never writes it: it only offers it, beside
+//! the rules that blocked the site.
 //!
 //! # It never says a rule is a fault
 //!
@@ -36,9 +44,11 @@ use std::net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
 use crate::activity::Action;
+use crate::allowlist;
 use crate::config::key;
-use crate::diagnostics::{self, Finding, FixedOn, Level, Report, Section};
+use crate::diagnostics::{self, Finding, FixedOn, Level, Report, RowAction, Section};
 use crate::requests::{self, Seen};
+use crate::rules::{self, Address, Verdict};
 use crate::{Catalogue, Cli, Config, FilterSet, Locale};
 
 /// How long the connection attempt may take.
@@ -84,6 +94,14 @@ pub struct Inputs {
     pub connected: Option<Result<(), String>>,
     /// AdGuard's log for the site. `None` without a data directory.
     pub seen: Option<Seen>,
+    /// The address matched against the lists that are on.
+    pub matched: Result<rules::Check, String>,
+    /// Whether `user.txt` holds the site's exception. `None` when there is no
+    /// data directory to hold it.
+    pub allowed: Option<bool>,
+    /// Rules in the log that neither the list it names nor `user.txt` holds
+    /// any more ([`rules::Lists::source`]).
+    pub gone: Vec<String>,
     /// The exclusion list entry the site matches, when the list was read.
     pub excluded: Option<Option<String>>,
     /// Lines of `user.txt` and `dns_user.txt` that mention the site.
@@ -94,10 +112,11 @@ pub struct Inputs {
 }
 
 impl Inputs {
-    /// Read everything for `host`. **Blocking**: three `adguard-cli`
-    /// invocations, a name lookup, a connection attempt of up to five seconds
-    /// and a full pass over AdGuard's log.
-    pub fn collect(cli: &Cli, host: &str) -> Self {
+    /// Read everything for `address`. **Blocking**: three `adguard-cli`
+    /// invocations, a name lookup, a connection attempt of up to five seconds,
+    /// a full pass over AdGuard's log and one over the lists that are on.
+    pub fn collect(cli: &Cli, address: &Address) -> Self {
+        let host = address.host();
         let machine = diagnostics::Inputs::collect(cli);
         let resolved = (host, 443)
             .to_socket_addrs()
@@ -143,11 +162,29 @@ impl Inputs {
             }
         }
 
+        let lists = rules::Lists::read();
+        let mut seen = crate::access::path().map(|live| requests::seen(&live, host));
+        let mut gone = Vec::new();
+        if let (Some(seen), Ok(lists)) = (seen.as_mut(), lists.as_ref()) {
+            for (filter, rule, _, _) in &mut seen.rules {
+                match lists.source(*filter, rule) {
+                    Some(source) => *filter = source,
+                    None => gone.push(rule.clone()),
+                }
+            }
+        }
+        let allowed = crate::paths::user_rules_file().map(|path| {
+            fs::read_to_string(path).is_ok_and(|text| allowlist::is_allowed(&text, host))
+        });
+
         Self {
             host: host.to_owned(),
             resolved,
             connected,
-            seen: crate::access::path().map(|live| requests::seen(&live, host)),
+            seen,
+            matched: lists.map(|lists| lists.check(address)),
+            allowed,
+            gone,
             excluded,
             own_rules: mentions(crate::paths::user_rules_file(), OWN_RULES),
             own_dns_rules: mentions(crate::paths::dns_user_rules_file(), OWN_RULES),
@@ -165,7 +202,7 @@ pub fn report(inputs: &Inputs) -> Report {
         sections: vec![
             machine_section(inputs),
             lookup_section(inputs, config),
-            filtering_section(inputs),
+            filtering_section(inputs, config),
             https_section(inputs, config),
             quic_section(inputs, config),
         ],
@@ -244,8 +281,9 @@ fn lookup_section(inputs: &Inputs, config: Option<&Config>) -> Section {
     }
 }
 
-fn filtering_section(inputs: &Inputs) -> Section {
+fn filtering_section(inputs: &Inputs, config: Option<&Config>) -> Section {
     let mut findings = Vec::new();
+    lists_findings(inputs, config, &mut findings);
     match &inputs.seen {
         None => findings.push(Finding::new(
             "Requests",
@@ -284,20 +322,17 @@ fn filtering_section(inputs: &Inputs) -> Section {
                 .fixed("Every one of them is on the Activity page.", Some(FixedOn::Activity)),
             );
             for (filter, rule, action, count) in &seen.rules {
-                let list = inputs
-                    .names
-                    .get(filter)
-                    .cloned()
-                    .unwrap_or_else(|| format!("filter list {filter}"));
+                let mut list = list_name(&inputs.names, *filter);
+                if inputs.gone.contains(rule) {
+                    list = format!("no longer in {list} or your rules");
+                }
                 let finding = Finding::new(
                     "Rule",
                     format!("{rule} — {list}, {} {count} time{}", verb(*action), plural(*count)),
                     Level::Fact,
                 );
                 findings.push(match action {
-                    Action::Blocked | Action::Modified => {
-                        finding.fixed(ALLOW, Some(FixedOn::WebFilters))
-                    }
+                    Action::Blocked | Action::Modified => finding.fixed(ALLOW, None),
                     _ => finding,
                 });
             }
@@ -312,10 +347,91 @@ fn filtering_section(inputs: &Inputs) -> Section {
     Section {
         title: "Filtering",
         note: Some(
-            "From AdGuard's own log, which keeps a few days. The site and every name under it \
-             are counted.",
+            "The address is matched against the filter lists that are on by this application, \
+             not by AdGuard, so it is a close reading rather than AdGuard's answer. The requests \
+             are from AdGuard's own log, which keeps a few days, and count the site and every \
+             name under it.",
         ),
         findings,
+    }
+}
+
+/// What the lists that are on decide about the address, and the row that
+/// switches filtering off on the site.
+fn lists_findings(inputs: &Inputs, config: Option<&Config>, findings: &mut Vec<Finding>) {
+    let name = |filter: i64| list_name(&inputs.names, filter);
+    let ad_blocking = config.and_then(|config| config.bool_at(key::AD_BLOCKING));
+    match (&inputs.matched, ad_blocking) {
+        (_, Some(false)) => findings.push(
+            Finding::new("Filter lists", "Not applied: ad blocking is off", Level::Fact)
+                .fixed(AD_BLOCKING_OFF, Some(FixedOn::Protection)),
+        ),
+        (Err(err), _) => findings.push(Finding::new(
+            "Filter lists",
+            format!("Could not be read: {err}"),
+            Level::Unknown,
+        )),
+        (Ok(check), _) => {
+            let value = match &check.verdict {
+                Verdict::Blocked(block) => {
+                    format!("Opening it is blocked by {} — {}", block.rule, name(block.filter))
+                }
+                Verdict::Allowed { block, exception } => format!(
+                    "Opening it is allowed by {} — {}, over {} — {}",
+                    exception.rule,
+                    name(exception.filter),
+                    block.rule,
+                    name(block.filter)
+                ),
+                Verdict::Clear if check.regex > 0 => format!(
+                    "No rule blocks opening it. {} of the {} rules read are regular expressions, \
+                     which were not checked.",
+                    check.regex, check.rules
+                ),
+                Verdict::Clear => "No rule blocks opening it".to_owned(),
+            };
+            findings.push(Finding::new("Filter lists", value, Level::Fact));
+            for found in &check.matches {
+                let mut value = format!("{} — {}", found.rule, name(found.filter));
+                if let Some(when) = found.when() {
+                    value.push_str(&format!(", {when}"));
+                }
+                findings.push(Finding::new("Also matches", value, Level::Fact));
+            }
+            if check.more > 0 {
+                findings.push(Finding::new(
+                    "Also matches",
+                    format!("{} more rule{}", check.more, plural(check.more as u64)),
+                    Level::Fact,
+                ));
+            }
+        }
+    }
+
+    let host = inputs.host.clone();
+    findings.push(match inputs.allowed {
+        Some(true) => Finding::new(
+            "Allowlist",
+            format!("Filtering is off on this site, by your rule {}", allowlist::rule(&host)),
+            Level::Fact,
+        )
+        .acting(RowAction::Disallow(host)),
+        Some(false) => Finding::new(
+            "Allowlist",
+            "Not on it. Allowing the site switches every kind of filtering off on its pages, \
+             with one rule added to your own rules.",
+            Level::Fact,
+        )
+        .acting(RowAction::Allow(host)),
+        None => Finding::new("Allowlist", "Your rules could not be found", Level::Unknown),
+    });
+}
+
+fn list_name(names: &std::collections::HashMap<i64, String>, filter: i64) -> String {
+    match names.get(&filter) {
+        Some(name) => name.clone(),
+        None if filter == rules::USER_RULES => "Your rules".to_owned(),
+        None => format!("filter list {filter}"),
     }
 }
 
@@ -517,8 +633,9 @@ const NO_ADDRESS: &str = "The name does not resolve. Check its spelling; a DNS f
                           answer that blocked names do not exist looks the same.";
 const NO_CONNECTION: &str = "The site, or the network between here and it, did not answer. A \
                              firewall or a site that is down looks the same from here.";
-const ALLOW: &str = "If this is what breaks the site, an exception rule in your own rules on the \
-                     Filters page lets it through: @@||name^ allows the whole site.";
+const ALLOW: &str = "If this is what breaks the site, Allow on the Allowlist row above switches \
+                     filtering off on it.";
+const AD_BLOCKING_OFF: &str = "Ad blocking is one of the switches on the Protection page.";
 const QUIC_OFF: &str = "With HTTP/3 filtering off, AdGuard lets QUIC through unfiltered, so ads \
                         and trackers reached over it are not blocked. The switch is on Advanced.";
 const QUIC_UNINSPECTED: &str = "What AdGuard means by a QUIC line with no action is not \
@@ -588,11 +705,21 @@ mod tests {
             resolved: Ok(vec!["0.0.0.0".parse().unwrap()]),
             connected: None,
             seen,
+            matched: Ok(lists("||example.com^").check(&Address::parse("example.com").unwrap())),
+            allowed: Some(false),
+            gone: Vec::new(),
             excluded: Some(Some("example.com".to_owned())),
             own_rules: vec!["||example.com^".to_owned()],
             own_dns_rules: Vec::new(),
             names: [(2, "AdGuard Base filter".to_owned())].into(),
         }
+    }
+
+    fn lists(user: &str) -> rules::Lists {
+        rules::Lists::from_lists(vec![
+            (2, "||ads.example.com^\n||example.com^$script,third-party\n".to_owned()),
+            (rules::USER_RULES, user.to_owned()),
+        ])
     }
 
     fn find<'a>(report: &'a Report, section: &str, label: &str) -> &'a Finding {
@@ -626,7 +753,7 @@ mod tests {
         let rule = find(&report, "Filtering", "Rule");
         assert_eq!(rule.level, Level::Fact);
         assert!(rule.value.contains("AdGuard Base filter, blocked 2 times"), "{}", rule.value);
-        assert_eq!(rule.remedy.unwrap().page, Some(FixedOn::WebFilters));
+        assert_eq!(rule.remedy.unwrap().hint, ALLOW, "leads to the Allowlist row, not away");
         let requests = find(&report, "Filtering", "Requests");
         assert!(requests.value.contains("1 passed, 2 blocked"), "{}", requests.value);
         assert_eq!(requests.remedy.unwrap().page, Some(FixedOn::Activity));
@@ -649,5 +776,62 @@ mod tests {
     fn a_site_the_log_never_saw_is_unknown_rather_than_fine() {
         let report = report(&inputs(Some(Seen::default()), true));
         assert_eq!(find(&report, "Filtering", "Requests").level, Level::Unknown);
+    }
+
+    #[test]
+    fn the_lists_verdict_names_the_rule_and_its_list() {
+        let report = report(&inputs(None, true));
+        let lists = find(&report, "Filtering", "Filter lists");
+        assert_eq!(lists.value, "Opening it is blocked by ||example.com^ — Your rules");
+        assert_eq!(lists.level, Level::Fact, "never a fault: see the module header");
+        let also = find(&report, "Filtering", "Also matches");
+        assert!(
+            also.value.ends_with("AdGuard Base filter, only as a script, loaded by another site"),
+            "{}",
+            also.value
+        );
+    }
+
+    #[test]
+    fn the_allowlist_row_offers_the_opposite_of_what_is_there() {
+        let mut not_listed = inputs(None, true);
+        let report_before = report(&not_listed);
+        let row = find(&report_before, "Filtering", "Allowlist");
+        assert_eq!(row.action, Some(RowAction::Allow("example.com".to_owned())));
+
+        not_listed.allowed = Some(true);
+        not_listed.matched = Ok(lists(&format!("||example.com^\n{}", allowlist::rule("example.com")))
+            .check(&Address::parse("example.com").unwrap()));
+        let report_after = report(&not_listed);
+        let row = find(&report_after, "Filtering", "Allowlist");
+        assert_eq!(row.action, Some(RowAction::Disallow("example.com".to_owned())));
+        assert!(find(&report_after, "Filtering", "Filter lists").value.starts_with("Opening it is allowed by @@"));
+
+        not_listed.allowed = None;
+        assert_eq!(find(&report(&not_listed), "Filtering", "Allowlist").action, None);
+    }
+
+    #[test]
+    fn with_ad_blocking_off_the_lists_are_not_said_to_decide_anything() {
+        let mut off = inputs(None, true);
+        off.machine.config = Ok(diagnostics::tests::config("ad_blocking_enabled: false\n"));
+        let report = report(&off);
+        let lists = find(&report, "Filtering", "Filter lists");
+        assert_eq!(lists.remedy.unwrap().page, Some(FixedOn::Protection));
+    }
+
+    #[test]
+    fn a_logged_rule_no_list_holds_says_so() {
+        let seen = Seen {
+            total: 1,
+            counts: crate::activity::Counts { allowed: 1, ..Default::default() },
+            rules: vec![(2, "@@||example.com^$document,important".to_owned(), Action::Allowed, 1)],
+            ..Seen::default()
+        };
+        let mut taken_back = inputs(Some(seen), true);
+        taken_back.gone = vec!["@@||example.com^$document,important".to_owned()];
+        let report = report(&taken_back);
+        let rule = find(&report, "Filtering", "Rule");
+        assert!(rule.value.contains("no longer in AdGuard Base filter or your rules"), "{}", rule.value);
     }
 }

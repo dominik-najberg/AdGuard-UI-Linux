@@ -195,6 +195,42 @@ impl Catalogue {
         Ok(newest)
     }
 
+    /// The rules of every list that is switched on and installed, by filter id,
+    /// as AdGuard stores them — for [`crate::rules`] to match an address against.
+    ///
+    /// Rules the user disabled in a list (`disabled_rules_text`, one per line)
+    /// are taken out. The user-rules pseudo-filter's row holds no text: its
+    /// rules are `user.txt`, which the caller reads itself.
+    pub fn enabled_rules(&self) -> Result<Vec<(i64, String)>, Error> {
+        let mut stmt = self.conn.prepare(
+            "SELECT f.filter_id, r.rules_text, r.disabled_rules_text
+             FROM filter f JOIN rules_list r ON r.filter_id = f.filter_id
+             WHERE f.is_enabled = 1 AND f.is_installed = 1 AND f.filter_id != ?1
+             ORDER BY f.filter_id",
+        )?;
+        let rows = stmt.query_map([Filter::USER_RULES_ID], |row| {
+            let text: Option<String> = row.get(1)?;
+            let disabled: Option<String> = row.get(2)?;
+            Ok((row.get::<_, i64>(0)?, text.unwrap_or_default(), disabled.unwrap_or_default()))
+        })?;
+        let mut lists = Vec::new();
+        for row in rows {
+            let (id, text, disabled) = row?;
+            let disabled: std::collections::HashSet<&str> =
+                disabled.lines().map(str::trim).filter(|line| !line.is_empty()).collect();
+            let text = if disabled.is_empty() {
+                text
+            } else {
+                text.lines()
+                    .filter(|line| !disabled.contains(line.trim()))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            };
+            lists.push((id, text));
+        }
+        Ok(lists)
+    }
+
     /// The lists the user installed by URL.
     ///
     /// A subset of [`filters`], read on its own because it is how an install is

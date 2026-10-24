@@ -29,11 +29,19 @@
 //! first person to use it said so: a failure with no way forward reads as the
 //! application shrugging.
 //!
+//! **One row does write**, and only in a website check's results: *Allowlist*
+//! switches filtering off on the site, or back on, at a press of its button.
+//! Nothing else owns that — AdGuard keeps it in `user.txt`, which no other page
+//! edits — and it belongs beside the rules that blocked the site, which is the
+//! moment someone wants it (`adguard_core::allowlist`). After it acts the
+//! check runs again, so the row and the verdict above it say what is true now.
+//!
 //! # And one website, on request
 //!
 //! *Check a Website* runs the same kind of report for one site the user names:
 //! the machine-wide problems first, then the name lookup and a connection,
-//! AdGuard's log for it, HTTPS and HTTP/3 (`adguard_core::site`). Its results
+//! which rules in the filter lists decide its address and AdGuard's log for
+//! it, HTTPS and HTTP/3 (`adguard_core::site`). Its results
 //! sit in one tinted panel between that group and the machine-wide sections,
 //! with a heading over the machine's, since the two are otherwise the same
 //! groups of the same rows and one site's *HTTPS* would read as the machine's
@@ -47,7 +55,9 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use adguard_core::diagnostics::{self, Inputs, Level, Report};
+use adguard_core::allowlist::{self, Outcome};
+use adguard_core::diagnostics::{self, Inputs, Level, Report, RowAction};
+use adguard_core::rules::Address;
 use adguard_core::{site, Cli};
 use adw::prelude::*;
 use gtk::glib;
@@ -72,9 +82,10 @@ const WHAT_THE_COPY_HOLDS: &str =
 
 /// Said under *Check a Website* before a check has run.
 const WHAT_THE_SITE_CHECK_IS: &str =
-    "Name a site that does not load, or loads with ads, to check it from end to end: its name \
-     and a connection, what AdGuard's log says happened to it and which rules decided it, HTTPS \
-     and HTTP/3. It looks the name up and opens one connection to it, and changes nothing.";
+    "Name a site or paste a page's address that does not load, or loads with ads, to check it \
+     from end to end: its name and a connection, which rules in your filter lists block it and \
+     what AdGuard's log says happened to it, HTTPS and HTTP/3. It looks the name up and opens \
+     one connection to it. The only thing it changes is your allowlist, when you press Allow.";
 
 /// The save button's tooltip. The same text as the copy, so the same promise.
 const WHAT_THE_FILE_HOLDS: &str =
@@ -126,6 +137,9 @@ pub struct DiagnosticsPage {
     /// results end is said as well as drawn.
     machine_heading: adw::PreferencesGroup,
     site_busy: Cell<bool>,
+    /// What the last check was for, so it can run again after the allowlist
+    /// row acts.
+    site_address: RefCell<Option<Address>>,
 }
 
 impl DiagnosticsPage {
@@ -233,6 +247,7 @@ impl DiagnosticsPage {
             site_results: RefCell::new(Vec::new()),
             machine_heading,
             site_busy: Cell::new(false),
+            site_address: RefCell::new(None),
         });
         this.site_button.connect_clicked({
             let this = Rc::downgrade(&this);
@@ -303,13 +318,19 @@ impl DiagnosticsPage {
     /// Run the website check for what the entry holds.
     fn check_site(self: &Rc<Self>) {
         let typed = self.site_entry.text().to_string();
-        let Some(host) = site::host(&typed) else {
+        let Some(address) = Address::parse(&typed) else {
             self.toasts.add_toast(toast("That is not a site's name or address"));
             return;
         };
+        self.run_site(address);
+    }
+
+    fn run_site(self: &Rc<Self>, address: Address) {
         if self.site_busy.replace(true) {
             return;
         }
+        let host = address.host().to_owned();
+        self.site_address.replace(Some(address.clone()));
         self.site_button.set_sensitive(false);
         self.site_button.set_label("Checking…");
         self.site_group.set_description(Some(&format!("Checking {host}…")));
@@ -317,10 +338,7 @@ impl DiagnosticsPage {
         let cli = self.cli.clone();
         let this = self.clone();
         worker::run(
-            {
-                let host = host.clone();
-                move || site::report(&site::Inputs::collect(&cli, &host))
-            },
+            move || site::report(&site::Inputs::collect(&cli, &address)),
             move |report: Report| {
                 this.site_busy.set(false);
                 this.site_button.set_sensitive(true);
@@ -337,12 +355,35 @@ impl DiagnosticsPage {
             self.site_box.remove(&group);
         }
         self.site_entry.set_text("");
+        self.site_address.replace(None);
         self.site_panel.set_visible(false);
         self.machine_heading.set_visible(false);
         self.site_group.set_description(Some(WHAT_THE_SITE_CHECK_IS));
     }
 
-    fn render_site(&self, host: &str, report: &Report) {
+    /// Switch filtering off on a site, or back on, then check it again.
+    fn act(self: &Rc<Self>, action: RowAction) {
+        let cli = self.cli.clone();
+        let this = self.clone();
+        worker::run(
+            {
+                let action = action.clone();
+                move || match &action {
+                    RowAction::Allow(host) => allowlist::allow(&cli, host),
+                    RowAction::Disallow(host) => allowlist::disallow(&cli, host),
+                }
+            },
+            move |outcome: std::io::Result<Outcome>| {
+                this.toasts.add_toast(toast(&acted(&action, &outcome)));
+                let address = this.site_address.borrow().clone();
+                if let Some(address) = address {
+                    this.run_site(address);
+                }
+            },
+        );
+    }
+
+    fn render_site(self: &Rc<Self>, host: &str, report: &Report) {
         for group in self.site_results.take() {
             self.site_box.remove(&group);
         }
@@ -363,10 +404,16 @@ impl DiagnosticsPage {
                 }
             }
         });
+        let weak = Rc::downgrade(self);
+        let act: Rc<dyn Fn(RowAction)> = Rc::new(move |action| {
+            if let Some(this) = weak.upgrade() {
+                this.act(action);
+            }
+        });
         let groups: Vec<_> = report
             .sections
             .iter()
-            .map(|section| section_group(section, home.as_deref(), &link))
+            .map(|section| section_group(section, home.as_deref(), &link, Some(&act)))
             .collect();
         for group in &groups {
             self.site_box.append(group);
@@ -430,7 +477,7 @@ impl DiagnosticsPage {
         let groups: Vec<_> = report
             .sections
             .iter()
-            .map(|section| section_group(section, home.as_deref(), &link))
+            .map(|section| section_group(section, home.as_deref(), &link, None))
             .collect();
         for group in &groups {
             self.page.add(group);
@@ -506,13 +553,14 @@ fn section_group(
     section: &diagnostics::Section,
     home: Option<&str>,
     navigate: &Rc<dyn Fn(FixedOn)>,
+    act: Option<&Rc<dyn Fn(RowAction)>>,
 ) -> adw::PreferencesGroup {
     let group = adw::PreferencesGroup::builder().title(section.title).build();
     if let Some(note) = section.note {
         group.set_description(Some(note));
     }
     for finding in &section.findings {
-        group.add(&finding_row(finding, home, navigate));
+        group.add(&finding_row(finding, home, navigate, act));
     }
     group
 }
@@ -521,6 +569,7 @@ fn finding_row(
     finding: &diagnostics::Finding,
     home: Option<&str>,
     navigate: &Rc<dyn Fn(FixedOn)>,
+    act: Option<&Rc<dyn Fn(RowAction)>>,
 ) -> adw::ActionRow {
     let row = adw::ActionRow::new();
     // Before the strings, which are consumed as they are set: CLI messages and
@@ -558,6 +607,10 @@ fn finding_row(
         }
     }
 
+    if let (Some(action), Some(act)) = (finding.action.clone(), act) {
+        row.add_suffix(&action_button(action, act));
+    }
+
     let image = match marker(finding.level) {
         Some((icon, class, word)) => {
             let image = gtk::Image::from_icon_name(icon);
@@ -579,6 +632,53 @@ fn finding_row(
     };
     row.add_prefix(&image);
     row
+}
+
+/// The button on a row that acts itself. Insensitive from the press until the
+/// check that follows it replaces the row, so one press is one write.
+fn action_button(action: RowAction, act: &Rc<dyn Fn(RowAction)>) -> gtk::Button {
+    let (label, tooltip) = match &action {
+        RowAction::Allow(host) => (
+            "Allow",
+            format!("Switch filtering off on {host} by adding {} to your rules", allowlist::rule(host)),
+        ),
+        RowAction::Disallow(host) => (
+            "Remove",
+            format!("Switch filtering back on for {host} by removing {} from your rules", allowlist::rule(host)),
+        ),
+    };
+    let button = gtk::Button::builder()
+        .label(label)
+        .valign(gtk::Align::Center)
+        .tooltip_text(tooltip)
+        .build();
+    let act = act.clone();
+    button.connect_clicked(move |button| {
+        button.set_sensitive(false);
+        act(action.clone());
+    });
+    button
+}
+
+/// The toast after the allowlist row acts.
+fn acted(action: &RowAction, outcome: &std::io::Result<Outcome>) -> String {
+    let (allow, host) = match action {
+        RowAction::Allow(host) => (true, host),
+        RowAction::Disallow(host) => (false, host),
+    };
+    match (allow, outcome) {
+        (_, Err(err)) => format!("Your rules could not be changed: {err}"),
+        (true, Ok(Outcome::Done)) => {
+            format!("Filtering is off on {host}. Reload the page in your browser.")
+        }
+        (false, Ok(Outcome::Done)) => format!("Filtering is back on for {host}"),
+        (true, Ok(Outcome::Unchanged)) => format!("{host} was already allowed"),
+        (false, Ok(Outcome::Unchanged)) => format!("{host} was not on the allowlist"),
+        (_, Ok(Outcome::NotReloaded(reason))) => format!(
+            "Your rules were changed, and AdGuard did not read them again: {reason}. It will \
+             when protection next starts."
+        ),
+    }
 }
 
 /// The window's name for the page a fix is on.
@@ -630,6 +730,16 @@ mod tests {
             assert!(WHAT_THE_COPY_HOLDS.contains(left_out), "{left_out}");
             assert!(WHAT_THE_FILE_HOLDS.contains(left_out), "{left_out}");
         }
+    }
+
+    #[test]
+    fn the_allowlist_toast_says_what_happens_next() {
+        let allow = RowAction::Allow("example.com".to_owned());
+        assert!(acted(&allow, &Ok(Outcome::Done)).contains("Reload the page"));
+        let unread = acted(&allow, &Ok(Outcome::NotReloaded("refused".to_owned())));
+        assert!(unread.contains("refused") && unread.contains("protection next starts"), "{unread}");
+        let back = acted(&RowAction::Disallow("example.com".to_owned()), &Ok(Outcome::Done));
+        assert_eq!(back, "Filtering is back on for example.com");
     }
 
     #[test]
