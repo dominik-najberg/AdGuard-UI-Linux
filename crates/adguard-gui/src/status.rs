@@ -374,13 +374,22 @@ pub struct StatusPage {
     activate: gtk::Button,
     finish: gtk::Button,
     licence: RefCell<Licence>,
-    /// Whether the last `status` was refused for want of a licence.
+    /// Whether the licence group may be out of date: the last `status` was
+    /// refused over the licence, or a lifecycle command ran while the group
+    /// was not showing an active one.
     ///
     /// Kept so that the one `status` that succeeds afterwards can be told apart
     /// from all the others. That is the moment the CLI picked the licence up
     /// again — after a log-in, or after a check that had failed to reach
     /// AdGuard — and the licence group should hear about it once.
-    status_unlicensed: Cell<bool>,
+    ///
+    /// "Over the licence" is both refusals, not only the one for want of it.
+    /// Seen on 25 October 2026: with the Wi-Fi down, `status` and `license`
+    /// both failed with *Error while checking license status: Unable to
+    /// connect*, which is [`Gate::Unchecked`], not [`Gate::Unlicensed`]. Back
+    /// online, and through a *Restart*, protection ran again while the group
+    /// went on showing that sentence, because nothing had raised this flag.
+    licence_stale: Cell<bool>,
     /// Whether a proxy was running when *Activate…* was pressed.
     ///
     /// `activate` stops a running proxy while the licence is refused (see
@@ -810,7 +819,7 @@ impl StatusPage {
             activate: activate.clone(),
             finish: finish.clone(),
             licence: RefCell::new(Licence::Unknown),
-            status_unlicensed: Cell::new(false),
+            licence_stale: Cell::new(false),
             resume_after_activation: Cell::new(false),
             last_status: RefCell::new(None),
             status_in_flight: Cell::new(false),
@@ -991,6 +1000,9 @@ impl StatusPage {
                 (status, licence, evidence)
             },
             move |(status, licence, evidence)| {
+                // The licence is read right here, so nothing is stale about it
+                // — unless this very `status` says otherwise.
+                this.licence_stale.set(false);
                 this.settle_status(status, evidence);
                 match licence {
                     Ok(licence) => this.licence_read(licence),
@@ -1413,7 +1425,7 @@ impl StatusPage {
 
     fn settle_status(
         self: &Rc<Self>,
-        result: Result<ProxyStatus, (bool, String)>,
+        result: Result<ProxyStatus, (Gate, String)>,
         evidence: Evidence,
     ) {
         let (bypass, cached, read, refused) = evidence;
@@ -1429,21 +1441,22 @@ impl StatusPage {
             Ok(status) => {
                 self.apply(&status, bypass);
 
-                // The other direction: `status` was refused for want of a
-                // licence and now is not, so the CLI has the licence back. This
-                // is how an activation completes (see the module docs). It is
-                // also how a licence lost to the network returns once AdGuard
-                // can be reached again. Either way the group below is still
-                // showing the wait or the refusal. Re-read it, once, on the
-                // change. A reading that still says "not active" leaves the flag
-                // down, so this cannot turn into a `license` poll.
-                if self.status_unlicensed.replace(false) && !self.claims_active_licence() {
+                // The other direction: `status` was refused over the licence
+                // and now is not, so the CLI has the licence back. This is how
+                // an activation completes (see the module docs). It is also how
+                // a licence lost to the network returns once AdGuard can be
+                // reached again. Either way the group below is still showing
+                // the wait or the refusal. Re-read it, once, on the change. A
+                // reading that still says "not active" leaves the flag down, so
+                // this cannot turn into a `license` poll.
+                if self.licence_stale.replace(false) && !self.claims_active_licence() {
                     self.read_licence();
                 }
                 // A later loss is a new run of refusals and may try again.
                 self.restore_tried.set(false);
             }
-            Err((unlicensed, message)) => {
+            Err((gate, message)) => {
+                let unlicensed = gate == Gate::Unlicensed;
                 // AdGuard CLI may have thrown its config away, which is what
                 // every reset in its log so far has been. Our copy brings the
                 // licence, the device id and the CA back if so, and is undone
@@ -1454,8 +1467,8 @@ impl StatusPage {
                 // Raised only, never lowered here: a check that fails to reach
                 // AdGuard in the middle of the wait says nothing about whether
                 // the licence is back, and must not hide its return.
-                if unlicensed {
-                    self.status_unlicensed.set(true);
+                if gate != Gate::Other {
+                    self.licence_stale.set(true);
                 }
                 // Kept in the panel rather than a toast: a failing `status`
                 // repeats every two seconds and would bury the UI in toasts.
@@ -1662,6 +1675,16 @@ impl StatusPage {
                 }
                 // act -> re-read -> reconcile: the command's own output is not
                 // evidence that it worked (see docs/cli-contract.md §3).
+                //
+                // The licence too, when the group is not showing an active one:
+                // a restart is what a user reaches for once the network is
+                // back, and a group still showing the offline refusal beside a
+                // running proxy reads as a contradiction. Not read here but
+                // after the `status` below, which is one `adguard-cli` at a
+                // time, and only if that `status` works.
+                if !this.claims_active_licence() {
+                    this.licence_stale.set(true);
+                }
                 this.refresh();
             },
         );
@@ -2312,7 +2335,7 @@ impl StatusPage {
 /// One `status` reading, kept so a poll tick can reuse it.
 #[derive(Clone)]
 struct StatusReading {
-    result: Result<ProxyStatus, (bool, String)>,
+    result: Result<ProxyStatus, (Gate, String)>,
     /// What the CLI's answer depended on when it was read. `None` when
     /// `proxy.yaml` could not be read, which never matches, so the next tick
     /// asks the CLI again.
@@ -2354,10 +2377,11 @@ impl StatusReading {
 
 /// Read the proxy status, keeping the one distinction that matters.
 ///
-/// The variant, not just its wording: a `status` refused for want of a licence
-/// is the one status failure that says something about a *different* part of
-/// this page — see [`StatusPage::settle_status`].
-fn read_status(cli: &Cli) -> Result<ProxyStatus, (bool, String)> {
+/// The variant, not just its wording: a `status` refused over the licence —
+/// for want of one, or for a check that could not reach AdGuard — is the one
+/// status failure that says something about a *different* part of this page;
+/// see [`StatusPage::settle_status`].
+fn read_status(cli: &Cli) -> Result<ProxyStatus, (Gate, String)> {
     cli.status().map_err(classify)
 }
 
@@ -2399,7 +2423,7 @@ type Evidence = (Option<Bypass>, Cached, bool, Option<(SystemTime, Rejections)>)
 /// and a four-mebibyte read on a two-second timer and the main loop is drawing.
 fn read_evidence(
     cli: &Cli,
-    status: &Result<ProxyStatus, (bool, String)>,
+    status: &Result<ProxyStatus, (Gate, String)>,
     log_due: bool,
     cached: Cached,
     refused: Option<(SystemTime, Rejections)>,
@@ -2491,19 +2515,36 @@ struct Refused {
     message: String,
 }
 
+/// What a refused `status` says about the licence group.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Gate {
+    /// Refused for want of a licence — `Error::Unlicensed`.
+    Unlicensed,
+    /// Refused because the CLI could not reach AdGuard to check the licence —
+    /// `Error::LicenceCheckFailed`. Nothing says the licence is gone, but the
+    /// group may have been read in the same outage and be showing it.
+    Unchecked,
+    /// Anything else, which says nothing about the licence.
+    Other,
+}
+
 /// Was this failure the licence, in the CLI's own words?
 ///
 /// The words are the CLI's unless its last licence check could not reach
 /// AdGuard. The panel then says that instead: *"you need to activate"* every
 /// two seconds through a router restart is what sent this app's own author to
 /// `activate` three times (`Error::Unlicensed`).
-fn classify(err: adguard_core::Error) -> (bool, String) {
-    let unlicensed = matches!(err, adguard_core::Error::Unlicensed { .. });
+fn classify(err: adguard_core::Error) -> (Gate, String) {
+    let gate = match err {
+        adguard_core::Error::Unlicensed { .. } => Gate::Unlicensed,
+        adguard_core::Error::LicenceCheckFailed { .. } => Gate::Unchecked,
+        _ => Gate::Other,
+    };
     let message = match offline_reason(&err) {
         Some(reason) => offline_state(&reason),
         None => err.to_string(),
     };
-    (unlicensed, message)
+    (gate, message)
 }
 
 fn offline_reason(err: &adguard_core::Error) -> Option<String> {
@@ -3046,6 +3087,21 @@ fn row(title: &str, subtitle: &str) -> adw::ActionRow {
 mod tests {
     use super::*;
 
+    /// A `status` that could not reach AdGuard to check the licence must mark
+    /// the licence group stale like a refusal does, or the offline sentence
+    /// outlives the outage. Nor may it pass for an unlicensed install, which
+    /// is what restores `adguard.conf`.
+    #[test]
+    fn a_failed_licence_check_is_its_own_gate() {
+        let unchecked = adguard_core::Error::LicenceCheckFailed {
+            message: "Error while checking license status: Unable to connect".into(),
+        };
+        assert_eq!(classify(unchecked).0, Gate::Unchecked);
+        let unlicensed = adguard_core::Error::Unlicensed { message: "activate".into(), offline: None };
+        assert_eq!(classify(unlicensed).0, Gate::Unlicensed);
+        let other = adguard_core::Error::Refused { message: "no".into() };
+        assert_eq!(classify(other).0, Gate::Other);
+    }
 
     #[test]
     fn certificate_guidance_is_specific_to_the_reported_failure() {
