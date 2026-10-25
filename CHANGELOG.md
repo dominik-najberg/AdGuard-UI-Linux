@@ -11,6 +11,14 @@ This file is the one changelog.
 
 ---
 
+## 1.13.1 — 25 October 2026
+
+### The licence state catches up when the connection comes back
+
+When AdGuard CLI cannot reach AdGuard's servers, it refuses every command with "Error while checking license status: Unable to connect, please check your internet connection". The Status page showed that under *Licence*, which is right, but kept showing it after the connection came back and protection was running again. Restarting protection did not clear it either. The licence is now read again as soon as AdGuard CLI answers, and after *Start*, *Stop* or *Restart* while it is not shown as active.
+
+---
+
 ## 1.13.0 — 25 October 2026
 
 ### Find the rule that blocks a site, and allow the site
