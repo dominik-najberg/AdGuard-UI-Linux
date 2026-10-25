@@ -379,7 +379,18 @@ impl AboutPage {
             .subtitle("Once a day")
             .active(updater.automatic())
             .build();
+        // Always there, where the notes used to appear only beside a newer
+        // release. Read from the changelog built into this copy, so opening it
+        // asks nothing of GitHub.
+        let whats_new = adw::ActionRow::builder()
+            .title("What's New")
+            .subtitle("Changes in this version and the ones before it")
+            .activatable(true)
+            .build();
+        whats_new.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
+        whats_new.connect_activated(crate::changelog::present);
         versions.add(&app_version);
+        versions.add(&whats_new);
         versions.add(&automatic);
         versions.add(&cli_version);
         versions.add(&channel);

@@ -21,7 +21,7 @@ use gtk::glib;
 use gtk4 as gtk;
 use libadwaita as adw;
 
-use crate::{abbreviate, toast, worker};
+use crate::{abbreviate, rules_editor, toast, worker};
 
 /// One read of everything the page renders.
 struct Loaded {
@@ -802,14 +802,23 @@ impl FiltersPage {
 
         let row = self.row(user_rules);
         row.set_subtitle(&match (loaded.user_rules, &loaded.user_rules_path) {
-            (Some(0), Some(path)) => format!("No rules yet — edit {}", abbreviate(path)),
+            (Some(0), Some(path)) => format!("No rules yet in {}", abbreviate(path)),
             (Some(count), Some(path)) => {
                 let plural = if count == 1 { "rule" } else { "rules" };
                 format!("{count} {plural} in {}", abbreviate(path))
             }
-            (_, Some(path)) => format!("Edit {} to add your own rules", abbreviate(path)),
+            (_, Some(path)) => format!("Your own filtering rules, in {}", abbreviate(path)),
             (_, None) => "Your own filtering rules".to_owned(),
         });
+
+        if let Some(path) = loaded.user_rules_path.clone() {
+            let this = Rc::downgrade(self);
+            rules_editor::attach(&row, "Your Rules", path, move || {
+                if let Some(this) = this.upgrade() {
+                    this.rules_saved();
+                }
+            });
+        }
 
         let mut section = Section::new(group);
         section.group.add(&row);
@@ -819,6 +828,43 @@ impl FiltersPage {
         section.add_row(&row, haystack(user_rules, "Your rules"));
 
         section
+    }
+
+    /// After the editor saved: have AdGuard read the file again, which it does
+    /// not do by itself (see [`Cli::reload_user_rules`]).
+    ///
+    /// Only while the rules are on. The reload *is* `filters enable`, so with
+    /// them off it would switch them on — a decision the user made with the
+    /// switch beside the button, not one an edit should reverse.
+    fn rules_saved(self: &Rc<Self>) {
+        let on = self
+            .rows
+            .borrow()
+            .get(&Filter::USER_RULES_ID)
+            .is_some_and(|row| row.filter.borrow().enabled);
+        if !on {
+            self.toasts
+                .add_toast(toast("Your rules are saved. They are switched off, so AdGuard is not using them."));
+            self.reload();
+            return;
+        }
+
+        let cli = self.cli.clone();
+        let this = self.clone();
+        worker::run(
+            move || cli.reload_user_rules(),
+            move |result| {
+                this.toasts.add_toast(toast(&match result {
+                    Ok(()) => "Your rules are saved, and AdGuard is using them".to_owned(),
+                    Err(err) => format!(
+                        "Your rules are saved, and AdGuard did not read them again: {err}. It \
+                         will when protection next starts."
+                    ),
+                }));
+                // The rule count under the row's name.
+                this.reload();
+            },
+        );
     }
 
     fn row(self: &Rc<Self>, filter: &Filter) -> adw::SwitchRow {

@@ -325,14 +325,15 @@ impl ProtectionPage {
         let group = adw::PreferencesGroup::builder()
             .title("Privacy")
             .description(
-                "Ships off. Neither proxy.yaml nor the CLI describes what this sends, \
-                 so neither can this page.",
+                "These statistics go from AdGuard CLI to AdGuard. AdGuard UI receives none of \
+                 them and collects nothing about you. Off unless you turn it on. Neither \
+                 proxy.yaml nor the CLI describes what is sent, so neither can this page.",
             )
             .build();
 
         let switch = adw::SwitchRow::new();
         switch.set_use_markup(false);
-        switch.set_title("Send anonymous statistics");
+        switch.set_title("Send anonymous statistics to AdGuard");
         switch.set_subtitle_lines(3);
 
         switch.connect_active_notify({

@@ -97,7 +97,7 @@ pub fn add(path: &Path, host: &str) -> io::Result<bool> {
     }
     next.push_str(&rule(host));
     next.push('\n');
-    replace(path, &next)?;
+    crate::filters::write_user_rules(path, &next)?;
     Ok(true)
 }
 
@@ -114,23 +114,8 @@ pub fn remove(path: &Path, host: &str) -> io::Result<bool> {
     if text.ends_with('\n') && !next.is_empty() {
         next.push('\n');
     }
-    replace(path, &next)?;
+    crate::filters::write_user_rules(path, &next)?;
     Ok(true)
-}
-
-/// Write `text` over the file at `path` by renaming a sibling into place, so
-/// AdGuard never reads half a file. Keeps the file's permissions.
-fn replace(path: &Path, text: &str) -> io::Result<()> {
-    let mut temporary = path.as_os_str().to_owned();
-    temporary.push(".adguard-ui");
-    let temporary = std::path::PathBuf::from(temporary);
-    std::fs::write(&temporary, text)?;
-    if let Ok(metadata) = std::fs::metadata(path) {
-        std::fs::set_permissions(&temporary, metadata.permissions())?;
-    }
-    std::fs::rename(&temporary, path).inspect_err(|_| {
-        let _ = std::fs::remove_file(&temporary);
-    })
 }
 
 #[cfg(test)]

@@ -42,7 +42,7 @@ use gtk4 as gtk;
 use libadwaita as adw;
 
 use crate::filters::{FiltersPage, Host};
-use crate::{abbreviate, toast, worker};
+use crate::{abbreviate, rules_editor, toast, worker};
 
 /// The file whose presence in `dns_filtering.filters` is the user-rules switch.
 ///
@@ -328,6 +328,14 @@ impl DnsPage {
         user_rules.set_use_markup(false);
         user_rules.set_title("Use my own DNS rules");
         user_rules.set_subtitle_lines(2);
+        if let Some(path) = FilterSet::Dns.user_rules_file() {
+            let this = Rc::downgrade(self);
+            rules_editor::attach(&user_rules, "Your DNS Rules", path, move || {
+                if let Some(this) = this.upgrade() {
+                    this.rules_saved();
+                }
+            });
+        }
         rules.add(&user_rules);
 
         // Its own group, and last, because it is a workaround rather than a
@@ -735,6 +743,63 @@ impl DnsPage {
                 cli.list_remove(key::DNS_FILTERS, DNS_USER_RULES_ENTRY)
             }
         });
+    }
+
+    /// After the editor saved.
+    ///
+    /// **There is no reload for the DNS rules.** The web rules' one is
+    /// `filters enable` on the user-rules row, and the DNS row cannot be
+    /// enabled that way at all (contract §6), so what is known to make the
+    /// proxy read `dns_user.txt` is a start. A restart is offered rather than
+    /// done: it drops filtering for a moment, and it is the user's to time.
+    /// With protection off, or the rules switched off, there is nothing to
+    /// restart for.
+    fn rules_saved(self: &Rc<Self>) {
+        let on = self
+            .last
+            .borrow()
+            .as_ref()
+            .and_then(|config| config.lists(key::DNS_FILTERS, DNS_USER_RULES_ENTRY))
+            == Some(true);
+        if !on {
+            self.toasts.add_toast(toast(
+                "Your DNS rules are saved. They are switched off, so AdGuard is not using them.",
+            ));
+            return;
+        }
+
+        let cli = self.cli.clone();
+        let this = self.clone();
+        worker::run(
+            move || cli.status().map(|status| status.running).unwrap_or(false),
+            move |running| {
+                if !running {
+                    this.toasts.add_toast(toast(
+                        "Your DNS rules are saved. AdGuard reads them when protection next starts.",
+                    ));
+                    return;
+                }
+                let notice = toast("Your DNS rules are saved. Restart protection to use them now.");
+                notice.set_button_label(Some("Restart"));
+                notice.set_timeout(0);
+                let cli = this.cli.clone();
+                let toasts = this.toasts.clone();
+                notice.connect_button_clicked(move |_| {
+                    let cli = cli.clone();
+                    let toasts = toasts.clone();
+                    worker::run(
+                        move || cli.restart(),
+                        move |result| {
+                            toasts.add_toast(toast(&match result {
+                                Ok(_) => "Protection restarted with your DNS rules".to_owned(),
+                                Err(err) => format!("Protection could not be restarted: {err}"),
+                            }));
+                        },
+                    );
+                });
+                this.toasts.add_toast(notice);
+            },
+        );
     }
 
     /// Write the ECH-stripping switch.

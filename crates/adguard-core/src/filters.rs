@@ -373,7 +373,30 @@ impl Catalogue {
 /// exist until something writes to it.
 pub fn user_rule_count(path: &Path) -> Option<usize> {
     let text = std::fs::read_to_string(path).ok()?;
-    Some(text.lines().filter(|line| is_rule(line.trim())).count())
+    Some(rule_count(&text))
+}
+
+/// How many lines of `text` are rules rather than comments or blanks.
+pub fn rule_count(text: &str) -> usize {
+    text.lines().filter(|line| is_rule(line.trim())).count()
+}
+
+/// Write `text` over the user-rules file at `path` by renaming a sibling into
+/// place, so AdGuard never reads half a file. Keeps the file's permissions.
+///
+/// Shared by the allowlist, which changes one line, and the rules editor,
+/// which replaces the whole file with what the user typed.
+pub fn write_user_rules(path: &Path, text: &str) -> std::io::Result<()> {
+    let mut temporary = path.as_os_str().to_owned();
+    temporary.push(".adguard-ui");
+    let temporary = std::path::PathBuf::from(temporary);
+    std::fs::write(&temporary, text)?;
+    if let Ok(metadata) = std::fs::metadata(path) {
+        std::fs::set_permissions(&temporary, metadata.permissions())?;
+    }
+    std::fs::rename(&temporary, path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&temporary);
+    })
 }
 
 fn is_rule(line: &str) -> bool {

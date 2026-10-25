@@ -77,16 +77,22 @@ impl RequestSearch {
             .maximum_size(600)
             .tightening_threshold(400)
             .margin_top(18)
+            .margin_bottom(12)
             .margin_start(12)
             .margin_end(12)
             .child(&controls)
             .build();
+        // The results scroll under the controls, so they need an edge to
+        // scroll under. Without one, rows were cut off flush against the
+        // field and read as glued to it.
+        let edge = gtk::Separator::new(gtk::Orientation::Horizontal);
 
         let group = adw::PreferencesGroup::builder().description(WHAT_IT_IS).build();
         let results = adw::PreferencesPage::builder().vexpand(true).build();
         results.add(&group);
         let view = gtk::Box::builder().orientation(gtk::Orientation::Vertical).build();
         view.append(&bar);
+        view.append(&edge);
         view.append(&results);
 
         let this = Rc::new(Self {
