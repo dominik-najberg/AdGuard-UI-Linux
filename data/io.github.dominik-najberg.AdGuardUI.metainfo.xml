@@ -53,6 +53,12 @@
     application is its first release.
   -->
   <releases>
+    <release version="1.14.0" type="stable" date="2026-10-25">
+      <url type="details">https://github.com/dominik-najberg/AdGuard-UI-Linux/releases/tag/v1.14.0</url>
+      <description>
+        <p>Your own rules and your own DNS rules can be edited in the application: a pencil beside each switch opens the file, and saving has AdGuard use the web rules straight away, or offers a restart for the DNS rules. The About page has a What's New row that shows the recent releases at any time, without asking GitHub. The Privacy setting says the statistics go to AdGuard and not to this application, and the request search on the Activity page has room under it.</p>
+      </description>
+    </release>
     <release version="1.13.1" type="stable" date="2026-10-25">
       <url type="details">https://github.com/dominik-najberg/AdGuard-UI-Linux/releases/tag/v1.13.1</url>
       <description>

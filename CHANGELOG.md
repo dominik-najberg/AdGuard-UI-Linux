@@ -11,6 +11,28 @@ This file is the one changelog.
 
 ---
 
+## 1.14.0 — 25 October 2026
+
+### Edit your own rules in the application
+
+*Your rules* on the Filters page and *Your DNS rules* on the DNS page used to show only where the file was. Each now has a pencil beside its switch that opens the rules in the window. Write one rule per line; a count under the text says how many lines are rules. **Save**, or Ctrl+S, writes the file. If you close the editor with changes not saved, it asks first.
+
+AdGuard does not notice when the file changes. After a save, AdGuard reads your web rules again straight away, if they are switched on. AdGuard CLI has no command to read the DNS rules again, so while protection is on, a notice offers **Restart** to start using them. Saving never switches your rules on: if they are off, they stay off.
+
+### See what changed in AdGuard UI at any time
+
+The About page has a *What's New* row under the version. It shows the last five releases, starting with the newest, from the changelog built into the application, so it works offline and asks GitHub nothing. Before this, the release notes were reachable only when an update was available.
+
+### The Privacy setting says who gets the statistics
+
+On the Protection page, the switch is now *Send anonymous statistics to AdGuard*, and the text above it says the statistics go from AdGuard CLI to AdGuard. AdGuard UI receives none of them and collects nothing about you.
+
+### The request search has room under it
+
+On the Activity page's *Requests* tab, the results scrolled right up against the search field and looked stuck to it. There is now a gap and a dividing line under the field.
+
+---
+
 ## 1.13.1 — 25 October 2026
 
 ### The licence state catches up when the connection comes back
