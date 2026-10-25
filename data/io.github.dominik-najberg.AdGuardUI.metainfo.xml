@@ -53,6 +53,12 @@
     application is its first release.
   -->
   <releases>
+    <release version="1.13.1" type="stable" date="2026-10-25">
+      <url type="details">https://github.com/dominik-najberg/AdGuard-UI-Linux/releases/tag/v1.13.1</url>
+      <description>
+        <p>The licence state on the Status page is read again once AdGuard CLI can reach AdGuard's servers, and after protection is started or restarted, so it no longer shows a connection error after the connection is back.</p>
+      </description>
+    </release>
     <release version="1.13.0" type="stable" date="2026-10-25">
       <url type="details">https://github.com/dominik-najberg/AdGuard-UI-Linux/releases/tag/v1.13.0</url>
       <description>
