@@ -11,6 +11,18 @@ This file is the one changelog.
 
 ---
 
+## 1.14.1 — 1 November 2026
+
+### No false warning on the Activity page after a crash
+
+When the computer goes down without saving everything to disk, the end of AdGuard's log can be left as a run of empty bytes, and the first request logged after the restart is written straight after them. The Activity page counted that request as a line it could not read and warned that some of the log was in a shape it did not recognise. It now reads the request and leaves the empty bytes out, so a crash no longer looks like an AdGuard CLI update that changed its log.
+
+### The warning on the Activity page has one frame
+
+The warning that some of AdGuard's log could not be read was drawn as a frame inside a second frame, with an empty strip above it and no space between it and the figures below. It is now a single box with space under it, above the figures it is about.
+
+---
+
 ## 1.14.0 — 25 October 2026
 
 ### Edit your own rules in the application

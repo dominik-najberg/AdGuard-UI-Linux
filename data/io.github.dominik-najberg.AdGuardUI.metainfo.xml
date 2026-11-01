@@ -53,6 +53,12 @@
     application is its first release.
   -->
   <releases>
+    <release version="1.14.1" type="stable" date="2026-11-01">
+      <url type="details">https://github.com/dominik-najberg/AdGuard-UI-Linux/releases/tag/v1.14.1</url>
+      <description>
+        <p>The Activity page no longer warns that AdGuard's log could not be read when the only cause is a crash that left empty bytes at the end of the log, and the warning, when it is shown, is a single box above the figures instead of a frame inside a frame.</p>
+      </description>
+    </release>
     <release version="1.14.0" type="stable" date="2026-10-25">
       <url type="details">https://github.com/dominik-najberg/AdGuard-UI-Linux/releases/tag/v1.14.0</url>
       <description>
