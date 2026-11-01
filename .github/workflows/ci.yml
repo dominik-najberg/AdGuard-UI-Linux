@@ -50,7 +50,9 @@ jobs:
 
     steps:
       # `dbus-daemon` is for the tray's registration test, which runs its own
-      # private bus and skips without one.
+      # private bus and skips without one. `zstd` is for the cache: without it
+      # on PATH the cache action falls back to single-threaded gzip, and the
+      # 7 GB `target` this job used to save took eight minutes to pack.
       # Before checkout, because a container image this bare has no git: the
       # checkout action would silently fall back to downloading a tarball, and
       # `git status` in a later step would then describe nothing.
@@ -59,7 +61,7 @@ jobs:
           apt-get update
           apt-get install -y --no-install-recommends \
             build-essential pkg-config libgtk-4-dev libadwaita-1-dev \
-            ca-certificates curl git dbus-daemon
+            ca-certificates curl git dbus-daemon zstd
           pkg-config --modversion gtk4 libadwaita-1
 
       - uses: actions/checkout@v7
@@ -76,15 +78,21 @@ jobs:
       - name: Cargo version
         run: cargo --version && rustc --version
 
-      - uses: actions/cache@v6
+      # After `Install Rust`, because the key takes in the rustc version.
+      #
+      # Not `actions/cache` over the whole of `target`, which is what this was
+      # November 2026. That restored the last cache whatever the key, cargo never
+      # deletes from `target`, and each release's Cargo.lock change saved the
+      # lot again: 6.96 GB by October 2026, of a 10 GB allowance per repository.
+      # This one saves the dependencies only, drops what is a week stale, and
+      # leaves out the workspace crates, which every run rebuilds anyway.
+      #
+      # Saved from `main` only. A pull request restores `main`'s cache and saves
+      # none of its own, so a release branch no longer spends minutes packing a
+      # cache nothing else can read.
+      - uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            target
-          key: cargo-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: cargo-${{ runner.os }}-
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # `--locked` on both: Cargo.lock is committed, and a run that quietly
       # resolves a different dependency set is not testing what was pushed.
@@ -104,7 +112,7 @@ jobs:
       - name: Install build dependencies
         run: |
           dnf install -y --setopt=install_weak_deps=False \
-            gcc pkgconf-pkg-config gtk4-devel libadwaita-devel git curl dbus-daemon
+            gcc pkgconf-pkg-config gtk4-devel libadwaita-devel git curl dbus-daemon zstd
           pkg-config --modversion gtk4 libadwaita-1
 
       - uses: actions/checkout@v7
@@ -115,18 +123,13 @@ jobs:
             | sh -s -- -y --profile minimal --default-toolchain stable
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
-      # Its own key: the first job's `target` was built against Ubuntu's
-      # libraries, and restoring it here would make cargo rebuild everything
-      # anyway while costing the download.
-      - uses: actions/cache@v6
+      # Its own key, which the job id in rust-cache's key gives it: the first
+      # job's `target` was built against Ubuntu's libraries, and restoring it
+      # here would make cargo rebuild everything anyway while costing the
+      # download. The first job says why this action and why `main` only.
+      - uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            target
-          key: cargo-fedora-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: cargo-fedora-
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build
         run: cargo build --workspace --locked
