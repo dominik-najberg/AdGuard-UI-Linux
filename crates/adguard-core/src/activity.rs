@@ -859,9 +859,11 @@ pub(crate) struct Request<'a> {
 /// Fields are split on whitespace, except that 3 runs from its opening quote
 /// to the closing one: AdGuard writes a space in a client name as `\ `, as in
 /// `"chrome\ (deleted)"`, and splitting there would shift every later column.
+///
+/// Only what follows the last NUL byte is read; [`after_hole`] says why.
 pub(crate) fn parse<'a>(line: &'a str, clock: &mut Clock) -> Option<Request<'a>> {
     let mut fields = [""; FIELDS];
-    let mut rest = line;
+    let mut rest = line.rsplit_once('\0').map_or(line, |(_, after)| after);
     for (index, field) in fields.iter_mut().enumerate() {
         rest = rest.trim_start_matches(|c: char| c.is_ascii_whitespace());
         let end = match index {
@@ -909,6 +911,24 @@ pub(crate) fn parse<'a>(line: &'a str, clock: &mut Clock) -> Option<Request<'a>>
         rule,
         bytes,
     })
+}
+
+/// What follows the last NUL byte of a line, or the whole line if it has none.
+///
+/// **A run of NULs is a hole the filesystem left, not a line AdGuard wrote.**
+/// Measured 1 November 2026: after the machine went down without flushing,
+/// `access.log` held 843 NUL bytes where its last writes had been, and the first
+/// line AdGuard wrote after it came back was appended straight after them, on
+/// the same line. What was in the hole is gone whatever reads it. The line
+/// after it is whole, and read as one; whatever stands before the hole on the
+/// same line is a request cut off by it, and dropped with the rest of what was
+/// lost rather than counted as unread — the page's warning is about a format
+/// that drifted, and a crash is not one. AdGuard's own text never holds a NUL.
+fn after_hole(line: &[u8]) -> &[u8] {
+    match line.iter().rposition(|&byte| byte == 0) {
+        Some(at) => &line[at + 1..],
+        None => line,
+    }
 }
 
 /// The length of the quoted field `rest` starts with, quotes included, or
@@ -1082,6 +1102,7 @@ impl Tally {
     }
 
     fn line(&mut self, bytes: &[u8]) {
+        let bytes = after_hole(bytes);
         if bytes.iter().all(u8::is_ascii_whitespace) {
             return;
         }
@@ -1559,6 +1580,24 @@ mod tests {
         assert_eq!((ingested.lines, ingested.unread), (1, 1));
         let summary = store.summary_at(Span::Today, noon()).unwrap();
         assert_eq!((summary.totals.total(), summary.unread), (1, 1));
+    }
+
+    /// The seam an unclean shutdown left on 1 November 2026: a run of NULs and
+    /// the first line written after the restart, on one line. Also a hole that
+    /// starts part-way through a line and one the file ends on.
+    #[test]
+    fn a_hole_of_nul_bytes_is_neither_a_request_nor_unread() {
+        let scratch = Scratch::new("hole");
+        let nuls = "\0".repeat(843);
+        let cut = passed("10:00:00", "chrome", "https://example.com/");
+        scratch.write("access.log", &[
+            format!("{nuls}{}", passed("10:01:00", "chrome", "https://example.com/")),
+            format!("{}{nuls}{}", &cut[..40], passed("10:02:00", "curl", "https://example.org/")),
+            nuls,
+        ]);
+        let mut store = scratch.store();
+        let ingested = store.ingest_at(&scratch.live(), noon()).unwrap();
+        assert_eq!((ingested.lines, ingested.unread), (2, 0));
     }
 
     #[test]
