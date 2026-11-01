@@ -121,7 +121,7 @@ pub struct ActivityPage {
     /// A line under the chart for what the four figures leave out.
     footnote: gtk::Label,
     /// Shown only when lines of the log could not be read.
-    unread: adw::ActionRow,
+    unread: gtk::ListBox,
     /// The four top lists. Rebuilt whole on every reading.
     lists: RefCell<Vec<adw::PreferencesGroup>>,
     /// Single requests, from AdGuard's log in place: the *Requests* tab.
@@ -171,6 +171,31 @@ impl ActivityPage {
         for (value, caption) in figures.iter().zip(["Requests", "Blocked", "Modified", "Traffic"]) {
             stats.append(&stat_tile(value, caption));
         }
+
+        // A list of its own, not a row added to `header`: the group files every
+        // row into its own boxed list, which it draws above all its other
+        // children, so a row given the card style there was a frame inside a
+        // frame. Above the figures because it is about them.
+        let row = adw::ActionRow::builder()
+            .title("Some of AdGuard's log could not be read")
+            .subtitle(
+                "Lines in a shape this version does not recognise are left out rather than \
+                 guessed at, so the figures may be low. An AdGuard CLI update that changed its \
+                 log is the usual cause.",
+            )
+            .subtitle_lines(0)
+            .build();
+        let warning = gtk::Image::from_icon_name("dialog-warning-symbolic");
+        warning.add_css_class("warning");
+        row.add_prefix(&warning);
+        let unread = gtk::ListBox::builder()
+            .selection_mode(gtk::SelectionMode::None)
+            .visible(false)
+            .margin_bottom(12)
+            .build();
+        unread.add_css_class("boxed-list");
+        unread.append(&row);
+        header.add(&unread);
         header.add(&stats);
 
         let bars: Rc<RefCell<Vec<Bucket>>> = Rc::new(RefCell::new(Vec::new()));
@@ -241,23 +266,6 @@ impl ActivityPage {
         chart_card.add_css_class("card");
         chart_card.append(&chart_box);
         header.add(&chart_card);
-
-        let unread = adw::ActionRow::builder()
-            .title("Some of AdGuard's log could not be read")
-            .subtitle(
-                "Lines in a shape this version does not recognise are left out rather than \
-                 guessed at, so the figures may be low. An AdGuard CLI update that changed its \
-                 log is the usual cause.",
-            )
-            .subtitle_lines(0)
-            .visible(false)
-            .margin_top(12)
-            .build();
-        let warning = gtk::Image::from_icon_name("dialog-warning-symbolic");
-        warning.add_css_class("warning");
-        unread.add_prefix(&warning);
-        unread.add_css_class("card");
-        header.add(&unread);
         page.add(&header);
 
         let clear = gtk::Button::builder()
