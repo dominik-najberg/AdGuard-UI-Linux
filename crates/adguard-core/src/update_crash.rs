@@ -45,10 +45,22 @@ pub fn suspects<'a>(dir: &Path, scripts: &'a [Userscript]) -> Vec<&'a Userscript
         .collect()
 }
 
+/// Whether `err` is the crash this module explains: a segmentation fault.
+///
+/// Only that one was measured. A process killed any other way — the OOM
+/// killer's SIGKILL, a SIGTERM from a shutdown — has nothing to do with the
+/// scripts, and blaming one would send the user to remove it for nothing.
+pub fn is_the_measured_crash(err: &crate::Error) -> bool {
+    matches!(err, crate::Error::Crashed { signal, .. } if *signal == libc::SIGSEGV)
+}
+
 /// Whether a script's metadata block names neither update address.
 ///
 /// `false` for text with no block at all: AdGuard does not install such a
-/// thing, so whatever this is, it is not the measured case.
+/// thing, so whatever this is, it is not the measured case. `false` too for a
+/// block that does not close within the text: a [`preview::LIMIT`] read can
+/// end inside an unusually long block, and an address past that point would
+/// be missed — so a cut-off block is inconclusive, never a suspect.
 pub fn names_no_update_address(source: &str) -> bool {
     let mut lines = source.lines().map(str::trim);
     if !lines.any(|line| line.starts_with("//") && line.contains("==UserScript==")) {
@@ -56,7 +68,7 @@ pub fn names_no_update_address(source: &str) -> bool {
     }
     for line in lines {
         if line.starts_with("//") && line.contains("==/UserScript==") {
-            break;
+            return true;
         }
         let Some(tag) = line.strip_prefix("//").map(str::trim_start).and_then(|tag| tag.strip_prefix('@')) else {
             continue;
@@ -66,7 +78,8 @@ pub fn names_no_update_address(source: &str) -> bool {
             return false;
         }
     }
-    true
+    // The block never closed.
+    false
 }
 
 /// The first [`preview::LIMIT`] bytes of a file, as text.
@@ -107,6 +120,21 @@ mod tests {
     fn only_the_block_is_read() {
         let source = format!("{}// @updateURL https://x/a.meta.js\n", block(""));
         assert!(names_no_update_address(&source));
+    }
+
+    /// A block cut off before it closes may have its address further down.
+    #[test]
+    fn a_block_that_never_closes_is_inconclusive() {
+        assert!(!names_no_update_address("// ==UserScript==\n// @name Long\n// @match *://a/*\n"));
+    }
+
+    #[test]
+    fn only_a_segfault_is_blamed_on_a_script() {
+        let crash = |signal| crate::Error::Crashed { args: "check-update".to_owned(), signal };
+        assert!(is_the_measured_crash(&crash(libc::SIGSEGV)));
+        assert!(!is_the_measured_crash(&crash(libc::SIGKILL)));
+        assert!(!is_the_measured_crash(&crash(libc::SIGTERM)));
+        assert!(!is_the_measured_crash(&crate::Error::Refused { message: "x".to_owned() }));
     }
 
     #[test]

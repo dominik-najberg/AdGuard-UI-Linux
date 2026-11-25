@@ -977,10 +977,11 @@ impl AboutPage {
         worker::run(
             move || {
                 let result = cli.check_update();
-                // Only after a crash, and on this thread: it reads every
-                // enabled script's head, which is no work for the main loop.
+                // Only after the measured crash, a segfault, and on this
+                // thread: it reads every enabled script's head, which is no
+                // work for the main loop. Any other death is not the scripts'.
                 let suspects = match &result {
-                    Err(adguard_core::Error::Crashed { .. }) => crash_suspects(),
+                    Err(err) if adguard_core::update_crash::is_the_measured_crash(err) => crash_suspects(),
                     _ => Vec::new(),
                 };
                 (result, suspects)
