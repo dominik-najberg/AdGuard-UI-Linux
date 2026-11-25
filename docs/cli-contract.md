@@ -2198,11 +2198,26 @@ That makes *Reinstall* buildable from the recorded `downloadURL`, and it is the 
 
 **It also turns a disabled script back on.** The script above was disabled before the second install and enabled after it, with no mention of the fact in the output. Anything offering a reinstall has to disclose that, because the user who disabled a script and then updates it did not ask for it to start running again.
 
-### Only `check-update` updates a userscript
+### What `check-update` does to a userscript
 
-**The daemon does not update userscripts on its own.** This was read from the reference machine's `app.log` and its rotations, which cover 4 October to 25 November 2026. `UserscriptsManager update_all` appears only right after a `check_all_updates` started by a CLI invocation (`AdGuardCli: Start AdGuard CLI App` is on the line before), and never from the running daemon by itself. So a script stays at its version until somebody runs `check-update`: the About page's button, or a terminal.
+[§14](#14-checking-for-updates) records that `check-update` refreshes userscripts among its five components. What it does to *one* script decides how the Extensions page can keep a user's edits, so it was measured on its own: 25 November 2026, AdGuard CLI **1.5.1**, in a throwaway `$XDG_DATA_HOME` holding the real licence and `proxy.yaml` and no script files, with probe scripts served from loopback. `userscripts_update_sandbox.rs` reproduces every row; it reaches the network, as `update_sandbox.rs` does, because `check-update` cannot be asked for userscripts alone.
 
-**What that run then does to an edited source depends on the script, not on the edit.** Measured 25 November 2026 on 1.5.1, in a throwaway `$XDG_DATA_HOME`. Two scripts with an `updateURL`, edited at the current version, came through byte-for-byte untouched. A third, edited and with its metadata aged to `0.0.1`, came back at the upstream version with the edit gone. A sibling measurement the same day found two more cases. An enabled script with an empty `updateURL` is re-downloaded on **every** run, even at the same version, so an edit to one is lost to the next `check-update`. A disabled script is skipped entirely. That is why the Extensions page never discards a kept edit merely because the installed file matches AdGuard's copy again (`userscript_state::Copies::observe`).
+**Nothing else updates a userscript.** The daemon does not do it on its own schedule. Every `UserscriptsManager update_all` in the reference machine's logs, 4 October to 25 November 2026, follows a `check_all_updates` in a process that had just logged `Start AdGuard CLI App`: a `check-update` someone ran. The running daemon holds no inotify watch and no open script file. A script is updated when somebody presses the About page's button or types the command, and at no other time.
+
+| The script | What `check-update` does | An edit to the installed `.user.js` |
+| --- | --- | --- |
+| enabled, `updateURL` set, same version there | fetches the `updateURL` only; installs nothing; logs `version X is the latest` | **kept** |
+| enabled, `updateURL` set, newer version there | fetches the `updateURL`, then the `downloadURL` **recorded at install**, and installs it; the new metadata's `downloadURL` is recorded for next time | **lost** |
+| enabled, `updateURL` empty, `@downloadURL` in its source | logs `Cannot find version or updateURL`, **downloads the whole script and installs it on every run**, changed or not, and counts it in `1 userscript(s) updated` | **lost, even with nothing new upstream** |
+| enabled, source names neither `@updateURL` nor `@downloadURL` | **segfault**: the same warning, then `ffurl_parse: : more data`, then signal 11 | — |
+| disabled | not fetched, not replaced, **not re-enabled** | kept |
+
+Four consequences, each a constraint on the page rather than a curiosity:
+
+- **An edit can be destroyed with no new version anywhere.** A script without an `updateURL` — the third row, which is how AdGuard records any script whose source declared none — is reinstalled from scratch every time `check-update` runs. A page that keeps edits cannot rely on "no new version, so nothing happened"; it has to compare the file with its own copies after every run. That is why the Extensions page never discards a kept edit merely because the installed file matches AdGuard's copy again (`userscript_state::Copies::observe`).
+- **`1 userscript(s) updated` is not news while such a script is installed.** The count includes the refetch above, so it is printed on every run that changed nothing, the same way §14 found `Updated` from Safe Browsing and CRLite to be.
+- **A script the user switched off never updates.** It is skipped entirely, which is the opposite of a reinstall (*re-enables silently*, above). So a per-script check of its own is the only way such a script can learn it is out of date, and the only way an *Update* can be offered for it.
+- **One bare script stops the whole content update.** The crash is in the userscripts step, which runs fourth of six, so Safe Browsing, CRLite and the application check after it never run — and stdout, cut off by the signal, holds only `Checking filters updates...`. `Cli::check_update` currently reports that as `Refused { message: "Checking filters updates..." }`, a header line presented as though it were an error. Installing a script from a raw URL with no `@updateURL` and no `@downloadURL` — a gist, a pastebin, a personal server — is all it takes, and it persists until the script is removed or switched off.
 
 ### An edited source is not served until AdGuard reloads it, and a no-op `enable` does that
 
@@ -2211,7 +2226,6 @@ That makes *Reinstall* buildable from the recorded `downloadURL`, and it is the 
 **`userscripts enable <id>` on the already-enabled script made it re-read.** The confirmation was the usual `enabled successfully`, `proxy.yaml` was rewritten (its mtime moved, its content not), the next page carried a new `ts=`, and the bundle served the edit. Restoring the file and enabling again served the original. So the Extensions page, when it sees a switched-on script's source change, runs that `enable` to make the change live. It never does so for a switched-off script, so it never switches anything on. An ambiguous script cannot be named this way, and its row says to restart protection instead.
 
 **What was not measured**: whether `restart` reloads sources too. It presumably does, being a fresh start, but nobody restarted protection to find out.
-
 ### Every refusal is exit 0, and each has its own sentence
 
 [§3](#3-exit-codes-are-only-half-trustworthy) once more. Success must be defined positively, and the refusals are worth telling apart because they mean different things:
