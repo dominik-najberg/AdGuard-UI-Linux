@@ -24,7 +24,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Mutex, MutexGuard, RwLock};
 
 use yaml_rust2::yaml::Hash;
 use yaml_rust2::{Yaml, YamlEmitter, YamlLoader};
@@ -77,12 +77,13 @@ const EDIT_FILES: [&str; 4] = [MINE, MINE_VERSION, MINE_ANCESTOR, MERGE];
 /// over the edit (contract §15, *What `check-update` does to a userscript*).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pending {
-    /// The same version was delivered again over it. `check-update` does this
+    /// The same bytes were delivered again over it. `check-update` does this
     /// on every run to an enabled script with no `updateURL`. Bringing the edit
     /// back is exact: nothing upstream moved.
     Overwritten,
-    /// A new release replaced the version the edit was made on, and
-    /// [`MINE_ANCESTOR`] holds that version. Bringing the edit back is a
+    /// What the edit was made on was replaced — by a new release, or by the
+    /// author changing the script without a version bump — and
+    /// [`MINE_ANCESTOR`] holds that copy. Bringing the edit back is a
     /// three-way merge, which can conflict.
     SetAside,
 }
@@ -230,6 +231,17 @@ fn exclusive() -> MutexGuard<'static, ()> {
     LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// Held for writing while AdGuard fetches a script on our behalf and the
+/// fresh copy is recorded ([`Copies::delivering`]), and for reading by every
+/// comparison ([`Copies::observe`]).
+///
+/// Between AdGuard writing a re-fetched source and this application recording
+/// it as pristine, the file on disk is AdGuard's, but the copy on record is
+/// still the old one. A comparison in that window — any page refresh, toggle
+/// or directory-watch re-check — would file AdGuard's bytes as the user's edit
+/// and overwrite the edit that was kept.
+static DELIVERY: RwLock<()> = RwLock::new(());
+
 /// The copies of each script that tell an edit from the script as AdGuard
 /// delivered it.
 pub struct Copies {
@@ -280,6 +292,7 @@ impl Copies {
     /// `Err` when the copies cannot be read or written; the caller shows the
     /// row as unedited, the one answer that cannot be wrong in a harmful way.
     pub fn observe(&self, id: &str, version: Option<&str>, current: &[u8]) -> io::Result<bool> {
+        let _delivered = DELIVERY.read().unwrap_or_else(|poisoned| poisoned.into_inner());
         let _held = exclusive();
         let dir = self.dir(id)?;
         let version = version.unwrap_or("");
@@ -305,17 +318,26 @@ impl Copies {
         // Edited. Kept only when it changed, so a page reload does not rewrite
         // half a megabyte to say what is already on disk.
         if fs::read(dir.join(MINE)).ok().as_deref() != Some(current) {
-            if read_text(&dir.join(MINE_VERSION)).as_deref() != Some(version) {
-                // A new edit on a new version: the ancestor kept for the old
-                // one no longer belongs to anything, and nor does a merge of
-                // it the user may have been reading.
-                remove_if_present(&dir.join(MINE_ANCESTOR))?;
-                remove_if_present(&dir.join(MERGE))?;
-            }
+            // A new edit, made on the file as it is now, whose ancestor is the
+            // copy on record. One set aside for an earlier edit no longer
+            // belongs to anything, and nor does a merge of it the user may
+            // have been reading.
+            remove_if_present(&dir.join(MINE_ANCESTOR))?;
+            remove_if_present(&dir.join(MERGE))?;
             write_atomically(&dir.join(MINE), current)?;
             write_atomically(&dir.join(MINE_VERSION), version.as_bytes())?;
         }
         Ok(true)
+    }
+
+    /// Run `fetch` — have AdGuard install a script, then [`Self::rebase`] what
+    /// it wrote — with no comparison running until it is over.
+    ///
+    /// **Nothing inside may compare**: a [`Self::observe`] from `fetch` would
+    /// wait for this same lock and never get it. Read the result afterwards.
+    pub fn delivering<T>(fetch: impl FnOnce() -> T) -> T {
+        let _delivering = DELIVERY.write().unwrap_or_else(|poisoned| poisoned.into_inner());
+        fetch()
     }
 
     /// [`Self::observe`] every script in `dir`, setting [`Userscript::edited`].
@@ -355,6 +377,16 @@ impl Copies {
         match (recorded, base) {
             (Some(recorded), Some(base)) if recorded != version => {
                 new_release(&dir, &recorded, &base, version, current)
+            }
+            (Some(_), Some(base)) if base != current => {
+                // The same version with different bytes: the author changed
+                // it without a bump. A kept edit was made on the copy being
+                // replaced, so that copy is its ancestor, unless one is
+                // already set aside.
+                if dir.join(MINE).is_file() && !dir.join(MINE_ANCESTOR).is_file() {
+                    write_atomically(&dir.join(MINE_ANCESTOR), &base)?;
+                }
+                write_base(&dir, version, current)
             }
             _ => write_base(&dir, version, current),
         }
@@ -533,10 +565,13 @@ fn pending_in(dir: &Path, version: &str, current: &[u8]) -> Option<Pending> {
     if mine == base {
         return None;
     }
-    if read_text(&dir.join(MINE_VERSION)).as_deref() == Some(version) {
-        Some(Pending::Overwritten)
-    } else if dir.join(MINE_ANCESTOR).is_file() {
+    // The ancestor first, at any version. [`Copies::rebase`] sets one aside
+    // for a same-version re-fetch whose bytes changed, and restoring the edit
+    // exactly there would drop the author's change; only a merge keeps both.
+    if dir.join(MINE_ANCESTOR).is_file() {
         Some(Pending::SetAside)
+    } else if read_text(&dir.join(MINE_VERSION)).as_deref() == Some(version) {
+        Some(Pending::Overwritten)
     } else {
         None
     }
@@ -554,15 +589,16 @@ fn new_release(
 ) -> io::Result<()> {
     let mine_version = read_text(&dir.join(MINE_VERSION));
     let has_mine = dir.join(MINE).is_file();
-    if has_mine && mine_version.as_deref() == Some(recorded) {
+    if has_mine && dir.join(MINE_ANCESTOR).is_file() {
+        // The edit already has the copy it was made on set aside — by an
+        // earlier update, or by a same-version re-fetch. Another release
+        // arriving does not make that pair any less mergeable, and it is the
+        // only record of the edit: it stays until the user replaces it with a
+        // new one or reverts.
+    } else if has_mine && mine_version.as_deref() == Some(recorded) {
         // The edit was made on the copy being replaced: keep that copy as its
         // ancestor before the new one takes its place.
         write_atomically(&dir.join(MINE_ANCESTOR), base)?;
-    } else if has_mine && dir.join(MINE_ANCESTOR).is_file() {
-        // An edit from an older release, already set aside with its ancestor
-        // by an earlier update. Another release arriving does not make that
-        // pair any less mergeable, and it is the only record of the edit: it
-        // stays until the user replaces it with a new one or reverts.
     } else {
         // No edit, or one without the copy it was made on — nothing a merge
         // could use.
@@ -920,6 +956,47 @@ mod tests {
         assert_eq!(sandbox.kept("x", MINE_ANCESTOR).as_deref(), Some(&b"original"[..]));
     }
 
+    /// The author changed version 1 without a bump and it was re-fetched:
+    /// the edit's ancestor is the copy it was made on, through the next
+    /// versioned update too.
+    #[test]
+    fn a_same_version_refetch_keeps_the_real_ancestor() {
+        let sandbox = Sandbox::new("same-version-refetch");
+        let copies = sandbox.copies();
+        copies.observe("x", Some("1"), b"original").unwrap();
+        copies.observe("x", Some("1"), b"my edit").unwrap();
+        copies.rebase("x", Some("1"), b"changed upstream").unwrap();
+        assert_eq!(sandbox.kept("x", MINE_ANCESTOR).as_deref(), Some(&b"original"[..]));
+        copies.observe("x", Some("2"), b"release 2").unwrap();
+        assert_eq!(sandbox.kept("x", MINE).as_deref(), Some(&b"my edit"[..]));
+        assert_eq!(sandbox.kept("x", MINE_ANCESTOR).as_deref(), Some(&b"original"[..]));
+    }
+
+    /// While a fetch is being recorded, comparisons wait for it.
+    #[test]
+    fn observing_waits_for_a_delivery() {
+        let sandbox = Sandbox::new("delivery");
+        let copies = sandbox.copies();
+        copies.observe("x", Some("1"), b"original").unwrap();
+        copies.observe("x", Some("1"), b"my edit").unwrap();
+        let (started, go) = std::sync::mpsc::channel();
+        let observer = {
+            let copies = sandbox.copies();
+            std::thread::spawn(move || {
+                go.recv().unwrap();
+                // AdGuard's fresh bytes, read mid-delivery.
+                copies.observe("x", Some("1"), b"changed upstream").unwrap()
+            })
+        };
+        Copies::delivering(|| {
+            started.send(()).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            copies.rebase("x", Some("1"), b"changed upstream").unwrap();
+        });
+        assert!(!observer.join().unwrap(), "recorded as pristine before it was compared");
+        assert_eq!(sandbox.kept("x", MINE).as_deref(), Some(&b"my edit"[..]));
+    }
+
     #[test]
     fn rebasing_takes_the_bytes_as_delivered() {
         let sandbox = Sandbox::new("rebase");
@@ -1058,6 +1135,28 @@ mod tests {
         copies.discard_edit("s").unwrap();
         assert!(!path.exists(), "dropped with the edit");
         assert_eq!(copies.pending("s", Some("2.0"), v2.as_bytes()).unwrap(), None);
+    }
+
+    /// The author changed the script without a version bump and it was
+    /// fetched again: the edit is merged into the changed copy rather than
+    /// restored over it, so the author's change is not lost.
+    #[test]
+    fn a_same_version_change_is_merged_not_overwritten() {
+        let sandbox = Sandbox::new("same-version-merge");
+        let copies = sandbox.copies();
+        let edited = V1.replace("c = 3", "c = 30");
+        let changed = V1.replace("a = 1", "a = 10");
+        copies.observe("s", Some("1.0"), V1.as_bytes()).unwrap();
+        copies.observe("s", Some("1.0"), edited.as_bytes()).unwrap();
+        copies.rebase("s", Some("1.0"), changed.as_bytes()).unwrap();
+
+        assert_eq!(copies.pending("s", Some("1.0"), changed.as_bytes()).unwrap(), Some(Pending::SetAside));
+        let Some(Carried::Clean(merged)) = copies.carry_over("s", Some("1.0"), changed.as_bytes(), "1.0").unwrap()
+        else {
+            panic!("different lines, so a clean merge");
+        };
+        let merged = String::from_utf8(merged).unwrap();
+        assert!(merged.contains("a = 10") && merged.contains("c = 30"), "{merged}");
     }
 
     /// A source that moved since the merge was made is not written over.
