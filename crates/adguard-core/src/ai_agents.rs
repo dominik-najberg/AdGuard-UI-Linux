@@ -116,6 +116,12 @@ pub enum TemplateError {
     UnclosedBrace,
     /// The first word, the program, contains a placeholder.
     PlaceholderInProgram,
+    /// `{command}` inside a longer word, such as `--command={command}`. The
+    /// agent's arguments would have to be joined into one string there, and
+    /// the terminal would split that string again by rules of its own: the
+    /// prompt would arrive as many arguments, and its quotes would be read as
+    /// syntax.
+    CommandNotAlone,
 }
 
 impl fmt::Display for TemplateError {
@@ -128,6 +134,10 @@ impl fmt::Display for TemplateError {
             Self::PlaceholderInProgram => {
                 write!(f, "the program, the first word, cannot be a placeholder")
             }
+            Self::CommandNotAlone => write!(
+                f,
+                "{{command}} has to be a word of its own; use the terminal's -e or -- form"
+            ),
         }
     }
 }
@@ -529,6 +539,12 @@ pub fn find_terminal(path: Option<&OsStr>) -> Option<Terminal> {
 /// The user's terminal command, when they named one: a template whose
 /// `{command}` placeholder is replaced by the agent's whole argument vector,
 /// spliced in as separate arguments, and whose `{dir}` is the directory.
+///
+/// `{command}` must stand alone (`foot {command}`, `alacritty -e {command}`),
+/// never inside a word (`--command={command}`): see
+/// [`TemplateError::CommandNotAlone`]. Every terminal worth naming has an
+/// argv form, and a string form would need quoting for a parser this module
+/// does not know.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TerminalCommand {
     source: String,
@@ -548,6 +564,12 @@ impl TerminalCommand {
             .iter()
             .map(|word| pieces(word, &["command", "dir"]))
             .collect::<Result<Vec<_>, _>>()?;
+        let embedded = words.iter().any(|word| {
+            word.len() > 1 && word.iter().any(|piece| *piece == Piece::Slot("command".into()))
+        });
+        if embedded {
+            return Err(TemplateError::CommandNotAlone);
+        }
         Ok(Self {
             source: text.trim().to_owned(),
             words,
@@ -558,12 +580,9 @@ impl TerminalCommand {
         &self.source
     }
 
-    /// The argument vector. A word that is exactly `{command}` becomes the
-    /// agent's arguments; `{command}` inside a longer word becomes them
-    /// joined with spaces, which is what `-e "…"`-style terminals want. A
-    /// template with no `{command}` gets them appended.
+    /// The argument vector. The `{command}` word becomes the agent's
+    /// arguments; a template with no `{command}` gets them appended.
     pub fn argv(&self, dir: &Path, command: &[String]) -> Vec<String> {
-        let joined = command.join(" ");
         let dir = dir.display().to_string();
         let mut argv = Vec::new();
         let mut placed = false;
@@ -575,9 +594,7 @@ impl TerminalCommand {
                     continue;
                 }
             }
-            placed |= word.iter().any(|piece| *piece == Piece::Slot("command".into()));
             argv.push(fill(word, &|name| match name {
-                "command" => joined.clone(),
                 "dir" => dir.clone(),
                 _ => String::new(),
             }));
@@ -889,15 +906,13 @@ impl Settings {
         if let Some(terminal) = &self.terminal {
             out.push_str(&format!("terminal: {}\n", quote(terminal)));
         }
+        // Quoted rather than a `|` block, though a block would read better:
+        // a block's indentation is taken from its first line, so a prompt
+        // whose first line is indented further than a later one is written
+        // as YAML that does not load, and the tolerant read then drops the
+        // whole file, every agent setting with it.
         if let Some(prompt) = &self.prompt {
-            out.push_str("prompt: |\n");
-            for line in prompt.lines() {
-                if line.is_empty() {
-                    out.push('\n');
-                } else {
-                    out.push_str(&format!("  {line}\n"));
-                }
-            }
+            out.push_str(&format!("prompt: {}\n", quote(prompt)));
         }
         out
     }
@@ -929,6 +944,8 @@ fn quote(text: &str) -> String {
             '\\' => out.push_str("\\\\"),
             '\n' => out.push_str("\\n"),
             '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
+            c if c.is_control() => out.push_str(&format!("\\u{:04X}", c as u32)),
             c => out.push(c),
         }
     }
@@ -1085,6 +1102,10 @@ mod tests {
             own.argv(Path::new("/u"), &command),
             vec!["alacritty", "--working-directory", "/u", "-e", "codex", "fix it"]
         );
+        assert_eq!(
+            TerminalCommand::parse("xfce4-terminal --command={command}"),
+            Err(TemplateError::CommandNotAlone)
+        );
         let bare = TerminalCommand::parse("foot").unwrap();
         assert_eq!(bare.argv(Path::new("/u"), &command), vec!["foot", "codex", "fix it"]);
     }
@@ -1169,7 +1190,9 @@ mod tests {
         settings.set_agent("gemini", None, None, None, Some(false)).unwrap();
         settings.order = vec!["aider".into()];
         settings.terminal = Some("foot -D {dir} {command}".into());
-        settings.prompt = Some("Line one\n\nEdit \"{file}\": {request}\n".into());
+        // Indented first line, a tab, a CR and a control character: each one
+        // a way a block scalar or a naive quote would not read back.
+        settings.prompt = Some("    First\nLine two\n\tEdit \"{file}\": {request}\r\n\u{7}\n".into());
 
         let read = Settings::parse(&settings.render());
         assert_eq!(read, settings);
