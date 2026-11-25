@@ -29,6 +29,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use adguard_core::script_update::{self, Check};
+use adguard_core::userscript_prefs::{self, AutoUpdate};
 use adguard_core::userscript_state::{Aliases, Carried, Copies, Pending};
 use adguard_core::userscripts::{self, Helper};
 use adguard_core::{Cli, Config, Locale, Userscript, INSTALL_LINKS};
@@ -275,6 +276,9 @@ pub struct ExtensionsPage {
     /// Whether this run has checked at all: the first build of the page does,
     /// once, and the daily timer after that.
     ever_checked: Cell<bool>,
+    /// Set while [`Self::auto_update`]'s job runs, so a second check landing
+    /// meanwhile does not start the same installs again.
+    auto_updating: Cell<bool>,
     /// The *Installed* group's header: when it last checked, and *Check now*.
     check_label: RefCell<Option<gtk::Label>>,
     check_button: RefCell<Option<gtk::Button>>,
@@ -334,6 +338,7 @@ impl ExtensionsPage {
             checked: RefCell::new(None),
             checking: Cell::new(false),
             ever_checked: Cell::new(false),
+            auto_updating: Cell::new(false),
             check_label: RefCell::new(None),
             check_button: RefCell::new(None),
         });
@@ -504,7 +509,125 @@ impl ExtensionsPage {
             group.add(&self.row(script));
         }
         page.add(&group);
+        if let Some(updates) = self.auto_update_group() {
+            page.add(&updates);
+        }
         page.upcast()
+    }
+
+    /// The switch that lets the daily check install what it finds.
+    ///
+    /// Below the list rather than in its header: it is a standing choice made
+    /// once, where *Check now* beside the title is an action taken often. Off
+    /// by default; `userscript_prefs` says why. `None` with no home directory,
+    /// where the choice could not be kept.
+    fn auto_update_group(self: &Rc<Self>) -> Option<adw::PreferencesGroup> {
+        let prefs = AutoUpdate::locate()?;
+        let group = adw::PreferencesGroup::new();
+        let row = adw::SwitchRow::builder()
+            .title("Update userscripts automatically")
+            .subtitle(
+                "After each check, about once a day. Scripts you edited or switched off \
+                 only show that an update is there.",
+            )
+            .active(prefs.enabled())
+            .build();
+        row.set_subtitle_lines(0);
+        let page = Rc::downgrade(self);
+        row.connect_active_notify(move |row| {
+            let on = row.is_active();
+            let Some(page) = page.upgrade() else { return };
+            if let Err(err) = prefs.set(on) {
+                page.toasts.add_toast(toast(&format!("Could not save the setting: {err}")));
+                return;
+            }
+            // Switched on with updates already showing: act on them now
+            // rather than a day from now.
+            if on {
+                page.auto_update();
+            }
+        });
+        group.add(&row);
+        Some(group)
+    }
+
+    /// Install every waiting update that may be installed without asking
+    /// ([`userscript_prefs::eligible`]), one after another in a single job,
+    /// and say once what changed.
+    ///
+    /// Through the same steps *Update to x.y* takes — a read first, the
+    /// install, [`rebase`] and [`carry`] — under [`Fetching`], so the edit
+    /// watch does not file AdGuard's fresh copy as an edit. `carry` finds
+    /// nothing to carry for these, since an edited script is never eligible;
+    /// it runs anyway so the copies stay in step exactly as they would after
+    /// a manual update.
+    fn auto_update(self: &Rc<Self>) {
+        if !AutoUpdate::locate().is_some_and(|prefs| prefs.enabled()) || self.auto_updating.get() {
+            return;
+        }
+        let targets: Vec<(String, String, String)> = self
+            .rows
+            .borrow()
+            .iter()
+            .filter_map(|(id, row)| {
+                let to = row.available()?;
+                let script = row.script.borrow();
+                let eligible = userscript_prefs::eligible(
+                    script.enabled,
+                    script.edited,
+                    row.extra.borrow().pending.is_some(),
+                    script.actionable(),
+                );
+                let url = script.download_url.clone()?;
+                eligible.then(|| (id.clone(), url, format!("{} {to}", script.display_name())))
+            })
+            .collect();
+        if targets.is_empty() {
+            return;
+        }
+        self.auto_updating.set(true);
+        for (id, _, _) in &targets {
+            if let Some(row) = self.rows.borrow().get(id) {
+                row.set_busy(true);
+            }
+        }
+
+        let cli = self.cli.clone();
+        let locale = self.locale.clone();
+        let this = self.clone();
+        let fetching = Fetching::start(&self.fetching);
+        worker::run(
+            move || {
+                let _ = read(&locale);
+                let mut done = Vec::new();
+                let mut failed = Vec::new();
+                for (id, url, label) in targets {
+                    match cli.userscripts_install(&url) {
+                        Ok(_) => {
+                            rebase(&id, false);
+                            let _ = carry(&id);
+                            done.push(label);
+                        }
+                        Err(err) => failed.push(format!("{label}: {err}")),
+                    }
+                }
+                (done, failed)
+            },
+            move |(done, failed): (Vec<String>, Vec<String>)| {
+                drop(fetching);
+                this.auto_updating.set(false);
+                if !done.is_empty() {
+                    this.toasts.add_toast(toast(&format!("Updated {}", done.join(", "))));
+                }
+                if !failed.is_empty() {
+                    this.toasts.add_toast(toast(&format!(
+                        "Could not update {}",
+                        failed.join("; ")
+                    )));
+                }
+                this.reload();
+            },
+        );
     }
 
     /// The install-by-URL row.
@@ -1506,6 +1629,9 @@ impl ExtensionsPage {
                 this.paint_check_state();
                 if announce {
                     this.toasts.add_toast(toast(&check_summary(found, unknown)));
+                }
+                if found > 0 {
+                    this.auto_update();
                 }
             },
         );
