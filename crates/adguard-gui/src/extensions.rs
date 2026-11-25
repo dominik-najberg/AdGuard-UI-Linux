@@ -28,7 +28,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 use std::time::Duration;
 
-use adguard_core::userscript_state::{Aliases, Copies};
+use adguard_core::script_update::{self, Check};
+use adguard_core::userscript_state::{Aliases, Carried, Copies, Pending};
 use adguard_core::userscripts::{self, Helper};
 use adguard_core::{Cli, Config, Locale, Userscript, INSTALL_LINKS};
 use adw::prelude::*;
@@ -50,6 +51,23 @@ struct Loaded {
     offered: Vec<&'static adguard_core::Recommended>,
     /// Where this application's own script for browser install links stands.
     install_links: Helper,
+    /// Kept edits an update replaced, by id ([`Copies::pending`]).
+    pending: HashMap<String, Pending>,
+    /// The scripts whose source names no update address, switched on or not
+    /// ([`adguard_core::update_crash`]): `check-update` crashes on one that is.
+    bare: HashSet<String>,
+}
+
+/// What a row knows beyond AdGuard's files and the copies' *Edited*: where an
+/// update stands, and whether `check-update` would crash on it.
+#[derive(Debug, Clone, Default)]
+struct Extra {
+    /// A newer version the last check found. Shown only while it is newer
+    /// than what is installed ([`Row::available`]), so an update that lands by
+    /// any route clears it without the check running again.
+    available: Option<String>,
+    pending: Option<Pending>,
+    bare: bool,
 }
 
 /// A rendered userscript and the state it was rendered from.
@@ -68,6 +86,15 @@ struct Row {
     /// moved without a rebuild when an editor saves ([`ExtensionsPage::watch`]).
     edited: gtk::Box,
     revert: gtk::Button,
+    /// The warning glyph before the name: an ambiguous row, or one
+    /// `check-update` crashes on.
+    caveat: gtk::Image,
+    /// The cog's *Update to x.y*, shown while a newer version is known.
+    update: gtk::Button,
+    /// The cog's *Bring back your changes…*, shown while an update has
+    /// replaced a kept edit.
+    restore: gtk::Button,
+    extra: RefCell<Extra>,
 }
 
 impl Row {
@@ -108,6 +135,39 @@ impl Row {
         self.script.borrow_mut().edited = edited;
         self.edited.set_visible(edited);
         self.revert.set_visible(edited);
+    }
+
+    /// The newer version on offer, if the last check found one and it is still
+    /// newer than what is installed.
+    fn available(&self) -> Option<String> {
+        let installed = self.script.borrow().version.clone()?;
+        self.extra
+            .borrow()
+            .available
+            .clone()
+            .filter(|offered| script_update::compare(offered, &installed) == std::cmp::Ordering::Greater)
+    }
+
+    /// Paint the subtitle, the caveat and the update entries from the last
+    /// state on record — after a check, a toggle, or a save in an editor.
+    fn paint(&self) {
+        let available = self.available();
+        let script = self.script.borrow();
+        let extra = self.extra.borrow();
+        self.switch
+            .set_subtitle(&row_subtitle(&script, available.as_deref(), extra.pending, extra.bare));
+        self.caveat.set_visible(script.ambiguous || (extra.bare && script.enabled));
+        // Not on an ambiguous row, for *Reinstall*'s reason: an update is a
+        // reinstall, and it switches the script on.
+        let can_update = script.download_url.is_some() && script.actionable();
+        match available.filter(|_| can_update) {
+            Some(version) => {
+                set_menu_label(&self.update, &format!("Update to {version}"));
+                self.update.set_visible(true);
+            }
+            None => self.update.set_visible(false),
+        }
+        self.restore.set_visible(extra.pending.is_some());
     }
 }
 
@@ -200,6 +260,24 @@ pub struct ExtensionsPage {
     /// a comparison in between would file AdGuard's bytes as the user's edit,
     /// overwriting the one that was kept.
     fetching: Rc<Cell<u32>>,
+    /// Newer versions the last update check found, by id. Kept across
+    /// rebuilds; [`Row::available`] drops one that is no longer newer.
+    updates: RefCell<HashMap<String, String>>,
+    /// The last read's [`Loaded::pending`] and [`Loaded::bare`], for the rows
+    /// built from it.
+    pending: RefCell<HashMap<String, Pending>>,
+    bare: RefCell<HashSet<String>>,
+    /// When the last update check finished, as the local time, and how many
+    /// scripts it could not ask.
+    checked: RefCell<Option<(String, usize)>>,
+    /// An update check is running.
+    checking: Cell<bool>,
+    /// Whether this run has checked at all: the first build of the page does,
+    /// once, and the daily timer after that.
+    ever_checked: Cell<bool>,
+    /// The *Installed* group's header: when it last checked, and *Check now*.
+    check_label: RefCell<Option<gtk::Label>>,
+    check_button: RefCell<Option<gtk::Button>>,
 }
 
 /// One install or reinstall of ours in flight; see
@@ -250,6 +328,14 @@ impl ExtensionsPage {
             settle_edits: RefCell::new(None),
             touched: RefCell::new(HashSet::new()),
             fetching: Rc::new(Cell::new(0)),
+            updates: RefCell::new(HashMap::new()),
+            pending: RefCell::new(HashMap::new()),
+            bare: RefCell::new(HashSet::new()),
+            checked: RefCell::new(None),
+            checking: Cell::new(false),
+            ever_checked: Cell::new(false),
+            check_label: RefCell::new(None),
+            check_button: RefCell::new(None),
         });
 
         // *Show* rather than an install from the banner: the group it points
@@ -264,6 +350,17 @@ impl ExtensionsPage {
             if let Some(group) = group {
                 crate::reveal(&group);
             }
+        });
+
+        // Once a day while the application runs, badges only: the check
+        // installs nothing. The first one is the first build's (`reload`).
+        let daily = Rc::downgrade(&this);
+        glib::timeout_add_seconds_local(DAILY, move || match daily.upgrade() {
+            Some(page) => {
+                page.check_updates(false);
+                glib::ControlFlow::Continue
+            }
+            None => glib::ControlFlow::Break,
         });
 
         this.watch();
@@ -292,6 +389,9 @@ impl ExtensionsPage {
                 Ok(loaded) => {
                     let view = this.view(&loaded);
                     this.bin.set_child(Some(&view));
+                    if !this.ever_checked.replace(true) {
+                        this.check_updates(false);
+                    }
                 }
                 Err(err) => {
                     this.rows.borrow_mut().clear();
@@ -345,6 +445,8 @@ impl ExtensionsPage {
             if row.script.borrow().enabled != now {
                 row.script.borrow_mut().enabled = now;
                 row.switch.set_active(now);
+                // The crash caveat follows the switch.
+                row.paint();
                 moved += 1;
             }
         }
@@ -356,6 +458,10 @@ impl ExtensionsPage {
     /// The add row, then one group holding every script.
     fn view(self: &Rc<Self>, loaded: &Loaded) -> gtk::Widget {
         self.rows.borrow_mut().clear();
+        self.pending.replace(loaded.pending.clone());
+        self.bare.replace(loaded.bare.clone());
+        self.check_label.replace(None);
+        self.check_button.replace(None);
 
         let page = adw::PreferencesPage::new();
         page.add(&self.add_group());
@@ -393,6 +499,7 @@ impl ExtensionsPage {
                  switched on here.",
             )
             .build();
+        group.set_header_suffix(Some(&self.check_header()));
         for script in &loaded.scripts {
             group.add(&self.row(script));
         }
@@ -691,7 +798,7 @@ impl ExtensionsPage {
 
         let edited = edited_note();
         let remove = self.remove_button(script);
-        let (menu, revert) = self.menu_button(script);
+        let Menu { menu, revert, update, restore } = self.menu_button(script);
 
         // Order matters: the trash goes last so it is furthest from the switch,
         // the two controls that must never be confused sitting at opposite ends
@@ -737,9 +844,18 @@ impl ExtensionsPage {
             menu,
             edited,
             revert,
+            caveat,
+            update,
+            restore,
+            extra: RefCell::new(Extra {
+                available: self.updates.borrow().get(&script.id).cloned(),
+                pending: self.pending.borrow().get(&script.id).copied(),
+                bare: self.bare.borrow().contains(&script.id),
+            }),
         };
         row.show_name();
         row.show_edited(script.edited);
+        row.paint();
         self.rows.borrow_mut().insert(script.id.clone(), row);
 
         switch
@@ -760,12 +876,22 @@ impl ExtensionsPage {
     /// *Storage*, which AdGuard for Windows also offers here, is out by
     /// decision — `architecture.md` §7. *Edit* is in, through the user's own
     /// editor rather than one of ours.
-    fn menu_button(self: &Rc<Self>, script: &Userscript) -> (gtk::MenuButton, gtk::Button) {
+    fn menu_button(self: &Rc<Self>, script: &Userscript) -> Menu {
         let items = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
             .spacing(2)
             .build();
         let popover = gtk::Popover::builder().child(&items).build();
+
+        // First, when there is one: the entry the row's subtitle points at.
+        // Labelled with its version by [`Row::paint`], which also decides
+        // whether it shows; its own separator goes with it.
+        let update = menu_item("Update", None);
+        update.add_css_class("accent");
+        let update_rule = menu_separator();
+        update.bind_property("visible", &update_rule, "visible").sync_create().build();
+        items.append(&update);
+        items.append(&update_rule);
 
         let source = script.download_url.as_deref().map(|url| {
             match userscripts::script_page(url) {
@@ -808,6 +934,8 @@ impl ExtensionsPage {
         items.append(&edit);
         let revert = menu_item("Revert to original…", None);
         items.append(&revert);
+        let restore = menu_item("Bring back your changes…", None);
+        items.append(&restore);
 
         // Not on an ambiguous row. A reinstall is an install by address, which
         // the substring trap does not reach — but it also switches the script
@@ -832,6 +960,8 @@ impl ExtensionsPage {
             (&rename, Self::begin_rename as fn(&Rc<Self>, &str)),
             (&edit, Self::edit_source),
             (&revert, Self::begin_revert),
+            (&update, Self::begin_update),
+            (&restore, Self::begin_restore),
         ] {
             let this = Rc::downgrade(self);
             let id = script.id.clone();
@@ -856,7 +986,12 @@ impl ExtensionsPage {
             "More options for {}",
             script.display_name()
         ))]);
-        (menu, revert)
+        Menu {
+            menu,
+            revert,
+            update,
+            restore,
+        }
     }
 
     /// Ask for a new name, and keep it as this application's alias.
@@ -952,26 +1087,7 @@ impl ExtensionsPage {
         let Some(dir) = adguard_core::paths::userscripts_dir() else {
             return;
         };
-        let file = gio::File::for_path(userscripts::source_path(&dir, id));
-        let launcher = gtk::FileLauncher::new(Some(&file));
-        // An editor reached through the document portal gets the file
-        // read-only unless writable access is asked for, and then cannot save
-        // — the one thing *Edit* is for. The property arrived in GTK 4.14,
-        // and this application builds against 4.10, so it is set by name
-        // where the running GTK has it rather than by raising the floor.
-        if launcher.find_property("writable").is_some() {
-            launcher.set_property("writable", true);
-        }
-        let window = self.bin.root().and_downcast::<gtk::Window>();
-        let toasts = self.toasts.clone();
-        glib::spawn_future_local(async move {
-            if let Err(err) = launcher.launch_future(window.as_ref()).await {
-                // Dismissing the portal's chooser is an answer, not a fault.
-                if !err.matches(gtk::DialogError::Dismissed) {
-                    toasts.add_toast(toast(&format!("Could not open the source: {err}")));
-                }
-            }
-        });
+        self.open_file(&userscripts::source_path(&dir, id), true);
     }
 
     /// Ask before throwing an edit away, since nothing else keeps it.
@@ -1147,10 +1263,15 @@ impl ExtensionsPage {
                 let Ok(loaded) = read(&locale) else {
                     return (Vec::new(), Vec::new());
                 };
-                let edited: Vec<(String, bool)> = loaded
+                // With whether a replaced edit is still missing: a save on
+                // top of the update makes a new edit, and the old one stops
+                // being anything to bring back.
+                let edited: Vec<(String, bool, Option<Pending>)> = loaded
                     .scripts
                     .iter()
-                    .map(|script| (script.id.clone(), script.edited))
+                    .map(|script| {
+                        (script.id.clone(), script.edited, loaded.pending.get(&script.id).copied())
+                    })
                     .collect();
                 let reloaded: Vec<(String, Option<String>, Result<(), String>)> = loaded
                     .scripts
@@ -1190,9 +1311,11 @@ impl ExtensionsPage {
             move |(edited, reloaded)| {
                 {
                     let rows = this.rows.borrow();
-                    for (id, edited) in &edited {
+                    for (id, edited, pending) in &edited {
                         if let Some(row) = rows.get(id) {
                             row.show_edited(*edited);
+                            row.extra.borrow_mut().pending = *pending;
+                            row.paint();
                         }
                     }
                 }
@@ -1202,7 +1325,7 @@ impl ExtensionsPage {
                 // failure is said whatever changed the source: after a revert
                 // it means AdGuard is still running the edit.
                 let is_edited =
-                    |id: &str| edited.iter().any(|(other, edited)| other == id && *edited);
+                    |id: &str| edited.iter().any(|(other, edited, _)| other == id && *edited);
                 for (id, name, outcome) in reloaded {
                     let Some(name) = name else {
                         this.source_changed(&id);
@@ -1222,6 +1345,476 @@ impl ExtensionsPage {
                 }
             },
         );
+    }
+
+    /// The *Installed* group's header suffix: when updates were last checked
+    /// for, and *Check now*.
+    fn check_header(self: &Rc<Self>) -> gtk::Box {
+        let label = gtk::Label::builder().valign(gtk::Align::Center).build();
+        label.add_css_class("dim-label");
+        label.add_css_class("caption");
+        let button = gtk::Button::builder().label("Check now").valign(gtk::Align::Center).build();
+        button.add_css_class("flat");
+        button.set_tooltip_text(Some(
+            "Ask each script's author's server for a newer version. Nothing is installed.",
+        ));
+        let page = Rc::downgrade(self);
+        button.connect_clicked(move |_| {
+            if let Some(page) = page.upgrade() {
+                page.check_updates(true);
+            }
+        });
+        let header = gtk::Box::builder().spacing(6).build();
+        header.append(&label);
+        header.append(&button);
+        self.check_label.replace(Some(label));
+        self.check_button.replace(Some(button));
+        self.paint_check_state();
+        header
+    }
+
+    fn paint_check_state(&self) {
+        let (Some(label), Some(button)) = (self.check_label.borrow().clone(), self.check_button.borrow().clone())
+        else {
+            return;
+        };
+        button.set_sensitive(!self.checking.get());
+        let text = if self.checking.get() {
+            "Checking for updates…".to_owned()
+        } else {
+            match self.checked.borrow().as_ref() {
+                None => String::new(),
+                Some((when, 0)) => format!("Checked {when}"),
+                Some((when, unknown)) => format!("Checked {when} · {unknown} could not be checked"),
+            }
+        };
+        label.set_visible(!text.is_empty());
+        label.set_label(&text);
+    }
+
+    /// Ask every script's server whether there is a newer version, and put
+    /// what it says on the rows.
+    ///
+    /// **Read only.** One request per script, to the address a userscript
+    /// manager polls ([`script_update`]); nothing is installed, and *Update to
+    /// x.y* stays the user's to press. It is also the only way a switched-off
+    /// script learns it is out of date: `check-update` skips those entirely
+    /// (contract §15).
+    ///
+    /// `announce` for *Check now*, which says what it found; the first build
+    /// and the daily timer only paint.
+    pub fn check_updates(self: &Rc<Self>, announce: bool) {
+        if self.checking.replace(true) {
+            return;
+        }
+        let targets: Vec<Userscript> =
+            self.rows.borrow().values().map(|row| row.script.borrow().clone()).collect();
+        if targets.is_empty() {
+            self.checking.set(false);
+            return;
+        }
+        self.paint_check_state();
+
+        let this = self.clone();
+        worker::run(
+            move || {
+                // In parallel: each is one request with its own timeout, and
+                // a slow server should hold up its own row, not every row.
+                std::thread::scope(|scope| {
+                    let asked: Vec<_> = targets
+                        .iter()
+                        .map(|script| {
+                            let check = scope.spawn(move || {
+                                script_update::check(
+                                    script.version.as_deref(),
+                                    script.update_url.as_deref(),
+                                    script.download_url.as_deref(),
+                                )
+                            });
+                            (script.id.clone(), check)
+                        })
+                        .collect();
+                    asked
+                        .into_iter()
+                        .map(|(id, check)| {
+                            let check = check
+                                .join()
+                                .unwrap_or_else(|_| Check::Unknown("the check failed".to_owned()));
+                            (id, check)
+                        })
+                        .collect::<Vec<_>>()
+                })
+            },
+            move |results: Vec<(String, Check)>| {
+                this.checking.set(false);
+                let mut updates = HashMap::new();
+                let mut unknown = 0;
+                for (id, check) in results {
+                    match check {
+                        Check::Available(version) => {
+                            updates.insert(id, version);
+                        }
+                        Check::UpToDate => {}
+                        Check::Unknown(_) => unknown += 1,
+                    }
+                }
+                let found = updates.len();
+                this.updates.replace(updates);
+                this.checked.replace(Some((clock(), unknown)));
+                for (id, row) in this.rows.borrow().iter() {
+                    row.extra.borrow_mut().available = this.updates.borrow().get(id).cloned();
+                    row.paint();
+                }
+                this.paint_check_state();
+                if announce {
+                    this.toasts.add_toast(toast(&match found {
+                        0 => "Every userscript is up to date".to_owned(),
+                        1 => "An update is available for one userscript".to_owned(),
+                        n => format!("Updates are available for {n} userscripts"),
+                    }));
+                }
+            },
+        );
+    }
+
+    /// Ask, then update one script to the version the check found.
+    fn begin_update(self: &Rc<Self>, id: &str) {
+        let id = id.to_owned();
+        if let Some(row) = self.rows.borrow().get(&id) {
+            row.set_busy(true);
+        }
+        let this = self.clone();
+        glib::spawn_future_local(async move {
+            if this.confirm_update(&id).await {
+                this.update(&id);
+            } else if let Some(row) = this.rows.borrow().get(&id) {
+                row.set_busy(false);
+            }
+        });
+    }
+
+    /// *Reinstall*'s question, for an update: where it comes from, what
+    /// happens to the user's changes, and — on a switched-off script, which is
+    /// the only kind that needs this page to update at all — that it will be
+    /// switched on.
+    async fn confirm_update(&self, id: &str) -> bool {
+        let (name, url, enabled, changed, from, to) = {
+            let rows = self.rows.borrow();
+            let Some(row) = rows.get(id) else {
+                return false;
+            };
+            let Some(to) = row.available() else {
+                return false;
+            };
+            let script = row.script.borrow();
+            let Some(url) = script.download_url.clone() else {
+                return false;
+            };
+            let changed = script.edited || row.extra.borrow().pending.is_some();
+            (
+                script.display_name().to_owned(),
+                url,
+                script.enabled,
+                changed,
+                script.version.clone().unwrap_or_default(),
+                to,
+            )
+        };
+
+        let mut body = format!("AdGuard will fetch {name} {to} from {url} and install it in place of {from}.");
+        if changed {
+            body.push_str(
+                "\n\nYour changes to its source are carried over to the new version. If they \
+                 clash with the author's changes, you will be asked what to keep.",
+            );
+        }
+        if !enabled {
+            body.push_str(
+                "\n\nIt will also switch this userscript back on — installing always enables, \
+                 and there is no way to ask it not to.",
+            );
+        }
+
+        let dialog = adw::AlertDialog::new(Some(&format!("Update to {to}?")), Some(&body));
+        dialog.set_body_use_markup(false);
+        dialog.add_response("cancel", "Cancel");
+        dialog.add_response("update", "Update");
+        dialog.set_response_appearance("update", adw::ResponseAppearance::Suggested);
+        dialog.set_default_response(Some("cancel"));
+        dialog.set_close_response("cancel");
+        dialog.choose_future(Some(&self.bin)).await == "update"
+    }
+
+    /// Install the new version, then carry the user's edit into it.
+    ///
+    /// The edit goes through stage 1's copies, not around them: a read first,
+    /// so an edit not yet observed is kept before AdGuard overwrites it; the
+    /// fetch; [`rebase`], which files the new release and sets the edit aside
+    /// with the copy it was made on; and [`carry`], which merges it back in.
+    /// All of it under [`Fetching`], so the directory watch does not take
+    /// AdGuard's fresh copy for an edit halfway through.
+    fn update(self: &Rc<Self>, id: &str) {
+        let id = id.to_owned();
+        let name = self.name_of(&id);
+        let Some(url) = self
+            .rows
+            .borrow()
+            .get(&id)
+            .and_then(|row| row.script.borrow().download_url.clone())
+        else {
+            return;
+        };
+
+        let cli = self.cli.clone();
+        let locale = self.locale.clone();
+        let this = self.clone();
+        let wanted = id.clone();
+        let fetching = Fetching::start(&self.fetching);
+        worker::run(
+            move || {
+                let _ = read(&locale);
+                let refused = cli.userscripts_install(&url).err().map(|e| e.to_string());
+                let carried = refused.is_none().then(|| {
+                    rebase(&wanted, false);
+                    carry(&wanted)
+                });
+                let version = read(&locale)
+                    .ok()
+                    .and_then(|loaded| loaded.scripts.into_iter().find(|s| s.id == wanted))
+                    .and_then(|script| script.version);
+                (refused, carried, version)
+            },
+            move |(refused, carried, version)| {
+                drop(fetching);
+                if let Some(row) = this.rows.borrow().get(&id) {
+                    row.set_busy(false);
+                }
+                if let Some(refused) = refused {
+                    // AdGuard's own sentence, the same for every cause.
+                    this.toasts.add_toast(toast(&refused));
+                    return;
+                }
+                let updated = match &version {
+                    Some(version) => format!("Updated {name} to {version}"),
+                    None => format!("Updated {name}"),
+                };
+                this.report_carry(&id, &name, &updated, carried.unwrap_or(Carry::Nothing));
+                this.reload();
+            },
+        );
+    }
+
+    /// Put a kept edit that an update replaced back into the installed source.
+    fn begin_restore(self: &Rc<Self>, id: &str) {
+        let id = id.to_owned();
+        let name = self.name_of(&id);
+        if let Some(row) = self.rows.borrow().get(&id) {
+            row.set_busy(true);
+        }
+        let this = self.clone();
+        let wanted = id.clone();
+        worker::run(
+            move || carry(&wanted),
+            move |carried| {
+                if let Some(row) = this.rows.borrow().get(&id) {
+                    row.set_busy(false);
+                }
+                this.report_carry(&id, &name, &format!("Your changes to {name} are back"), carried);
+                // Through the watch's path, like a revert: the note moves,
+                // and AdGuard is asked to load the source again.
+                this.source_changed(&id);
+            },
+        );
+    }
+
+    /// Say how carrying an edit went, and ask about a clash.
+    ///
+    /// `done` is the sentence for when there was nothing to carry or it went
+    /// in cleanly; a clean carry adds that the changes were kept.
+    fn report_carry(self: &Rc<Self>, id: &str, name: &str, done: &str, carried: Carry) {
+        match carried {
+            Carry::Nothing => self.toasts.add_toast(toast(done)),
+            Carry::Kept if done.starts_with("Updated") => {
+                self.toasts.add_toast(toast(&format!("{done}, your changes kept")));
+            }
+            Carry::Kept => self.toasts.add_toast(toast(done)),
+            Carry::Moved => self.toasts.add_toast(toast(&format!(
+                "The source of {name} changed meanwhile, so your changes were not put back. \
+                 They are kept; try again from the menu."
+            ))),
+            Carry::Failed(err) => {
+                self.toasts.add_toast(toast(&format!("Could not put your changes to {name} back: {err}")));
+            }
+            Carry::Clash { marked, conflicts } => {
+                let this = self.clone();
+                let id = id.to_owned();
+                let name = name.to_owned();
+                glib::spawn_future_local(async move {
+                    this.resolve_clash(&id, &name, marked, conflicts).await;
+                });
+            }
+        }
+    }
+
+    /// The user's changes and the author's touch the same lines. The update
+    /// is installed either way; this asks what becomes of the changes.
+    ///
+    /// *Decide later* is the safe answer and the one Escape gives: the changes
+    /// stay kept, and the row offers *Bring back your changes…* until the user
+    /// picks. *Open both in editor* opens the installed update and the merge
+    /// with git's markers, for the user to copy what they want across; the
+    /// next save is their new edit, and the old one is let go then.
+    async fn resolve_clash(self: &Rc<Self>, id: &str, name: &str, marked: Option<String>, conflicts: usize) {
+        let places = match conflicts {
+            0 | 1 => "a place".to_owned(),
+            n => format!("{n} places"),
+        };
+        let body = match &marked {
+            Some(_) => format!(
+                "The update to {name} changes {places} you had also changed, so your changes were \
+                 not carried over. The update is installed, and your changes are kept until you \
+                 choose."
+            ),
+            None => format!(
+                "Your changes to {name} could not be carried over automatically: one of the copies \
+                 is not plain text. The update is installed, and your changes are kept until you \
+                 choose."
+            ),
+        };
+        let dialog = adw::AlertDialog::new(Some("Your changes clash with the update"), Some(&body));
+        dialog.set_body_use_markup(false);
+        dialog.set_prefer_wide_layout(true);
+        dialog.add_response("later", "Decide later");
+        dialog.add_response("take", "Use the update");
+        dialog.add_response("keep", "Keep my version");
+        if marked.is_some() {
+            dialog.add_response("open", "Open both in editor");
+            dialog.set_response_appearance("open", adw::ResponseAppearance::Suggested);
+        }
+        dialog.set_response_appearance("take", adw::ResponseAppearance::Destructive);
+        dialog.set_default_response(Some("later"));
+        dialog.set_close_response("later");
+        let answer = dialog.choose_future(Some(&self.bin)).await;
+
+        let wanted = id.to_owned();
+        match answer.as_str() {
+            "take" => {
+                let dropped = worker::job(move || {
+                    Copies::locate().map(|copies| copies.discard_edit(&wanted).map_err(|err| err.to_string()))
+                })
+                .await
+                .flatten();
+                match dropped {
+                    Some(Ok(())) => self.toasts.add_toast(toast(&format!("Using the update of {name} as it is"))),
+                    Some(Err(err)) => self.toasts.add_toast(toast(&format!("Could not let your changes go: {err}"))),
+                    None => {}
+                }
+            }
+            "keep" => {
+                let kept = worker::job(move || keep_mine(&wanted)).await;
+                match kept {
+                    Some(Carry::Kept) => {
+                        self.toasts.add_toast(toast(&format!("Kept your version of {name}")));
+                    }
+                    Some(other) => self.report_carry(id, name, "", other),
+                    None => {}
+                }
+            }
+            "open" => {
+                let Some(marked) = marked else {
+                    return;
+                };
+                let written = worker::job(move || {
+                    Copies::locate()
+                        .ok_or_else(|| "there is nowhere to keep the merge".to_owned())
+                        .and_then(|copies| copies.write_merge(&wanted, &marked).map_err(|err| err.to_string()))
+                })
+                .await;
+                match written {
+                    Some(Ok(merge)) => {
+                        self.edit_source(id);
+                        self.open_file(&merge, false);
+                    }
+                    Some(Err(err)) => self.toasts.add_toast(toast(&format!("Could not write the merge: {err}"))),
+                    None => {}
+                }
+            }
+            _ => {}
+        }
+        self.reload();
+    }
+
+    /// After a `check-update` — from the About page, the one place this
+    /// application runs it — put back every kept edit it replaced.
+    ///
+    /// **Whatever the report says.** A script with no `updateURL` is
+    /// downloaded again on every run, at the same version, over any edit
+    /// (contract §15), and the report's `1 userscript(s) updated` says the
+    /// same thing whether or not anything changed. So every script is
+    /// compared, not just the ones that might have moved, and a clean carry is
+    /// made without asking: the edit was the user's, and AdGuard replacing it
+    /// was not their choice. A clash is not resolved behind their back; it is
+    /// left on its row, which says so.
+    pub fn after_check_update(self: &Rc<Self>) {
+        let locale = self.locale.clone();
+        let this = self.clone();
+        worker::run(
+            move || {
+                let Ok(loaded) = read(&locale) else {
+                    return Vec::new();
+                };
+                loaded
+                    .scripts
+                    .iter()
+                    .filter(|script| loaded.pending.contains_key(&script.id))
+                    .map(|script| (script.display_name().to_owned(), carry(&script.id)))
+                    .collect::<Vec<_>>()
+            },
+            move |carried: Vec<(String, Carry)>| {
+                for (name, carried) in carried {
+                    let message = match carried {
+                        Carry::Kept => format!("Kept your changes to {name} across AdGuard's update"),
+                        Carry::Clash { .. } => format!(
+                            "Your changes to {name} clash with its update. They are kept; bring them \
+                             back from its menu on the Extensions page."
+                        ),
+                        Carry::Moved | Carry::Failed(_) => format!(
+                            "AdGuard's update replaced your changes to {name}. They are kept; bring \
+                             them back from its menu on the Extensions page."
+                        ),
+                        Carry::Nothing => continue,
+                    };
+                    this.toasts.add_toast(toast(&message));
+                }
+                this.reload();
+            },
+        );
+    }
+
+    /// Open a file in the user's editor. `writable` for AdGuard's script,
+    /// which *Edit source* exists to change; not for a merge kept only to be
+    /// read.
+    fn open_file(&self, path: &std::path::Path, writable: bool) {
+        let file = gio::File::for_path(path);
+        let launcher = gtk::FileLauncher::new(Some(&file));
+        // An editor reached through the document portal gets the file
+        // read-only unless writable access is asked for, and then cannot save
+        // — the one thing *Edit* is for. The property arrived in GTK 4.14,
+        // and this application builds against 4.10, so it is set by name
+        // where the running GTK has it rather than by raising the floor.
+        if writable && launcher.find_property("writable").is_some() {
+            launcher.set_property("writable", true);
+        }
+        let window = self.bin.root().and_downcast::<gtk::Window>();
+        let toasts = self.toasts.clone();
+        glib::spawn_future_local(async move {
+            if let Err(err) = launcher.launch_future(window.as_ref()).await {
+                // Dismissing the portal's chooser is an answer, not a fault.
+                if !err.matches(gtk::DialogError::Dismissed) {
+                    toasts.add_toast(toast(&format!("Could not open the file: {err}")));
+                }
+            }
+        });
     }
 
     /// The one control on this page that destroys something.
@@ -1421,6 +2014,8 @@ impl ExtensionsPage {
         row.switch.set_active(settled);
         self.reconciling.set(false);
         *row.script.borrow_mut() = observed;
+        // The crash caveat follows the switch.
+        row.paint();
         drop(rows);
         self.show_helper_state();
 
@@ -2325,8 +2920,27 @@ fn read(locale: &Locale) -> Result<Loaded, String> {
     if let Some(aliases) = Aliases::locate() {
         aliases.apply(&mut scripts);
     }
-    if let Some(copies) = Copies::locate() {
+    let copies = Copies::locate();
+    if let Some(copies) = &copies {
         copies.observe_all(&dir, &mut scripts);
+    }
+    // After the observation, which is what files an update that just landed:
+    // only then does a replaced edit read as pending.
+    let mut pending = HashMap::new();
+    let mut bare = HashSet::new();
+    for script in &scripts {
+        if adguard_core::update_crash::is_bare(&dir, &script.id) {
+            bare.insert(script.id.clone());
+        }
+        let Some(copies) = &copies else {
+            continue;
+        };
+        let Ok(current) = std::fs::read(userscripts::source_path(&dir, &script.id)) else {
+            continue;
+        };
+        if let Ok(Some(state)) = copies.pending(&script.id, script.version.as_deref(), &current) {
+            pending.insert(script.id.clone(), state);
+        }
     }
     let offered = userscripts::recommended(&scripts);
     let install_links = userscripts::install_links(&scripts);
@@ -2334,6 +2948,8 @@ fn read(locale: &Locale) -> Result<Loaded, String> {
         scripts,
         offered,
         install_links,
+        pending,
+        bare,
     })
 }
 
@@ -2401,6 +3017,148 @@ fn subtitle(script: &Userscript) -> String {
         (None, false) => description.to_owned(),
         (None, true) => "No description".to_owned(),
     }
+}
+
+/// The cog and the entries on it that a row shows and hides.
+struct Menu {
+    menu: gtk::MenuButton,
+    revert: gtk::Button,
+    update: gtk::Button,
+    restore: gtk::Button,
+}
+
+/// How often the page checks for updates while the application runs.
+const DAILY: u32 = 24 * 60 * 60;
+
+/// What a row says instead of its description when `check-update` would
+/// crash on it (contract §15). Displaces the description, as
+/// [`AMBIGUOUS_SUBTITLE`] does and for its reason.
+const BARE_SUBTITLE: &str = "AdGuard crashes when it updates this script, which names no address \
+                             to update from — switch it off or remove it";
+
+/// How carrying a kept edit into the installed source went ([`carry`]).
+#[derive(Debug)]
+enum Carry {
+    /// Nothing was pending.
+    Nothing,
+    /// The edit is installed again.
+    Kept,
+    /// It clashes with the release; `marked` is the merge with git's markers,
+    /// `None` when the copies could not be merged as text at all.
+    Clash { marked: Option<String>, conflicts: usize },
+    /// The source changed between the read and the write, and was left alone.
+    Moved,
+    Failed(String),
+}
+
+/// Carry `id`'s kept edit into its installed source, on the worker
+/// ([`Copies::carry_over`], then [`Copies::put_source`]).
+fn carry(id: &str) -> Carry {
+    let (Some(dir), Some(copies)) = (adguard_core::paths::userscripts_dir(), Copies::locate()) else {
+        return Carry::Failed("the copies cannot be found".to_owned());
+    };
+    let path = userscripts::source_path(&dir, id);
+    let current = match std::fs::read(&path) {
+        Ok(current) => current,
+        Err(err) => return Carry::Failed(err.to_string()),
+    };
+    let version = userscripts::read(&dir, &[], &Locale::english())
+        .into_iter()
+        .find(|script| script.id == id)
+        .and_then(|script| script.version);
+    let label = version.clone().unwrap_or_else(|| "the update".to_owned());
+    match copies.carry_over(id, version.as_deref(), &current, &label) {
+        Ok(None) => Carry::Nothing,
+        Ok(Some(Carried::Clean(merged))) => match copies.put_source(id, &path, &current, &merged) {
+            Ok(true) => Carry::Kept,
+            Ok(false) => Carry::Moved,
+            Err(err) => Carry::Failed(err.to_string()),
+        },
+        Ok(Some(Carried::Conflict { marked, conflicts })) => Carry::Clash {
+            marked: Some(marked),
+            conflicts,
+        },
+        Ok(Some(Carried::Unmergeable)) => Carry::Clash {
+            marked: None,
+            conflicts: 0,
+        },
+        Err(err) => Carry::Failed(err.to_string()),
+    }
+}
+
+/// *Keep my version*: the kept edit, installed as it was.
+fn keep_mine(id: &str) -> Carry {
+    let (Some(dir), Some(copies)) = (adguard_core::paths::userscripts_dir(), Copies::locate()) else {
+        return Carry::Failed("the copies cannot be found".to_owned());
+    };
+    let path = userscripts::source_path(&dir, id);
+    let (Ok(current), Ok(mine)) = (std::fs::read(&path), copies.kept_edit(id)) else {
+        return Carry::Failed("your changes could not be read".to_owned());
+    };
+    match copies.put_source(id, &path, &current, &mine) {
+        Ok(true) => Carry::Kept,
+        Ok(false) => Carry::Moved,
+        Err(err) => Carry::Failed(err.to_string()),
+    }
+}
+
+/// A row's subtitle, with what the page knows beyond the script itself.
+///
+/// One sentence at most displaces the description, in the order a user needs
+/// them: a control that cannot work, then a script that breaks AdGuard's
+/// update, then changes an update replaced. A newer version joins the
+/// description rather than displacing it, after the installed version.
+fn row_subtitle(script: &Userscript, available: Option<&str>, pending: Option<Pending>, bare: bool) -> String {
+    if script.ambiguous {
+        return AMBIGUOUS_SUBTITLE.to_owned();
+    }
+    if bare && script.enabled {
+        return BARE_SUBTITLE.to_owned();
+    }
+    match pending {
+        Some(Pending::Overwritten) => {
+            return "An update replaced your changes to the source — bring them back from the menu"
+                .to_owned();
+        }
+        Some(Pending::SetAside) => {
+            let version = script.version.as_deref().map_or_else(String::new, |v| format!(" to {v}"));
+            return format!(
+                "Updated{version}; your changes to the source are kept aside — bring them back from \
+                 the menu"
+            );
+        }
+        None => {}
+    }
+    match (available, &script.version) {
+        (Some(available), Some(installed)) => {
+            let description = script.description.trim();
+            if description.is_empty() {
+                format!("{installed} → {available} available")
+            } else {
+                format!("{installed} → {available} available — {description}")
+            }
+        }
+        _ => subtitle(script),
+    }
+}
+
+/// Relabel a [`menu_item`].
+fn set_menu_label(button: &gtk::Button, label: &str) {
+    if let Some(title) = button
+        .child()
+        .and_then(|content| content.first_child())
+        .and_downcast::<gtk::Label>()
+    {
+        title.set_label(label);
+    }
+}
+
+/// The local time, for "Checked at 14:05".
+fn clock() -> String {
+    glib::DateTime::now_local()
+        .ok()
+        .and_then(|when| when.format("at %H:%M").ok())
+        .map_or_else(|| "just now".to_owned(), |when| when.to_string())
 }
 
 /// What a catalogue row says under its name.
@@ -2541,6 +3299,41 @@ mod tests {
     }
 
     /// The version leads the subtitle, because that is what #9 asks to show.
+    /// A newer version joins the description after the installed one.
+    #[test]
+    fn an_available_update_joins_the_description() {
+        let mut s = script("x");
+        s.version = Some("2.7.1".to_owned());
+        s.description = "Downloads things".to_owned();
+        assert_eq!(row_subtitle(&s, Some("2.7.2"), None, false), "2.7.1 → 2.7.2 available — Downloads things");
+        assert_eq!(row_subtitle(&s, None, None, false), subtitle(&s));
+    }
+
+    /// The crash caveat shows only while the script is on, since a switched-off
+    /// script is skipped by `check-update` and cannot crash it.
+    #[test]
+    fn the_crash_caveat_follows_the_switch() {
+        let mut s = script("x");
+        s.enabled = true;
+        assert_eq!(row_subtitle(&s, Some("2"), None, true), BARE_SUBTITLE);
+        s.enabled = false;
+        assert_ne!(row_subtitle(&s, None, None, true), BARE_SUBTITLE);
+    }
+
+    /// What displaces the description, in order: an unusable control, a
+    /// crashing update, then replaced changes.
+    #[test]
+    fn the_most_pressing_note_wins() {
+        let mut s = script("x");
+        s.enabled = true;
+        s.version = Some("2.0".to_owned());
+        assert!(row_subtitle(&s, None, Some(Pending::SetAside), false).starts_with("Updated to 2.0;"));
+        assert!(row_subtitle(&s, None, Some(Pending::Overwritten), false).starts_with("An update replaced"));
+        assert_eq!(row_subtitle(&s, None, Some(Pending::Overwritten), true), BARE_SUBTITLE);
+        s.ambiguous = true;
+        assert_eq!(row_subtitle(&s, None, Some(Pending::Overwritten), true), AMBIGUOUS_SUBTITLE);
+    }
+
     #[test]
     fn the_subtitle_leads_with_the_version() {
         let mut s = script("x");

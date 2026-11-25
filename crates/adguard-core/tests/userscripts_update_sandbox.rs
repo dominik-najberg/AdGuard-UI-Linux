@@ -393,6 +393,18 @@ fn a_script_naming_no_update_address_crashes_check_update() {
     let (code, wrapped) = sandbox.check_update();
     eprintln!("exit {code:?}; the wrapper says {wrapped:?}");
     assert_eq!(code, None, "killed by a signal, not exited");
+    assert!(
+        matches!(wrapped, Err(adguard_core::Error::Crashed { signal: 11, .. })),
+        "reported as the crash it is, not as a refusal quoting a header line"
+    );
+    assert_eq!(
+        adguard_core::update_crash::suspects(&sandbox.scripts_dir(), &[sandbox.find("bare")])
+            .iter()
+            .map(|script| script.id.as_str())
+            .collect::<Vec<_>>(),
+        ["bare"],
+        "and the script behind it is the one named"
+    );
 
     sandbox.cli.userscripts_disable("Probe Bare").expect("disable");
     let (code, _) = sandbox.check_update();
