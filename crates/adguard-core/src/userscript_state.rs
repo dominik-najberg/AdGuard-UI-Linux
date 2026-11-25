@@ -24,6 +24,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard};
 
 use yaml_rust2::yaml::Hash;
 use yaml_rust2::{Yaml, YamlEmitter, YamlLoader};
@@ -179,6 +180,21 @@ impl Aliases {
     }
 }
 
+/// One change to the copies at a time, in this process.
+///
+/// Every change is a read, a decision and several writes, and the page makes
+/// them from more than one worker thread at once — a reload and a
+/// directory-watch re-check overlap exactly when an update lands. Two
+/// observers of the same update interleaved can read the old version beside
+/// the new copy and file the new release as the edit's ancestor, losing the
+/// real one. Each public operation holds this for its whole transaction. One
+/// lock for every script rather than one per script, because each holds it for
+/// a few file operations and a map of locks would be machinery for nothing.
+fn exclusive() -> MutexGuard<'static, ()> {
+    static LOCK: Mutex<()> = Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// The copies of each script that tell an edit from the script as AdGuard
 /// delivered it.
 pub struct Copies {
@@ -229,13 +245,14 @@ impl Copies {
     /// `Err` when the copies cannot be read or written; the caller shows the
     /// row as unedited, the one answer that cannot be wrong in a harmful way.
     pub fn observe(&self, id: &str, version: Option<&str>, current: &[u8]) -> io::Result<bool> {
+        let _held = exclusive();
         let dir = self.dir(id)?;
         let version = version.unwrap_or("");
 
         let recorded = read_text(&dir.join(BASE_VERSION));
         let base = fs::read(dir.join(BASE)).ok();
         let (Some(recorded), Some(base)) = (recorded, base) else {
-            self.rebase(id, Some(version), current)?;
+            write_base(&dir, version, current)?;
             return Ok(false);
         };
 
@@ -309,12 +326,14 @@ impl Copies {
     /// where it is: AdGuard overwriting the file is not the user giving the
     /// edit up. [`Self::discard_edit`] is for when they have.
     pub fn rebase(&self, id: &str, version: Option<&str>, current: &[u8]) -> io::Result<()> {
+        let _held = exclusive();
         write_base(&self.dir(id)?, version.unwrap_or(""), current)
     }
 
     /// Forget the kept edit, on the user's say-so — a reinstall whose dialog
     /// told them their changes would be replaced.
     pub fn discard_edit(&self, id: &str) -> io::Result<()> {
+        let _held = exclusive();
         let dir = self.dir(id)?;
         for file in [MINE, MINE_VERSION, MINE_ANCESTOR] {
             remove_if_present(&dir.join(file))?;
@@ -330,6 +349,7 @@ impl Copies {
     /// a fresh file would take this process's umask instead of whatever
     /// AdGuard gave it.
     pub fn revert(&self, id: &str, target: &Path) -> io::Result<()> {
+        let _held = exclusive();
         let dir = self.dir(id)?;
         let base = fs::read(dir.join(BASE))?;
         let permissions = fs::metadata(target).ok().map(|meta| meta.permissions());
@@ -342,6 +362,7 @@ impl Copies {
 
     /// Delete everything kept for a script that has been removed.
     pub fn forget(&self, id: &str) -> io::Result<()> {
+        let _held = exclusive();
         let dir = self.dir(id)?;
         for file in FILES {
             remove_if_present(&dir.join(file))?;
@@ -625,6 +646,33 @@ mod tests {
         assert_eq!(sandbox.kept("x", MINE).as_deref(), Some(&b"edited"[..]));
         assert_eq!(sandbox.kept("x", MINE_ANCESTOR).as_deref(), Some(&b"original"[..]));
         assert_eq!(sandbox.kept("x", MINE_VERSION).as_deref(), Some(&b"1.0"[..]));
+    }
+
+    /// A reload and a directory-watch re-check observe the same update at
+    /// once. Interleaved, one could read the old version beside the new copy
+    /// and file the new release as the edit's ancestor; serialised, the
+    /// ancestor stays the copy the edit was made on.
+    #[test]
+    fn concurrent_observers_of_an_update_keep_the_real_ancestor() {
+        let sandbox = Sandbox::new("concurrent");
+        for round in 0..20 {
+            let id = format!("x{round}");
+            let copies = sandbox.copies();
+            copies.observe(&id, Some("1.0"), b"original").unwrap();
+            copies.observe(&id, Some("1.0"), b"edited").unwrap();
+            let threads: Vec<_> = (0..8)
+                .map(|_| {
+                    let copies = sandbox.copies();
+                    let id = id.clone();
+                    std::thread::spawn(move || copies.observe(&id, Some("1.1"), b"new release"))
+                })
+                .collect();
+            for thread in threads {
+                thread.join().unwrap().unwrap();
+            }
+            assert_eq!(sandbox.kept(&id, MINE_ANCESTOR).as_deref(), Some(&b"original"[..]));
+            assert_eq!(sandbox.kept(&id, MINE).as_deref(), Some(&b"edited"[..]));
+        }
     }
 
     #[test]

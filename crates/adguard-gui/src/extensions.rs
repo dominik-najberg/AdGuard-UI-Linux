@@ -1740,28 +1740,36 @@ impl ExtensionsPage {
                     fetched_from = moved;
                 }
             }
+            // The scripts this address installed, found by the address
+            // AdGuard recorded for them.
+            let mut refetched = Vec::new();
             if refused.is_none() {
                 // An address already installed is updated in place, at a
                 // version that may not have moved — and then the fresh copy
                 // would read as the user's edit. It is AdGuard's copy, so it
                 // is the pristine one.
                 if let Ok(loaded) = read(&locale) {
-                    let refetched = loaded.scripts.iter().filter(|script| {
-                        script.download_url.as_deref() == Some(fetched_from.as_str())
-                    });
-                    for script in refetched {
-                        rebase(&script.id, false);
+                    refetched = loaded
+                        .scripts
+                        .iter()
+                        .filter(|script| {
+                            script.download_url.as_deref() == Some(fetched_from.as_str())
+                        })
+                        .map(|script| script.id.clone())
+                        .collect();
+                    for id in &refetched {
+                        rebase(id, false);
                     }
                 }
             }
             let after = read(&locale).ok().map(|loaded| loaded.scripts);
-            (refused, before, after)
+            (refused, before, after, refetched)
         })
         .await;
 
-        let Some((refused, before, Some(after))) = outcome else {
+        let Some((refused, before, Some(after), refetched)) = outcome else {
             set_busy(false, false);
-            let refused = outcome.and_then(|(refused, _, _)| refused);
+            let refused = outcome.and_then(|(refused, _, _, _)| refused);
             self.toasts.add_toast(toast(&refused.unwrap_or_else(|| {
                 "Could not re-read the userscripts to confirm the install".to_owned()
             })));
@@ -1796,6 +1804,22 @@ impl ExtensionsPage {
             // reports identically, so the row count is what tells them apart.
             None => {
                 set_busy(false, false);
+                // A name typed in the dialog is still the user's choice for
+                // the script this updated — when it is clear which one that
+                // is: exactly one installed script recorded this address.
+                let updated = match refetched.as_slice() {
+                    [id] if refused.is_none() => after.iter().find(|script| &script.id == id),
+                    _ => None,
+                };
+                if let (Some(script), Some(alias)) = (updated, alias) {
+                    if alias.trim() != script.original_name() {
+                        let saved = Aliases::locate()
+                            .map(|aliases| aliases.set(&script.id, Some(&alias)));
+                        if !matches!(saved, Some(Ok(()))) {
+                            self.toasts.add_toast(toast("Could not save the name you gave it"));
+                        }
+                    }
+                }
                 self.toasts.add_toast(toast(&refused.unwrap_or_else(|| {
                     "That userscript was already installed; AdGuard updated it in place"
                         .to_owned()
