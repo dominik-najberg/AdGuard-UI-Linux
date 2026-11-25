@@ -1579,11 +1579,18 @@ impl ExtensionsPage {
         worker::run(
             move || {
                 let _ = read(&locale);
-                let refused = cli.userscripts_install(&url).err().map(|e| e.to_string());
-                let carried = refused.is_none().then(|| {
-                    rebase(&wanted, false);
-                    carry(&wanted)
+                // No comparison may run between AdGuard writing the fresh
+                // copy and its being recorded; see `Copies::delivering`. The
+                // merge comes after: it compares nothing, and it writes a
+                // source the next comparison should see.
+                let refused = Copies::delivering(|| {
+                    let refused = cli.userscripts_install(&url).err().map(|e| e.to_string());
+                    if refused.is_none() {
+                        rebase(&wanted, false);
+                    }
+                    refused
                 });
+                let carried = refused.is_none().then(|| carry(&wanted));
                 let version = read(&locale)
                     .ok()
                     .and_then(|loaded| loaded.scripts.into_iter().find(|s| s.id == wanted))
@@ -2118,13 +2125,18 @@ impl ExtensionsPage {
         let fetching = Fetching::start(&self.fetching);
         worker::run(
             move || {
-                let refused = cli.userscripts_install(&url).err().map(|e| e.to_string());
-                if refused.is_none() {
-                    // What is on disk now is AdGuard's fresh copy, even if
-                    // the author changed it without moving the version — so it
-                    // is the pristine copy, and not an edit, from here on.
-                    rebase(&wanted, true);
-                }
+                // No comparison may run between AdGuard writing the fresh
+                // copy and its being recorded; see `Copies::delivering`.
+                let refused = Copies::delivering(|| {
+                    let refused = cli.userscripts_install(&url).err().map(|e| e.to_string());
+                    if refused.is_none() {
+                        // What is on disk now is AdGuard's fresh copy, even if
+                        // the author changed it without moving the version — so
+                        // it is the pristine copy, and not an edit, from here on.
+                        rebase(&wanted, true);
+                    }
+                    refused
+                });
                 let observed = read(&locale)
                     .ok()
                     .and_then(|loaded| loaded.scripts.into_iter().find(|s| s.id == wanted));
@@ -2364,45 +2376,51 @@ impl ExtensionsPage {
             let before: Vec<String> = read(&locale)
                 .map(|loaded| loaded.scripts.into_iter().map(|s| s.id).collect())
                 .unwrap_or_default();
-            let mut refused = cli.userscripts_install(&url).err().map(|e| e.to_string());
-            // A typed address is not read first, so one that redirects — an
-            // install counter, a short link — reaches AdGuard as it is, and
-            // AdGuard follows no redirects (#29). Its refusal is the same
-            // sentence for every cause, so on any refusal the address is
-            // followed here, and tried once more if it led somewhere else.
-            let mut fetched_from = url.clone();
-            if refused.is_some() {
-                let moved = preview::fetch(&url).ok().map(|fetched| fetched.url);
-                if let Some(moved) = moved.filter(|moved| *moved != url) {
-                    refused = cli.userscripts_install(&moved).err().map(|e| e.to_string());
-                    fetched_from = moved;
-                }
-            }
-            // The scripts this address installed, found by the address
-            // AdGuard recorded for them.
-            let mut refetched = Vec::new();
-            if refused.is_none() {
-                // An address already installed is updated in place, at a
-                // version that may not have moved — and then the fresh copy
-                // would read as the user's edit. It is AdGuard's copy, so it
-                // is the pristine one.
-                //
-                // Found from the metadata alone. The page's own `read` would
-                // compare the sources first, and file the fresh copy as an
-                // edit before it could be recorded as pristine.
-                if let Some(dir) = adguard_core::paths::userscripts_dir() {
-                    refetched = userscripts::read(&dir, &[], &Locale::english())
-                        .into_iter()
-                        .filter(|script| {
-                            script.download_url.as_deref() == Some(fetched_from.as_str())
-                        })
-                        .map(|script| script.id)
-                        .collect();
-                    for id in &refetched {
-                        rebase(id, false);
+            // No comparison may run between AdGuard writing a re-fetched
+            // copy and its being recorded; see `Copies::delivering`. Nothing
+            // in here compares — the page's `read` waits until after.
+            let (refused, refetched) = Copies::delivering(|| {
+                let mut refused = cli.userscripts_install(&url).err().map(|e| e.to_string());
+                // A typed address is not read first, so one that redirects — an
+                // install counter, a short link — reaches AdGuard as it is, and
+                // AdGuard follows no redirects (#29). Its refusal is the same
+                // sentence for every cause, so on any refusal the address is
+                // followed here, and tried once more if it led somewhere else.
+                let mut fetched_from = url.clone();
+                if refused.is_some() {
+                    let moved = preview::fetch(&url).ok().map(|fetched| fetched.url);
+                    if let Some(moved) = moved.filter(|moved| *moved != url) {
+                        refused = cli.userscripts_install(&moved).err().map(|e| e.to_string());
+                        fetched_from = moved;
                     }
                 }
-            }
+                // The scripts this address installed, found by the address
+                // AdGuard recorded for them.
+                let mut refetched = Vec::new();
+                if refused.is_none() {
+                    // An address already installed is updated in place, at a
+                    // version that may not have moved — and then the fresh copy
+                    // would read as the user's edit. It is AdGuard's copy, so it
+                    // is the pristine one.
+                    //
+                    // Found from the metadata alone. The page's own `read` would
+                    // compare the sources first, and file the fresh copy as an
+                    // edit before it could be recorded as pristine.
+                    if let Some(dir) = adguard_core::paths::userscripts_dir() {
+                        refetched = userscripts::read(&dir, &[], &Locale::english())
+                            .into_iter()
+                            .filter(|script| {
+                                script.download_url.as_deref() == Some(fetched_from.as_str())
+                            })
+                            .map(|script| script.id)
+                            .collect();
+                        for id in &refetched {
+                            rebase(id, false);
+                        }
+                    }
+                }
+                (refused, refetched)
+            });
             let after = read(&locale).ok().map(|loaded| loaded.scripts);
             (refused, before, after, refetched)
         })
