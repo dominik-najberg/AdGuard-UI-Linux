@@ -601,34 +601,31 @@ impl ExtensionsPage {
                 let mut done = Vec::new();
                 let mut failed = Vec::new();
                 for (id, url, label) in targets {
-                    // Asked again from the files right before each install,
-                    // not taken from the rows: a script switched off in a
-                    // terminal, or saved in an editor, since the check — or
-                    // while the one before it downloaded — must not be
-                    // installed, because the install switches it back on or
-                    // replaces the edit. The read also files an edit not yet
-                    // seen, so it counts here.
-                    let still = read(&locale).ok().is_some_and(|loaded| {
-                        loaded.scripts.iter().any(|script| {
-                            script.id == id
-                                && userscript_prefs::eligible(
-                                    script.enabled,
-                                    script.edited,
-                                    loaded.pending.contains_key(&id),
-                                    script.actionable(),
-                                )
-                        })
-                    });
-                    if !still {
-                        continue;
+                    // Switched off while an earlier one downloaded: what is
+                    // already installing finishes, nothing after it starts.
+                    if !AutoUpdate::locate().is_some_and(|prefs| prefs.enabled()) {
+                        break;
                     }
-                    match cli.userscripts_install(&url) {
-                        Ok(_) => {
+                    // Decided and installed under the CLI slot, as the edit
+                    // watch's reload is: a switch-off of ours that is running
+                    // now has either finished, and the files say so, or not
+                    // started, and cannot slip in between the look and the
+                    // install, which would switch the script back on.
+                    let outcome = cli.exclusively(RELOAD_WAIT, || {
+                        may_update_unattended(&locale, &id)
+                            .then(|| cli.userscripts_install(&url).map_err(|err| err.to_string()))
+                    });
+                    match outcome {
+                        Some(Some(Ok(_))) => {
                             rebase(&id, false);
                             let _ = carry(&id);
                             done.push(label);
                         }
-                        Err(err) => failed.push(format!("{label}: {err}")),
+                        Some(Some(Err(err))) => failed.push(format!("{label}: {err}")),
+                        // No longer eligible, or AdGuard was busy with another
+                        // command of ours for the whole wait: left for the
+                        // badge and the next check.
+                        Some(None) | None => {}
                     }
                 }
                 (done, failed)
@@ -3132,6 +3129,37 @@ fn read(locale: &Locale) -> Result<Loaded, String> {
         pending,
         bare,
     })
+}
+
+/// Whether `id` may be updated with nobody asked, judged from the files now.
+///
+/// **Every part has to be confirmed, not merely not contradicted.** The page's
+/// own read shows a row as unedited when the copies cannot be compared, which
+/// is the safe answer for a note and the dangerous one here: with the copies
+/// directory unwritable, an edited script would read as unedited and be
+/// replaced with no copy of the edit kept. So this compares again, and an
+/// error at any step is a no. `userscript_prefs::eligible` says what the
+/// parts are and why.
+fn may_update_unattended(locale: &Locale, id: &str) -> bool {
+    let (Ok(config), Some(dir), Some(copies)) =
+        (Config::load(), adguard_core::paths::userscripts_dir(), Copies::locate())
+    else {
+        return false;
+    };
+    let scripts = userscripts::read(&dir, &config.enabled_userscripts(), locale);
+    let Some(script) = scripts.iter().find(|script| script.id == id) else {
+        return false;
+    };
+    let Ok(current) = std::fs::read(userscripts::source_path(&dir, id)) else {
+        return false;
+    };
+    let version = script.version.as_deref();
+    let (Ok(edited), Ok(pending)) =
+        (copies.observe(id, version, &current), copies.pending(id, version, &current))
+    else {
+        return false;
+    };
+    userscript_prefs::eligible(script.enabled, edited, pending.is_some(), script.actionable())
 }
 
 /// Take what is installed for `id` now as AdGuard's own copy. Run on the
