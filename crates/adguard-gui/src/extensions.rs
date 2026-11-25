@@ -932,6 +932,8 @@ impl ExtensionsPage {
         items.append(&rename);
         let edit = menu_item("Edit source…", None);
         items.append(&edit);
+        let edit_ai = menu_item("Edit with AI…", None);
+        items.append(&edit_ai);
         let revert = menu_item("Revert to original…", None);
         items.append(&revert);
         let restore = menu_item("Bring back your changes…", None);
@@ -959,6 +961,7 @@ impl ExtensionsPage {
         for (button, action) in [
             (&rename, Self::begin_rename as fn(&Rc<Self>, &str)),
             (&edit, Self::edit_source),
+            (&edit_ai, Self::edit_with_ai),
             (&revert, Self::begin_revert),
             (&update, Self::begin_update),
             (&restore, Self::begin_restore),
@@ -1088,6 +1091,31 @@ impl ExtensionsPage {
             return;
         };
         self.open_file(&userscripts::source_path(&dir, id), true);
+    }
+
+    /// Hand the script to an AI agent (`crate::ai_edit`).
+    ///
+    /// Nothing here waits on the outcome: the agent saves the file and the
+    /// edit watch takes it from there, exactly as for *Edit source…*. That is
+    /// also what has AdGuard reload the changed source (contract §15).
+    fn edit_with_ai(self: &Rc<Self>, id: &str) {
+        let Some(dir) = adguard_core::paths::userscripts_dir() else {
+            return;
+        };
+        let Some(script) = self.rows.borrow().get(id).map(|row| {
+            let script = row.script.borrow();
+            crate::ai_edit::Script {
+                file: userscripts::source_path(&dir, id),
+                meta: userscripts::meta_path(&dir, id),
+                name: script.original_name().to_owned(),
+                display_name: script.display_name().to_owned(),
+                version: script.version.clone(),
+                matches: userscripts::run_patterns(&dir, id),
+            }
+        }) else {
+            return;
+        };
+        crate::ai_edit::present(&self.bin, script, self.toasts.clone());
     }
 
     /// Ask before throwing an edit away, since nothing else keeps it.

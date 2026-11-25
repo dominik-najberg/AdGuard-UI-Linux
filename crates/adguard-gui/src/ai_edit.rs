@@ -105,6 +105,10 @@ pub fn present(parent: &impl IsA<gtk::Widget>, script: Script, toasts: adw::Toas
     view.add_top_bar(&header);
 
     let page = adw::PreferencesPage::new();
+    // Its own toasts for what happens while it is open: the page's overlay is
+    // underneath the dialog, so a "Copied" sent there is never seen. The
+    // page's is for what is reported as the dialog closes.
+    let here = adw::ToastOverlay::new();
     // The name in a label of its own rather than as the group's title: it is
     // the script author's text, and a label is where markup can be turned
     // off for certain.
@@ -172,8 +176,9 @@ pub fn present(parent: &impl IsA<gtk::Widget>, script: Script, toasts: adw::Toas
         let script = script.clone();
         let text_of = text_of.clone();
         let toasts = toasts.clone();
+        let here = here.clone();
         let dialog = dialog.clone();
-        Rc::new(move || fill_actions(&actions, &script, &text_of, &toasts, &dialog))
+        Rc::new(move || fill_actions(&actions, &script, &text_of, &toasts, &here, &dialog))
     };
     refill();
 
@@ -192,20 +197,22 @@ pub fn present(parent: &impl IsA<gtk::Widget>, script: Script, toasts: adw::Toas
     {
         let script = script.clone();
         let toasts = toasts.clone();
+        let here = here.clone();
         let dialog = dialog.clone();
         paste.connect_activated(move |row| {
             let script = script.clone();
             let toasts = toasts.clone();
+            let here = here.clone();
             let dialog = dialog.clone();
             let clipboard = row.clipboard();
             let row = row.clone();
             glib::spawn_future_local(async move {
                 let text = clipboard.read_text_future().await.ok().flatten();
                 let Some(text) = text else {
-                    toasts.add_toast(toast("The clipboard holds no text"));
+                    here.add_toast(toast("The clipboard holds no text"));
                     return;
                 };
-                if paste_back(&row, &script, text.as_str(), &toasts).await {
+                if paste_back(&row, &script, text.as_str(), &toasts, &here).await {
                     dialog.close();
                 }
             });
@@ -229,7 +236,8 @@ pub fn present(parent: &impl IsA<gtk::Widget>, script: Script, toasts: adw::Toas
     configure_group.add(&configure);
     page.add(&configure_group);
 
-    view.set_content(Some(&page));
+    here.set_child(Some(&page));
+    view.set_content(Some(&here));
     dialog.set_child(Some(&view));
     dialog.present(Some(parent));
     request.grab_focus();
@@ -243,6 +251,7 @@ fn fill_actions(
     script: &Rc<Script>,
     text_of: &Rc<dyn Fn() -> String>,
     toasts: &adw::ToastOverlay,
+    here: &adw::ToastOverlay,
     dialog: &adw::Dialog,
 ) {
     while let Some(child) = actions.first_child() {
@@ -261,17 +270,19 @@ fn fill_actions(
         let launch = {
             let script = script.clone();
             let toasts = toasts.clone();
+            let here = here.clone();
             let text_of = text_of.clone();
             let dialog = dialog.clone();
             move |agent: &Agent| match launch(&load_settings(), agent, &script, &text_of()) {
                 Ok(()) => {
+                    let place = if agent.terminal { "open in a terminal" } else { "running" };
                     toasts.add_toast(toast(&format!(
-                        "{} is open in a terminal; the row shows Edited once it saves",
+                        "{} is {place}; the row shows Edited once it saves",
                         agent.name
                     )));
                     dialog.close();
                 }
-                Err(message) => toasts.add_toast(toast(&message)),
+                Err(message) => here.add_toast(toast(&message)),
             }
         };
         let label = format!("Open in {}", first.name);
@@ -319,29 +330,29 @@ fn fill_actions(
 
     {
         let script = script.clone();
-        let toasts = toasts.clone();
+        let here = here.clone();
         let text_of = text_of.clone();
         copy.connect_clicked(move |button| {
             let settings = load_settings();
             let text = ai_agents::prompt(settings.prompt_template(), &script.subject(&text_of()));
             button.clipboard().set_text(&text);
-            toasts.add_toast(toast("Prompt copied. Paste it into your agent"));
+            here.add_toast(toast("Prompt copied. Paste it into your agent"));
         });
     }
     {
         let script = script.clone();
-        let toasts = toasts.clone();
+        let here = here.clone();
         let text_of = text_of.clone();
         copy_source.connect_clicked(move |button| match std::fs::read_to_string(&script.file) {
             Ok(source) => {
                 let text = ai_agents::prompt_with_source(&script.subject(&text_of()), &source);
                 button.clipboard().set_text(&text);
-                toasts.add_toast(toast(
+                here.add_toast(toast(
                     "Prompt and script copied. When the chat answers, copy its script and \
                      use Paste from clipboard",
                 ));
             }
-            Err(err) => toasts.add_toast(toast(&format!("Could not read the script: {err}"))),
+            Err(err) => here.add_toast(toast(&format!("Could not read the script: {err}"))),
         });
     }
 }
@@ -402,9 +413,10 @@ async fn paste_back(
     script: &Script,
     text: &str,
     toasts: &adw::ToastOverlay,
+    here: &adw::ToastOverlay,
 ) -> bool {
     let Some(text) = ai_agents::extract_userscript(text) else {
-        toasts.add_toast(toast(
+        here.add_toast(toast(
             "The clipboard does not hold one whole userscript: copy the script itself from \
              the chat, starting at // ==UserScript==",
         ));
@@ -413,7 +425,7 @@ async fn paste_back(
     let text = text.as_str();
     let current = std::fs::read_to_string(&script.file).unwrap_or_default();
     if current == text {
-        toasts.add_toast(toast("That is the script as it is now; nothing to change"));
+        here.add_toast(toast("That is the script as it is now; nothing to change"));
         return false;
     }
     let (before, after) = (current.lines().count(), text.lines().count());
@@ -446,7 +458,7 @@ async fn paste_back(
             true
         }
         Err(err) => {
-            toasts.add_toast(toast(&format!("Could not write the script: {err}")));
+            here.add_toast(toast(&format!("Could not write the script: {err}")));
             false
         }
     }
@@ -705,29 +717,36 @@ impl SettingsWindow {
         dialog.set_close_response("cancel");
 
         // Checked as typed, so Save is never pressed on a command that will
-        // be refused.
+        // be refused. The reason is shown only once something has been typed:
+        // an empty form opening on "the command is empty" scolds before the
+        // user has done anything. Save is off from the start either way.
+        let touched = Rc::new(std::cell::Cell::new(false));
         let validate = {
             let dialog = dialog.clone();
             let name = name.clone();
             let command = command.clone();
             let error = error.clone();
+            let touched = touched.clone();
             move || {
                 let problem = match ai_agents::Command::parse(&command.text()) {
                     Err(err) => Some(err.to_string()),
                     Ok(_) if name.text().trim().is_empty() => Some("Give it a name".to_owned()),
                     Ok(_) => None,
                 };
-                error.set_visible(problem.is_some());
+                error.set_visible(problem.is_some() && touched.get());
                 error.set_label(problem.as_deref().unwrap_or(""));
                 dialog.set_response_enabled("save", problem.is_none());
             }
         };
         validate();
-        {
+        for entry in [&name, &command] {
             let validate = validate.clone();
-            name.connect_changed(move |_| validate());
+            let touched = touched.clone();
+            entry.connect_changed(move |_| {
+                touched.set(true);
+                validate();
+            });
         }
-        command.connect_changed(move |_| validate());
 
         let this = Rc::downgrade(self);
         let id = agent.as_ref().map(|a| a.id.clone());

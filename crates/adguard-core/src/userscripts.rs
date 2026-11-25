@@ -86,6 +86,27 @@ pub fn source_path(dir: &Path, id: &str) -> std::path::PathBuf {
     dir.join(format!("{id}{SOURCE_SUFFIX}"))
 }
 
+/// Where a script's metadata file is, beside its source.
+pub fn meta_path(dir: &Path, id: &str) -> std::path::PathBuf {
+    dir.join(format!("{id}{META_SUFFIX}"))
+}
+
+/// The pages a script runs on: its metadata's `match` and `include` lists,
+/// in that order, as AdGuard recorded them at install.
+///
+/// Read on demand rather than kept on [`Userscript`]: only *Edit with AI*
+/// wants it, to tell the agent where the script runs, and every row carrying
+/// the lists would be a read of every list on every reload for one dialog.
+pub fn run_patterns(dir: &Path, id: &str) -> Vec<String> {
+    let meta = Meta::read(&meta_path(dir, id));
+    ["match", "include"]
+        .iter()
+        .flat_map(|key| meta.0[*key].as_vec().cloned().unwrap_or_default())
+        .filter_map(|value| value.as_str().map(str::trim).map(str::to_owned))
+        .filter(|value| !value.is_empty())
+        .collect()
+}
+
 /// The page a script was installed from, worked out from its `downloadURL`.
 ///
 /// **The homepage is not this, and #9's screenshot is why the cog needs
@@ -437,6 +458,22 @@ fn hyphenated(tag: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `match` first, then `include`, blanks dropped: what *Edit with AI*
+    /// tells an agent about where a script runs.
+    #[test]
+    fn run_patterns_read_match_then_include() {
+        let dir = std::env::temp_dir().join(format!("run-patterns-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            meta_path(&dir, "s"),
+            r#"{"match": ["https://a/*", " "], "include": ["*://b/*"], "exclude": ["x"]}"#,
+        )
+        .unwrap();
+        assert_eq!(run_patterns(&dir, "s"), vec!["https://a/*", "*://b/*"]);
+        assert!(run_patterns(&dir, "missing").is_empty());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
     use crate::model::Userscript;
 
     fn meta(json: &str) -> Meta {
