@@ -213,9 +213,13 @@ impl Copies {
     ///   version is kept, with the copy it was made from beside it, for the
     ///   merge a later release will offer.
     /// - **A copy of this version**: edited exactly when the bytes differ, and
-    ///   the edit is kept as [`MINE`]. Bytes that match again — the user undid
-    ///   it, or a reinstall put AdGuard's copy back — drop the edit, since there
-    ///   is none any more.
+    ///   the edit is kept as [`MINE`]. Bytes that match again do **not** drop
+    ///   the kept edit. The user may have undone it, but AdGuard may also have
+    ///   overwritten it: `check-update` re-downloads an enabled script with no
+    ///   `updateURL` on every run, at the same version (contract §15). After
+    ///   that, [`MINE`] is the only copy of the edit left anywhere. Only an
+    ///   explicit [`Self::revert`] or [`Self::rebase`] — the user's own choice
+    ///   — discards it.
     ///
     /// A script with no `@version` is compared as version `""`, so a new
     /// release of it that also carries none looks like an edit until it is
@@ -260,11 +264,8 @@ impl Copies {
         }
 
         if base == current {
-            if read_text(&dir.join(MINE_VERSION)).as_deref() == Some(version) {
-                remove_if_present(&dir.join(MINE))?;
-                remove_if_present(&dir.join(MINE_VERSION))?;
-                remove_if_present(&dir.join(MINE_ANCESTOR))?;
-            }
+            // Not edited now, and any kept edit stays: this may be AdGuard
+            // having overwritten it, not the user taking it back.
             return Ok(false);
         }
 
@@ -299,18 +300,26 @@ impl Copies {
         }
     }
 
-    /// Record `current` as the script AdGuard delivered, whatever was kept
-    /// before, and drop any edit.
+    /// Record `current` as the script AdGuard delivered, whatever was kept as
+    /// that before.
     ///
     /// For the moment this application has just had AdGuard fetch the
     /// script — an install, a reinstall — when the bytes on disk are known to
-    /// be AdGuard's even if the version did not move.
+    /// be AdGuard's even if the version did not move. A kept edit is left
+    /// where it is: AdGuard overwriting the file is not the user giving the
+    /// edit up. [`Self::discard_edit`] is for when they have.
     pub fn rebase(&self, id: &str, version: Option<&str>, current: &[u8]) -> io::Result<()> {
+        write_base(&self.dir(id)?, version.unwrap_or(""), current)
+    }
+
+    /// Forget the kept edit, on the user's say-so — a reinstall whose dialog
+    /// told them their changes would be replaced.
+    pub fn discard_edit(&self, id: &str) -> io::Result<()> {
         let dir = self.dir(id)?;
         for file in [MINE, MINE_VERSION, MINE_ANCESTOR] {
             remove_if_present(&dir.join(file))?;
         }
-        write_base(&dir, version.unwrap_or(""), current)
+        Ok(())
     }
 
     /// Put the pristine copy back over the installed `.user.js` at `target`,
@@ -572,9 +581,12 @@ mod tests {
         assert_eq!(sandbox.kept("x", MINE).as_deref(), Some(&b"edited"[..]));
         assert_eq!(sandbox.kept("x", MINE_VERSION).as_deref(), Some(&b"1.0"[..]));
 
-        // Undone in the editor: no edit, and nothing kept as one.
+        // The original back on disk — undone in an editor, or overwritten by
+        // `check-update` re-fetching a script with no `updateURL`. Not edited
+        // now, but the kept edit survives: in the second case it is the only
+        // copy there is.
         assert!(!copies.observe("x", Some("1.0"), b"original").unwrap());
-        assert_eq!(sandbox.kept("x", MINE), None);
+        assert_eq!(sandbox.kept("x", MINE).as_deref(), Some(&b"edited"[..]));
     }
 
     /// An update overwrites the edit on disk; the edit and the copy it was
@@ -651,6 +663,12 @@ mod tests {
         copies.observe("x", Some("1.0"), b"edited").unwrap();
         copies.rebase("x", Some("1.0"), b"silently changed upstream").unwrap();
         assert!(!copies.observe("x", Some("1.0"), b"silently changed upstream").unwrap());
+        assert_eq!(
+            sandbox.kept("x", MINE).as_deref(),
+            Some(&b"edited"[..]),
+            "AdGuard replacing the file is not the user giving the edit up"
+        );
+        copies.discard_edit("x").unwrap();
         assert_eq!(sandbox.kept("x", MINE), None);
     }
 

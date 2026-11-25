@@ -1487,7 +1487,7 @@ impl ExtensionsPage {
                     // What is on disk now is AdGuard's fresh copy, even if
                     // the author changed it without moving the version — so it
                     // is the pristine copy, and not an edit, from here on.
-                    rebase(&wanted);
+                    rebase(&wanted, true);
                 }
                 let observed = read(&locale)
                     .ok()
@@ -1750,7 +1750,7 @@ impl ExtensionsPage {
                         script.download_url.as_deref() == Some(fetched_from.as_str())
                     });
                     for script in refetched {
-                        rebase(&script.id);
+                        rebase(&script.id, false);
                     }
                 }
             }
@@ -2278,7 +2278,11 @@ fn read(locale: &Locale) -> Result<Loaded, String> {
 /// worker after AdGuard has just fetched the script; a failure costs only the
 /// accuracy of the *Edited* note, which the next comparison may then get wrong
 /// in the harmless direction.
-fn rebase(id: &str) {
+///
+/// `discard_edit` only after a reinstall the user confirmed knowing their
+/// changes would be replaced. Re-adding an installed address replaces the file
+/// too, but nothing asked them about their edit, so it is kept.
+fn rebase(id: &str, discard_edit: bool) {
     let (Some(dir), Some(copies)) = (adguard_core::paths::userscripts_dir(), Copies::locate()) else {
         return;
     };
@@ -2290,6 +2294,9 @@ fn rebase(id: &str) {
         .find(|script| script.id == id)
         .and_then(|script| script.version);
     let _ = copies.rebase(id, version.as_deref(), &current);
+    if discard_edit {
+        let _ = copies.discard_edit(id);
+    }
 }
 
 /// Drop this application's name and copies for a script that was removed.
