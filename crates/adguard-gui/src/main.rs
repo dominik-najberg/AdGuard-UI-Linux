@@ -6,6 +6,9 @@
 //! measured CLI behaviour the wrapper encodes.
 
 mod about;
+// Wired into the Extensions page's cog menu once stage 2 lands there.
+#[allow(dead_code)]
+mod ai_edit;
 mod activity;
 mod advanced;
 mod autostart;

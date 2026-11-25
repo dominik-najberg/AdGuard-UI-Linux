@@ -385,6 +385,20 @@ pub fn prompt(template: &str, subject: &Subject) -> String {
     fill(&parsed, &value)
 }
 
+/// Whether a prompt template parses: what the settings page asks before it
+/// saves one.
+pub fn check_prompt(template: &str) -> Result<(), TemplateError> {
+    pieces(template, PROMPT_PLACEHOLDERS).map(|_| ())
+}
+
+/// Whether a prompt template still tells the agent to leave the metadata
+/// block alone. Not enforced: the template is the user's. The settings page
+/// warns when this is false, because an agent that edits `@match` makes a
+/// change AdGuard never reads.
+pub fn keeps_rules(template: &str) -> bool {
+    template.contains("==UserScript==")
+}
+
 /// The prompt for a chat that cannot read this machine's files: the same
 /// request with the source inlined, asking for the whole file back.
 ///
@@ -500,15 +514,25 @@ pub struct Terminal {
 ///
 /// `xdg-terminal-exec` first: it is the proposed standard for "the user's
 /// terminal", and on a machine where it is set up it answers the question this
-/// list only guesses at. Its flags and Ptyxis's were read from `--help` on 25
-/// November 2026. Console's (`kgx`), GNOME Terminal's and Konsole's are from
-/// their documentation; none of the three was installed to check.
+/// list only guesses at. The rest, and the argv form each takes, are the list
+/// `adguard-gui`'s `terminal.rs` already relies on for *Fix certificate*.
+///
+/// Only the two whose `--help` was read (25 November 2026) are told the
+/// directory by flag. Ptyxis needs it: it is a D-Bus service, so a new window
+/// does not inherit the working directory of the process that asked for it.
+/// The others are started in the directory and inherit it; a flag guessed for
+/// a terminal nobody checked could as easily make it refuse to start.
 pub const TERMINALS: &[Terminal] = &[
     Terminal { program: "xdg-terminal-exec", dir_flag: Some("--dir="), before_command: &["--"] },
     Terminal { program: "ptyxis", dir_flag: Some("--working-directory="), before_command: &["--new-window", "--"] },
-    Terminal { program: "kgx", dir_flag: Some("--working-directory="), before_command: &["--"] },
-    Terminal { program: "gnome-terminal", dir_flag: Some("--working-directory="), before_command: &["--"] },
-    Terminal { program: "konsole", dir_flag: Some("--workdir="), before_command: &["-e"] },
+    Terminal { program: "gnome-terminal", dir_flag: None, before_command: &["--"] },
+    Terminal { program: "kgx", dir_flag: None, before_command: &["-e"] },
+    Terminal { program: "konsole", dir_flag: None, before_command: &["-e"] },
+    Terminal { program: "xfce4-terminal", dir_flag: None, before_command: &["-x"] },
+    Terminal { program: "alacritty", dir_flag: None, before_command: &["-e"] },
+    Terminal { program: "kitty", dir_flag: None, before_command: &[] },
+    Terminal { program: "foot", dir_flag: None, before_command: &[] },
+    Terminal { program: "x-terminal-emulator", dir_flag: None, before_command: &["-e"] },
     Terminal { program: "xterm", dir_flag: None, before_command: &["-e"] },
 ];
 
@@ -1057,6 +1081,14 @@ mod tests {
         let text = prompt(DEFAULT_PROMPT, &subject(&[], ""));
         assert!(text.contains(NO_REQUEST));
         assert!(text.contains("(none listed)"));
+    }
+
+    #[test]
+    fn prompt_templates_are_checked() {
+        assert_eq!(check_prompt(DEFAULT_PROMPT), Ok(()));
+        assert!(keeps_rules(DEFAULT_PROMPT));
+        assert_eq!(check_prompt("{file} {nope}"), Err(TemplateError::Unknown("nope".into())));
+        assert!(!keeps_rules("Edit {file}: {request}"));
     }
 
     #[test]
