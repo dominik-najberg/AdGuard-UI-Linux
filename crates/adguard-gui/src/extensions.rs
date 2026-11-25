@@ -611,8 +611,12 @@ impl ExtensionsPage {
                     // now has either finished, and the files say so, or not
                     // started, and cannot slip in between the look and the
                     // install, which would switch the script back on.
+                    // The switch is asked again once the slot is ours: the
+                    // wait for it can be thirty seconds, and switching off
+                    // during it must stop this install too.
                     let outcome = cli.exclusively(RELOAD_WAIT, || {
-                        may_update_unattended(&locale, &id)
+                        let wanted = AutoUpdate::locate().is_some_and(|prefs| prefs.enabled());
+                        (wanted && may_update_unattended(&locale, &id))
                             .then(|| cli.userscripts_install(&url).map_err(|err| err.to_string()))
                     });
                     match outcome {

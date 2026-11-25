@@ -35,9 +35,9 @@
 //! The test suites rely on that.
 
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::{Condvar, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::Instant;
 
 type Key = Option<PathBuf>;
@@ -49,25 +49,50 @@ fn table() -> &'static (Mutex<HashSet<Key>>, Condvar) {
 
 thread_local! {
     /// Data directories this thread holds through [`exclusively`], inside
-    /// which an invocation runs without taking the slot again.
-    static HELD: RefCell<HashSet<Key>> = RefCell::new(HashSet::new());
+    /// which an invocation runs without taking the slot again, and the
+    /// holding it shares with them.
+    static HELD: RefCell<HashMap<Key, Arc<Held>>> = RefCell::new(HashMap::new());
+}
+
+/// One taking of the slot. Released when the last [`Slot`] sharing it is
+/// dropped, on whichever thread that is.
+struct Held {
+    key: Key,
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        let (lock, freed) = table();
+        lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).remove(&self.key);
+        freed.notify_all();
+    }
 }
 
 /// The right to run `adguard-cli` against one data directory. Released when
 /// dropped, on whichever thread drops it.
+///
+/// **A slot taken inside [`exclusively`] shares that one, rather than being a
+/// token that releases nothing.** The difference is a command that times out
+/// there: it is left to finish (above) and its slot handed to the thread that
+/// waits for it. When that slot released nothing, the outer one was freed the
+/// moment `exclusively` returned, with the timed-out `adguard-cli` still
+/// running, and the next command of ours could start beside it, the overlap
+/// this module exists to prevent. Found by Codex reviewing the automatic
+/// userscript update, which runs a network install inside `exclusively`.
+/// Sharing keeps the slot taken until both are done.
 #[must_use]
 pub(crate) struct Slot {
-    key: Option<Key>,
+    _held: Arc<Held>,
 }
 
 impl Slot {
     /// Take the slot for `key`, waiting until `deadline` at most.
     ///
     /// A thread inside [`exclusively`] for the same key already holds it and
-    /// gets a token that releases nothing.
+    /// gets a share of that holding, at once.
     pub(crate) fn acquire(key: &Key, deadline: Instant) -> Option<Self> {
-        if HELD.with(|held| held.borrow().contains(key)) {
-            return Some(Self { key: None });
+        if let Some(held) = HELD.with(|held| held.borrow().get(key).cloned()) {
+            return Some(Self { _held: held });
         }
         let (lock, freed) = table();
         let mut busy = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -79,16 +104,9 @@ impl Slot {
                 .0;
         }
         busy.insert(key.clone());
-        Some(Self { key: Some(key.clone()) })
-    }
-}
-
-impl Drop for Slot {
-    fn drop(&mut self) {
-        let Some(key) = self.key.take() else { return };
-        let (lock, freed) = table();
-        lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).remove(&key);
-        freed.notify_all();
+        Some(Self {
+            _held: Arc::new(Held { key: key.clone() }),
+        })
     }
 }
 
@@ -97,12 +115,12 @@ impl Drop for Slot {
 ///
 /// `None` when the slot could not be had by `deadline`; `body` did not run.
 pub(crate) fn exclusively<T>(key: &Key, deadline: Instant, body: impl FnOnce() -> T) -> Option<T> {
+    let nested = HELD.with(|held| held.borrow().contains_key(key));
     let slot = Slot::acquire(key, deadline)?;
-    let nested = slot.key.is_none();
     if !nested {
-        HELD.with(|held| held.borrow_mut().insert(key.clone()));
+        HELD.with(|held| held.borrow_mut().insert(key.clone(), slot._held.clone()));
     }
-    // Released even if `body` panics, so a bug cannot wedge every page.
+    // Unmarked even if `body` panics, so a bug cannot wedge every page.
     struct Unmark<'a>(&'a Key, bool);
     impl Drop for Unmark<'_> {
         fn drop(&mut self) {
@@ -166,6 +184,29 @@ mod tests {
         });
         assert_eq!(ran, Some(true));
         // And the slot is free again afterwards.
+        assert!(Slot::acquire(&k, Instant::now() + Duration::from_millis(10)).is_some());
+    }
+
+    /// A command that times out inside `exclusively` hands its slot to the
+    /// thread waiting for it to exit. That slot must keep the directory taken
+    /// after `exclusively` returns, until that thread lets it go.
+    #[test]
+    fn a_slot_taken_inside_exclusively_outlives_it() {
+        let k = key("outlives");
+        let handed = exclusively(&k, Instant::now() + Duration::from_secs(1), || {
+            Slot::acquire(&k, Instant::now() + Duration::from_millis(10)).expect("nested")
+        })
+        .expect("free");
+        let (sent, received) = std::sync::mpsc::channel();
+        let k2 = k.clone();
+        let other = std::thread::spawn(move || {
+            let blocked = Slot::acquire(&k2, Instant::now() + Duration::from_millis(100)).is_none();
+            sent.send(()).unwrap();
+            blocked
+        });
+        received.recv().unwrap();
+        assert!(other.join().unwrap(), "the slot was free while a share of it was held");
+        drop(handed);
         assert!(Slot::acquire(&k, Instant::now() + Duration::from_millis(10)).is_some());
     }
 }
