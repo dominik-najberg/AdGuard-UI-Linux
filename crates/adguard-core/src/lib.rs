@@ -33,6 +33,7 @@ pub mod rules;
 pub mod site;
 pub mod trust;
 pub mod update;
+pub mod update_crash;
 pub mod userscripts;
 pub mod window_state;
 pub mod zip;
