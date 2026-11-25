@@ -23,6 +23,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use yaml_rust2::yaml::Hash;
 use yaml_rust2::{Yaml, YamlEmitter, YamlLoader};
@@ -390,8 +391,17 @@ fn write_atomically_with(
         io::Error::new(io::ErrorKind::InvalidInput, "the file has no directory")
     })?;
     fs::create_dir_all(dir)?;
+    // Unique per write, not just per file: the page compares on more than one
+    // worker thread at a time — a reload and a directory-watch re-check can
+    // overlap — and two writers sharing one staging name would rename each
+    // other's file away mid-write.
+    static WRITES: AtomicU64 = AtomicU64::new(0);
     let mut staging = path.as_os_str().to_owned();
-    staging.push(".part");
+    staging.push(format!(
+        ".{}-{}.part",
+        std::process::id(),
+        WRITES.fetch_add(1, Ordering::Relaxed)
+    ));
     let staging = PathBuf::from(staging);
     let written = fs::write(&staging, bytes)
         .and_then(|()| match permissions {

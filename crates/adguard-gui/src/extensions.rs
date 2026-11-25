@@ -82,7 +82,10 @@ impl Row {
     /// row must not hand them back.
     fn set_busy(&self, busy: bool) {
         let actionable = self.script.borrow().actionable();
-        self.switch.set_sensitive(!busy && actionable);
+        // The row as a whole: on an ambiguous row the switch inside it stays
+        // out on its own ([`ExtensionsPage::row`]), so this cannot hand it
+        // back, and the cog beside it stays usable.
+        self.switch.set_sensitive(!busy);
         self.remove.set_sensitive(!busy && actionable);
         self.menu.set_sensitive(!busy);
     }
@@ -680,7 +683,13 @@ impl ExtensionsPage {
             // cog stays: renaming, editing and the links are this
             // application's and the browser's business, not the CLI's, and
             // its *Reinstall* is left out ([`Self::menu_button`]).
-            switch.set_sensitive(false);
+            //
+            // The switch *inside* the row, not the row: an insensitive row
+            // greys out every suffix in it, the cog included.
+            if let Some(toggle) = switch.activatable_widget() {
+                toggle.set_sensitive(false);
+            }
+            switch.set_activatable(false);
             remove.set_sensitive(false);
         }
 
@@ -1073,49 +1082,69 @@ impl ExtensionsPage {
     /// anything on: a switched-off script loads its source when it is
     /// switched on, which is soon enough. And not for an ambiguous one,
     /// which `enable` cannot single out; the toast says to restart instead.
+    ///
+    /// **Everything is read afresh on the worker, never taken from the rows.**
+    /// A row's version is the one it was drawn with; a `check-update` run in a
+    /// terminal while the page is open changes the version and the source
+    /// together, and comparing the new source against the old version would
+    /// file the update as the user's edit and overwrite the edit kept from
+    /// before it. Whether a script is switched on is read under the CLI slot,
+    /// right before the `enable`: a switch flipped off a moment ago may not be
+    /// in the row yet, but it is in `proxy.yaml` before the slot comes free,
+    /// and reading it from the row could switch the script back on.
     fn recheck_edits(self: &Rc<Self>, touched: HashSet<String>) {
-        let scripts: Vec<Userscript> = self
-            .rows
-            .borrow()
-            .values()
-            .map(|row| row.script.borrow().clone())
-            .collect();
-        if scripts.is_empty() {
+        if self.rows.borrow().is_empty() {
             return;
         }
-        let reload: Vec<(String, String, bool)> = scripts
-            .iter()
-            .filter(|script| script.enabled && touched.contains(&script.id))
-            .map(|script| {
-                (script.id.clone(), script.display_name().to_owned(), script.actionable())
-            })
-            .collect();
         let cli = self.cli.clone();
+        let locale = self.locale.clone();
         let this = self.clone();
         worker::run(
             move || {
-                let mut scripts = scripts;
-                if let (Some(dir), Some(copies)) =
-                    (adguard_core::paths::userscripts_dir(), Copies::locate())
-                {
-                    copies.observe_all(&dir, &mut scripts);
-                }
-                let edited: Vec<(String, bool)> = scripts
-                    .into_iter()
-                    .map(|script| (script.id, script.edited))
+                // The page's own read: fresh metadata, aliases, and every
+                // source compared against its copy at its *current* version.
+                let Ok(loaded) = read(&locale) else {
+                    return (Vec::new(), Vec::new());
+                };
+                let edited: Vec<(String, bool)> = loaded
+                    .scripts
+                    .iter()
+                    .map(|script| (script.id.clone(), script.edited))
                     .collect();
-                let reloaded: Vec<(String, String, Result<(), String>)> = reload
-                    .into_iter()
-                    .map(|(id, name, actionable)| {
-                        let outcome = if actionable {
-                            cli.userscripts_enable(&id).map_err(|err| err.to_string())
-                        } else {
-                            Err(format!(
-                                "Restart protection to run your changes to {name}: AdGuard \
-                                 cannot be asked to reload it on its own"
-                            ))
-                        };
-                        (id, name, outcome)
+                let reloaded: Vec<(String, String, Result<(), String>)> = loaded
+                    .scripts
+                    .iter()
+                    .filter(|script| touched.contains(&script.id))
+                    .filter_map(|script| {
+                        let name = script.display_name().to_owned();
+                        if !script.actionable() {
+                            // Shown only for a switched-on script, as below.
+                            return script.enabled.then(|| {
+                                let reason = format!(
+                                    "Restart protection to run your changes to {name}: \
+                                     AdGuard cannot be asked to reload it on its own"
+                                );
+                                (script.id.clone(), name, Err(reason))
+                            });
+                        }
+                        let id = script.id.clone();
+                        let outcome = cli.exclusively(RELOAD_WAIT, || {
+                            let on = Config::load()
+                                .is_ok_and(|config| is_enabled(&id, &config.enabled_userscripts()));
+                            on.then(|| cli.userscripts_enable(&id).map_err(|err| err.to_string()))
+                        });
+                        match outcome {
+                            Some(Some(outcome)) => Some((id, name, outcome)),
+                            // Switched off: nothing to reload.
+                            Some(None) => None,
+                            None => Some((
+                                id,
+                                name,
+                                Err("AdGuard was busy, so the change is not running yet. \
+                                     Refresh the page to try again"
+                                    .to_owned()),
+                            )),
+                        }
                     })
                     .collect();
                 (edited, reloaded)
@@ -1692,10 +1721,26 @@ impl ExtensionsPage {
             // AdGuard follows no redirects (#29). Its refusal is the same
             // sentence for every cause, so on any refusal the address is
             // followed here, and tried once more if it led somewhere else.
+            let mut fetched_from = url.clone();
             if refused.is_some() {
                 let moved = preview::fetch(&url).ok().map(|fetched| fetched.url);
                 if let Some(moved) = moved.filter(|moved| *moved != url) {
                     refused = cli.userscripts_install(&moved).err().map(|e| e.to_string());
+                    fetched_from = moved;
+                }
+            }
+            if refused.is_none() {
+                // An address already installed is updated in place, at a
+                // version that may not have moved — and then the fresh copy
+                // would read as the user's edit. It is AdGuard's copy, so it
+                // is the pristine one.
+                if let Ok(loaded) = read(&locale) {
+                    let refetched = loaded.scripts.iter().filter(|script| {
+                        script.download_url.as_deref() == Some(fetched_from.as_str())
+                    });
+                    for script in refetched {
+                        rebase(&script.id);
+                    }
                 }
             }
             let after = read(&locale).ok().map(|loaded| loaded.scripts);
@@ -1764,6 +1809,11 @@ impl ExtensionsPage {
 /// here is what stops the CLI's own messages looking like a failed rename.
 const RENAME_BODY: &str = "Only this application shows the new name. AdGuard and adguard-cli \
                            keep using the original one.";
+
+/// How long a reload after an edit waits for another command of ours to
+/// finish before giving up — long enough for a toggle or an install, short of
+/// leaving a worker parked on a CLI that has hung.
+const RELOAD_WAIT: Duration = Duration::from_secs(30);
 
 /// How long the userscripts directory has to be quiet before the *Edited*
 /// notes are re-checked: long enough for an editor's save — temporary file,
