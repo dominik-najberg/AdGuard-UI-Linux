@@ -598,10 +598,30 @@ impl ExtensionsPage {
         let fetching = Fetching::start(&self.fetching);
         worker::run(
             move || {
-                let _ = read(&locale);
                 let mut done = Vec::new();
                 let mut failed = Vec::new();
                 for (id, url, label) in targets {
+                    // Asked again from the files right before each install,
+                    // not taken from the rows: a script switched off in a
+                    // terminal, or saved in an editor, since the check — or
+                    // while the one before it downloaded — must not be
+                    // installed, because the install switches it back on or
+                    // replaces the edit. The read also files an edit not yet
+                    // seen, so it counts here.
+                    let still = read(&locale).ok().is_some_and(|loaded| {
+                        loaded.scripts.iter().any(|script| {
+                            script.id == id
+                                && userscript_prefs::eligible(
+                                    script.enabled,
+                                    script.edited,
+                                    loaded.pending.contains_key(&id),
+                                    script.actionable(),
+                                )
+                        })
+                    });
+                    if !still {
+                        continue;
+                    }
                     match cli.userscripts_install(&url) {
                         Ok(_) => {
                             rebase(&id, false);

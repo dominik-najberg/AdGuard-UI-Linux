@@ -437,12 +437,19 @@ pub fn prompt_with_source(subject: &Subject, source: &str) -> String {
     )
 }
 
-/// Whether `text` begins with, or contains near its start, a userscript
-/// metadata block. Used to check what came back from a chat before it replaces
-/// a working script.
+/// Whether `text` holds a userscript metadata block, opening before it
+/// closes. Used to check what came back from a chat before it replaces a
+/// working script.
+///
+/// The whole text is searched, not a prefix of it: the block can be long.
+/// AdGuard Extra's closes after 23,719 characters and Popup Blocker's after
+/// 44,008, both on account of their inlined icons, and a 16 KiB prefix (the
+/// first version of this) refused both scripts unchanged.
 pub fn looks_like_userscript(text: &str) -> bool {
-    let head: String = text.chars().take(16 * 1024).collect();
-    head.contains("==UserScript==") && head.contains("==/UserScript==")
+    match (text.find("==UserScript=="), text.find("==/UserScript==")) {
+        (Some(open), Some(close)) => open < close,
+        _ => false,
+    }
 }
 
 /// The userscript in what a chat handed back, or `None` when it cannot be
@@ -1162,6 +1169,19 @@ mod tests {
             metadata_block(source),
             Some("// ==UserScript==\n// @name X\n// ==/UserScript==")
         );
+    }
+
+    /// The measured case: a metadata block past 16 KiB, as AdGuard Extra's
+    /// and Popup Blocker's are.
+    #[test]
+    fn a_long_metadata_block_is_still_a_userscript() {
+        let long = format!(
+            "// ==UserScript==\n// @icon data:image/png;base64,{}\n// ==/UserScript==\nx();",
+            "A".repeat(50_000)
+        );
+        assert!(looks_like_userscript(&long));
+        assert_eq!(extract_userscript(&long), Some(format!("{long}\n")));
+        assert!(!looks_like_userscript("// ==/UserScript==\n// ==UserScript=="));
     }
 
     #[test]

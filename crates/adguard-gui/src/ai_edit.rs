@@ -150,16 +150,6 @@ pub fn present(parent: &impl IsA<gtk::Widget>, script: Script, toasts: adw::Toas
     group.add(&frame);
     page.add(&group);
 
-    let text_of = {
-        let request = request.clone();
-        move || {
-            let buffer = request.buffer();
-            buffer
-                .text(&buffer.start_iter(), &buffer.end_iter(), false)
-                .to_string()
-        }
-    };
-
     // The actions, most direct first. Built by `fill_actions`, again after
     // the agent settings close, so a change made there applies here without
     // losing what was typed.
@@ -169,18 +159,15 @@ pub fn present(parent: &impl IsA<gtk::Widget>, script: Script, toasts: adw::Toas
         .halign(gtk::Align::End)
         .margin_top(12)
         .build();
-    let script = Rc::new(script);
-    let text_of: Rc<dyn Fn() -> String> = Rc::new(text_of);
-    let refill: Rc<dyn Fn()> = {
-        let actions = actions.clone();
-        let script = script.clone();
-        let text_of = text_of.clone();
-        let toasts = toasts.clone();
-        let here = here.clone();
-        let dialog = dialog.clone();
-        Rc::new(move || fill_actions(&actions, &script, &text_of, &toasts, &here, &dialog))
-    };
-    refill();
+    let ui = Rc::new(Ui {
+        dialog: dialog.downgrade(),
+        here: here.downgrade(),
+        request: request.downgrade(),
+        actions: actions.downgrade(),
+        script: Rc::new(script),
+        toasts,
+    });
+    fill_actions(&ui);
 
     let actions_group = adw::PreferencesGroup::new();
     actions_group.add(&actions);
@@ -195,25 +182,20 @@ pub fn present(parent: &impl IsA<gtk::Widget>, script: Script, toasts: adw::Toas
         .start_icon_name("edit-paste-symbolic")
         .build();
     {
-        let script = script.clone();
-        let toasts = toasts.clone();
-        let here = here.clone();
-        let dialog = dialog.clone();
+        let ui = ui.clone();
         paste.connect_activated(move |row| {
-            let script = script.clone();
-            let toasts = toasts.clone();
-            let here = here.clone();
-            let dialog = dialog.clone();
+            let ui = ui.clone();
             let clipboard = row.clipboard();
-            let row = row.clone();
+            let row = row.downgrade();
             glib::spawn_future_local(async move {
                 let text = clipboard.read_text_future().await.ok().flatten();
                 let Some(text) = text else {
-                    here.add_toast(toast("The clipboard holds no text"));
+                    ui.say("The clipboard holds no text");
                     return;
                 };
-                if paste_back(&row, &script, text.as_str(), &toasts, &here).await {
-                    dialog.close();
+                let Some(row) = row.upgrade() else { return };
+                if paste_back(&row, &ui, text.as_str()).await {
+                    ui.close();
                 }
             });
         });
@@ -226,10 +208,10 @@ pub fn present(parent: &impl IsA<gtk::Widget>, script: Script, toasts: adw::Toas
         .end_icon_name("go-next-symbolic")
         .build();
     {
-        let dialog = dialog.clone();
-        configure.connect_activated(move |_| {
-            let refill = refill.clone();
-            present_settings(&dialog, move || refill());
+        let ui = ui.clone();
+        configure.connect_activated(move |row| {
+            let ui = ui.clone();
+            present_settings(row, move || fill_actions(&ui));
         });
     }
     let configure_group = adw::PreferencesGroup::new();
@@ -243,17 +225,64 @@ pub fn present(parent: &impl IsA<gtk::Widget>, script: Script, toasts: adw::Toas
     request.grab_focus();
 }
 
-/// Put the action buttons into `actions`, replacing what is there, from the
-/// settings as they are on disk now. Every click reads them again too, so a
-/// button never acts on settings older than the ones it was drawn from.
-fn fill_actions(
-    actions: &gtk::Box,
-    script: &Rc<Script>,
-    text_of: &Rc<dyn Fn() -> String>,
-    toasts: &adw::ToastOverlay,
-    here: &adw::ToastOverlay,
-    dialog: &adw::Dialog,
-) {
+/// What the window's handlers need, with every widget **held weakly**.
+///
+/// The handlers are owned by widgets inside the dialog, so a strong reference
+/// from one of them back to the dialog, or to anything else in it, is a cycle
+/// that closing never breaks: every *Edit with AI…* would leave its whole
+/// tree and request text behind. Weak references let it go when it closes;
+/// a handler that runs after that finds nothing and does nothing.
+struct Ui {
+    dialog: glib::WeakRef<adw::Dialog>,
+    here: glib::WeakRef<adw::ToastOverlay>,
+    request: glib::WeakRef<gtk::TextView>,
+    actions: glib::WeakRef<gtk::Box>,
+    script: Rc<Script>,
+    /// The page's toasts, for what is said as the dialog closes. Outside the
+    /// dialog, so holding it makes no cycle.
+    toasts: adw::ToastOverlay,
+}
+
+impl Ui {
+    /// The request as typed.
+    fn request(&self) -> String {
+        self.request
+            .upgrade()
+            .map(|view| {
+                let buffer = view.buffer();
+                buffer
+                    .text(&buffer.start_iter(), &buffer.end_iter(), false)
+                    .to_string()
+            })
+            .unwrap_or_default()
+    }
+
+    /// A message for while the dialog is open.
+    fn say(&self, message: &str) {
+        if let Some(here) = self.here.upgrade() {
+            here.add_toast(toast(message));
+        }
+    }
+
+    /// A message for as the dialog closes, on the page beneath it.
+    fn report(&self, message: &str) {
+        self.toasts.add_toast(toast(message));
+    }
+
+    fn close(&self) {
+        if let Some(dialog) = self.dialog.upgrade() {
+            dialog.close();
+        }
+    }
+}
+
+/// Put the action buttons in, replacing what is there, from the settings as
+/// they are on disk now. Every click reads them again too, so a button never
+/// acts on settings older than the ones it was drawn from.
+fn fill_actions(ui: &Rc<Ui>) {
+    let Some(actions) = ui.actions.upgrade() else {
+        return;
+    };
     while let Some(child) = actions.first_child() {
         actions.remove(&child);
     }
@@ -268,21 +297,17 @@ fn fill_actions(
     let agents = available(&load_settings());
     if let Some((first, rest)) = agents.split_first() {
         let launch = {
-            let script = script.clone();
-            let toasts = toasts.clone();
-            let here = here.clone();
-            let text_of = text_of.clone();
-            let dialog = dialog.clone();
-            move |agent: &Agent| match launch(&load_settings(), agent, &script, &text_of()) {
+            let ui = ui.clone();
+            move |agent: &Agent| match launch(&load_settings(), agent, &ui.script, &ui.request()) {
                 Ok(()) => {
                     let place = if agent.terminal { "open in a terminal" } else { "running" };
-                    toasts.add_toast(toast(&format!(
+                    ui.report(&format!(
                         "{} is {place}; the row shows Edited once it saves",
                         agent.name
-                    )));
-                    dialog.close();
+                    ));
+                    ui.close();
                 }
-                Err(message) => here.add_toast(toast(&message)),
+                Err(message) => ui.say(&message),
             }
         };
         let label = format!("Open in {}", first.name);
@@ -311,9 +336,11 @@ fn fill_actions(
                 let item = menu_item(&format!("Open in {}", agent.name));
                 let agent = agent.clone();
                 let launch = launch.clone();
-                let popover_ = popover.clone();
+                let popover = popover.downgrade();
                 item.connect_clicked(move |_| {
-                    popover_.popdown();
+                    if let Some(popover) = popover.upgrade() {
+                        popover.popdown();
+                    }
                     launch(&agent);
                 });
                 others.append(&item);
@@ -329,30 +356,26 @@ fn fill_actions(
     }
 
     {
-        let script = script.clone();
-        let here = here.clone();
-        let text_of = text_of.clone();
+        let ui = ui.clone();
         copy.connect_clicked(move |button| {
             let settings = load_settings();
-            let text = ai_agents::prompt(settings.prompt_template(), &script.subject(&text_of()));
+            let text = ai_agents::prompt(settings.prompt_template(), &ui.script.subject(&ui.request()));
             button.clipboard().set_text(&text);
-            here.add_toast(toast("Prompt copied. Paste it into your agent"));
+            ui.say("Prompt copied. Paste it into your agent");
         });
     }
     {
-        let script = script.clone();
-        let here = here.clone();
-        let text_of = text_of.clone();
-        copy_source.connect_clicked(move |button| match std::fs::read_to_string(&script.file) {
+        let ui = ui.clone();
+        copy_source.connect_clicked(move |button| match std::fs::read_to_string(&ui.script.file) {
             Ok(source) => {
-                let text = ai_agents::prompt_with_source(&script.subject(&text_of()), &source);
+                let text = ai_agents::prompt_with_source(&ui.script.subject(&ui.request()), &source);
                 button.clipboard().set_text(&text);
-                here.add_toast(toast(
+                ui.say(
                     "Prompt and script copied. When the chat answers, copy its script and \
                      use Paste from clipboard",
-                ));
+                );
             }
-            Err(err) => here.add_toast(toast(&format!("Could not read the script: {err}"))),
+            Err(err) => ui.say(&format!("Could not read the script: {err}")),
         });
     }
 }
@@ -410,22 +433,21 @@ fn launch(settings: &Settings, agent: &Agent, script: &Script, request: &str) ->
 /// script. The Extensions page's edit watch does the rest.
 async fn paste_back(
     anchor: &impl IsA<gtk::Widget>,
-    script: &Script,
+    ui: &Ui,
     text: &str,
-    toasts: &adw::ToastOverlay,
-    here: &adw::ToastOverlay,
 ) -> bool {
     let Some(text) = ai_agents::extract_userscript(text) else {
-        here.add_toast(toast(
+        ui.say(
             "The clipboard does not hold one whole userscript: copy the script itself from \
              the chat, starting at // ==UserScript==",
-        ));
+        );
         return false;
     };
     let text = text.as_str();
+    let script = &ui.script;
     let current = std::fs::read_to_string(&script.file).unwrap_or_default();
     if current == text {
-        here.add_toast(toast("That is the script as it is now; nothing to change"));
+        ui.say("That is the script as it is now; nothing to change");
         return false;
     }
     let (before, after) = (current.lines().count(), text.lines().count());
@@ -454,11 +476,11 @@ async fn paste_back(
 
     match write_atomically(&script.file, text) {
         Ok(()) => {
-            toasts.add_toast(toast(&format!("Replaced {}", script.display_name)));
+            ui.report(&format!("Replaced {}", script.display_name));
             true
         }
         Err(err) => {
-            here.add_toast(toast(&format!("Could not write the script: {err}")));
+            ui.say(&format!("Could not write the script: {err}"));
             false
         }
     }
@@ -721,13 +743,20 @@ impl SettingsWindow {
         // an empty form opening on "the command is empty" scolds before the
         // user has done anything. Save is off from the start either way.
         let touched = Rc::new(std::cell::Cell::new(false));
+        // Weak, as in `Ui`: this runs from the entries' own handlers, inside
+        // the dialog it would otherwise keep alive.
         let validate = {
-            let dialog = dialog.clone();
-            let name = name.clone();
-            let command = command.clone();
-            let error = error.clone();
+            let dialog = dialog.downgrade();
+            let name = name.downgrade();
+            let command = command.downgrade();
+            let error = error.downgrade();
             let touched = touched.clone();
             move || {
+                let (Some(dialog), Some(name), Some(command), Some(error)) =
+                    (dialog.upgrade(), name.upgrade(), command.upgrade(), error.upgrade())
+                else {
+                    return;
+                };
                 let problem = match ai_agents::Command::parse(&command.text()) {
                     Err(err) => Some(err.to_string()),
                     Ok(_) if name.text().trim().is_empty() => Some("Give it a name".to_owned()),
@@ -870,23 +899,32 @@ impl SettingsWindow {
         buttons.append(&save);
         group.add(&buttons);
 
+        // Every widget below is held weakly by the handlers, which live in
+        // the same dialog: see `Ui`.
         let text_of = {
-            let view = view.clone();
+            let view = view.downgrade();
             move || {
-                let buffer = view.buffer();
-                buffer
-                    .text(&buffer.start_iter(), &buffer.end_iter(), false)
-                    .to_string()
+                view.upgrade()
+                    .map(|view| {
+                        let buffer = view.buffer();
+                        buffer
+                            .text(&buffer.start_iter(), &buffer.end_iter(), false)
+                            .to_string()
+                    })
+                    .unwrap_or_default()
             }
         };
         {
-            let warning = warning.clone();
-            let save = save.clone();
-            let text_of = text_of.clone();
-            view.buffer().connect_changed(move |_| {
-                let text = text_of();
-                warning.set_visible(!ai_agents::keeps_rules(&text));
-                save.set_sensitive(ai_agents::check_prompt(&text).is_ok());
+            let warning = warning.downgrade();
+            let save = save.downgrade();
+            view.buffer().connect_changed(move |buffer| {
+                let text = buffer
+                    .text(&buffer.start_iter(), &buffer.end_iter(), false)
+                    .to_string();
+                if let (Some(warning), Some(save)) = (warning.upgrade(), save.upgrade()) {
+                    warning.set_visible(!ai_agents::keeps_rules(&text));
+                    save.set_sensitive(ai_agents::check_prompt(&text).is_ok());
+                }
             });
         }
         {
@@ -902,10 +940,13 @@ impl SettingsWindow {
         }
         {
             let this = Rc::downgrade(self);
+            let view = view.downgrade();
             reset.connect_clicked(move |_| {
                 let Some(this) = this.upgrade() else { return };
                 this.settings.borrow_mut().prompt = None;
-                view.buffer().set_text(ai_agents::DEFAULT_PROMPT);
+                if let Some(view) = view.upgrade() {
+                    view.buffer().set_text(ai_agents::DEFAULT_PROMPT);
+                }
                 this.save();
             });
         }
