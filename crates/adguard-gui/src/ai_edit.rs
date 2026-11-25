@@ -452,10 +452,18 @@ async fn paste_back(
     }
 }
 
+/// Write `text` over `path` through a staging file in the same directory.
+///
+/// The staging file has a short name of its own rather than the script's
+/// with a suffix: AdGuard allows ids up to the filesystem's limit, and a
+/// suffix on one of those fails with `ENAMETOOLONG` (found by the stage 1
+/// review). It starts with a dot and ends in neither `.user.js` nor
+/// `.meta.json`, so nothing reading the directory takes it for a script.
 fn write_atomically(path: &Path, text: &str) -> std::io::Result<()> {
-    let mut staging = path.as_os_str().to_owned();
-    staging.push(".ai.part");
-    let staging = PathBuf::from(staging);
+    let dir = path.parent().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "the script has no directory")
+    })?;
+    let staging = dir.join(format!(".adguard-ui-paste-{}.part", std::process::id()));
     std::fs::write(&staging, text)?;
     if let Err(err) = std::fs::rename(&staging, path) {
         let _ = std::fs::remove_file(&staging);
