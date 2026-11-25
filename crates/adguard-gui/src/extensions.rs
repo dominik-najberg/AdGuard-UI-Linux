@@ -606,22 +606,38 @@ impl ExtensionsPage {
                     if !AutoUpdate::locate().is_some_and(|prefs| prefs.enabled()) {
                         break;
                     }
-                    // Decided and installed under the CLI slot, as the edit
-                    // watch's reload is: a switch-off of ours that is running
-                    // now has either finished, and the files say so, or not
-                    // started, and cannot slip in between the look and the
-                    // install, which would switch the script back on.
-                    // The switch is asked again once the slot is ours: the
-                    // wait for it can be thirty seconds, and switching off
-                    // during it must stop this install too.
-                    let outcome = cli.exclusively(RELOAD_WAIT, || {
-                        let wanted = AutoUpdate::locate().is_some_and(|prefs| prefs.enabled());
-                        (wanted && may_update_unattended(&locale, &id))
-                            .then(|| cli.userscripts_install(&url).map_err(|err| err.to_string()))
+                    // Confirmed unedited first, holding no lock: the
+                    // comparison takes the delivery lock for reading, so it
+                    // cannot run inside the delivery below. What it confirmed
+                    // is pinned by the bytes it read.
+                    let Some(seen) = may_update_unattended(&locale, &id) else {
+                        continue;
+                    };
+                    // Then the delivery lock and the CLI slot, in the order
+                    // *Update to x.y* takes them, so the two cannot wait on
+                    // each other. Inside both, the switch, the script's
+                    // being on and its bytes are asked again: a switch-off of
+                    // ours running a moment ago has finished and the files
+                    // say so, an edit since would show as different bytes,
+                    // and nothing of ours can change either before the
+                    // install. The fresh copy is recorded before any
+                    // comparison can see it, as `Copies::delivering` requires.
+                    let outcome = Copies::delivering(|| {
+                        cli.exclusively(RELOAD_WAIT, || {
+                            let wanted = AutoUpdate::locate().is_some_and(|prefs| prefs.enabled());
+                            let unchanged = wanted && still_as_seen(&id, &seen);
+                            unchanged.then(|| {
+                                let installed =
+                                    cli.userscripts_install(&url).map_err(|err| err.to_string());
+                                if installed.is_ok() {
+                                    rebase(&id, false);
+                                }
+                                installed
+                            })
+                        })
                     });
                     match outcome {
                         Some(Some(Ok(_))) => {
-                            rebase(&id, false);
                             let _ = carry(&id);
                             done.push(label);
                         }
@@ -3162,26 +3178,38 @@ fn read(locale: &Locale) -> Result<Loaded, String> {
 /// replaced with no copy of the edit kept. So this compares again, and an
 /// error at any step is a no. `userscript_prefs::eligible` says what the
 /// parts are and why.
-fn may_update_unattended(locale: &Locale, id: &str) -> bool {
+///
+/// The source as it was confirmed, for [`still_as_seen`] to check again under
+/// the locks; `None` is a no.
+fn may_update_unattended(locale: &Locale, id: &str) -> Option<Vec<u8>> {
     let (Ok(config), Some(dir), Some(copies)) =
         (Config::load(), adguard_core::paths::userscripts_dir(), Copies::locate())
     else {
-        return false;
+        return None;
     };
     let scripts = userscripts::read(&dir, &config.enabled_userscripts(), locale);
-    let Some(script) = scripts.iter().find(|script| script.id == id) else {
-        return false;
-    };
-    let Ok(current) = std::fs::read(userscripts::source_path(&dir, id)) else {
-        return false;
-    };
+    let script = scripts.iter().find(|script| script.id == id)?;
+    let current = std::fs::read(userscripts::source_path(&dir, id)).ok()?;
     let version = script.version.as_deref();
     let (Ok(edited), Ok(pending)) =
         (copies.observe(id, version, &current), copies.pending(id, version, &current))
     else {
-        return false;
+        return None;
     };
     userscript_prefs::eligible(script.enabled, edited, pending.is_some(), script.actionable())
+        .then_some(current)
+}
+
+/// Whether `id` is still switched on and its source still the bytes
+/// [`may_update_unattended`] confirmed. Asked under the delivery lock and the
+/// CLI slot, where no comparison may run: equal bytes need none, since they
+/// are the ones already compared.
+fn still_as_seen(id: &str, seen: &[u8]) -> bool {
+    let (Ok(config), Some(dir)) = (Config::load(), adguard_core::paths::userscripts_dir()) else {
+        return false;
+    };
+    is_enabled(id, &config.enabled_userscripts())
+        && std::fs::read(userscripts::source_path(&dir, id)).is_ok_and(|now| now == seen)
 }
 
 /// Take what is installed for `id` now as AdGuard's own copy. Run on the
