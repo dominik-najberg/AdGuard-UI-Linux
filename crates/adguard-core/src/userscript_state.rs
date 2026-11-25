@@ -257,26 +257,7 @@ impl Copies {
         };
 
         if recorded != version {
-            let mine_version = read_text(&dir.join(MINE_VERSION));
-            let has_mine = dir.join(MINE).is_file();
-            if has_mine && mine_version.as_deref() == Some(recorded.as_str()) {
-                // The edit was made on the copy being replaced: keep that copy
-                // as its ancestor before the new one takes its place.
-                write_atomically(&dir.join(MINE_ANCESTOR), &base)?;
-            } else if has_mine && dir.join(MINE_ANCESTOR).is_file() {
-                // An edit from an older release, already set aside with its
-                // ancestor by an earlier update. Another release arriving does
-                // not make that pair any less mergeable, and it is the only
-                // record of the edit: it stays until the user replaces it with
-                // a new one or reverts.
-            } else {
-                // No edit, or one without the copy it was made on — nothing a
-                // merge could use.
-                remove_if_present(&dir.join(MINE))?;
-                remove_if_present(&dir.join(MINE_VERSION))?;
-                remove_if_present(&dir.join(MINE_ANCESTOR))?;
-            }
-            write_base(&dir, version, current)?;
+            new_release(&dir, &recorded, &base, version, current)?;
             return Ok(false);
         }
 
@@ -327,7 +308,19 @@ impl Copies {
     /// edit up. [`Self::discard_edit`] is for when they have.
     pub fn rebase(&self, id: &str, version: Option<&str>, current: &[u8]) -> io::Result<()> {
         let _held = exclusive();
-        write_base(&self.dir(id)?, version.unwrap_or(""), current)
+        let dir = self.dir(id)?;
+        let version = version.unwrap_or("");
+        // A fetch that moved the version is a release like any other, and
+        // the kept edit's ancestor has to be set aside the same way — or the
+        // next update would find an edit with no ancestor and drop it.
+        let recorded = read_text(&dir.join(BASE_VERSION));
+        let base = fs::read(dir.join(BASE)).ok();
+        match (recorded, base) {
+            (Some(recorded), Some(base)) if recorded != version => {
+                new_release(&dir, &recorded, &base, version, current)
+            }
+            _ => write_base(&dir, version, current),
+        }
     }
 
     /// Forget the kept edit, on the user's say-so — a reinstall whose dialog
@@ -390,6 +383,37 @@ impl Copies {
         }
         Ok(self.root.join(id))
     }
+}
+
+/// AdGuard delivered `current` at `version`, replacing `base` at `recorded`:
+/// set the kept edit aside with the copy it was made on, then record the new
+/// pristine copy.
+fn new_release(
+    dir: &Path,
+    recorded: &str,
+    base: &[u8],
+    version: &str,
+    current: &[u8],
+) -> io::Result<()> {
+    let mine_version = read_text(&dir.join(MINE_VERSION));
+    let has_mine = dir.join(MINE).is_file();
+    if has_mine && mine_version.as_deref() == Some(recorded) {
+        // The edit was made on the copy being replaced: keep that copy as its
+        // ancestor before the new one takes its place.
+        write_atomically(&dir.join(MINE_ANCESTOR), base)?;
+    } else if has_mine && dir.join(MINE_ANCESTOR).is_file() {
+        // An edit from an older release, already set aside with its ancestor
+        // by an earlier update. Another release arriving does not make that
+        // pair any less mergeable, and it is the only record of the edit: it
+        // stays until the user replaces it with a new one or reverts.
+    } else {
+        // No edit, or one without the copy it was made on — nothing a merge
+        // could use.
+        remove_if_present(&dir.join(MINE))?;
+        remove_if_present(&dir.join(MINE_VERSION))?;
+        remove_if_present(&dir.join(MINE_ANCESTOR))?;
+    }
+    write_base(dir, version, current)
 }
 
 fn write_base(dir: &Path, version: &str, current: &[u8]) -> io::Result<()> {
@@ -721,6 +745,21 @@ mod tests {
         fs::write(&target, b"edited").unwrap();
         copies.revert(&id, &target).expect("revert a 245-byte id");
         assert_eq!(fs::read(&target).unwrap(), b"original");
+    }
+
+    /// A fetch of ours that lands a new version sets the edit aside exactly
+    /// as an update seen by `observe` does, so a later release keeps it.
+    #[test]
+    fn rebasing_onto_a_new_version_keeps_the_edit_mergeable() {
+        let sandbox = Sandbox::new("rebase-new-version");
+        let copies = sandbox.copies();
+        copies.observe("x", Some("1"), b"original").unwrap();
+        copies.observe("x", Some("1"), b"my edit").unwrap();
+        copies.rebase("x", Some("2"), b"release 2").unwrap();
+        assert_eq!(sandbox.kept("x", MINE_ANCESTOR).as_deref(), Some(&b"original"[..]));
+        copies.observe("x", Some("3"), b"release 3").unwrap();
+        assert_eq!(sandbox.kept("x", MINE).as_deref(), Some(&b"my edit"[..]));
+        assert_eq!(sandbox.kept("x", MINE_ANCESTOR).as_deref(), Some(&b"original"[..]));
     }
 
     #[test]
