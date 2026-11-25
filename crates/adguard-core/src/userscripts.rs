@@ -44,6 +44,9 @@ use crate::model::{Recommended, Userscript, INSTALL_LINKS, RECOMMENDED};
 /// The suffix a metadata file carries, after the id.
 const META_SUFFIX: &str = ".meta.json";
 
+/// The suffix the script's source carries, after the id.
+const SOURCE_SUFFIX: &str = ".user.js";
+
 /// Everything the Extensions page renders, from one point in time.
 ///
 /// `enabled` is the `meta:` paths out of `proxy.yaml`'s `userscripts:` list —
@@ -65,8 +68,147 @@ pub fn read(dir: &Path, enabled: &[&str], locale: &Locale) -> Vec<Userscript> {
         .collect();
 
     mark_ambiguous(&mut scripts);
-    scripts.sort_by_key(|script| script.display_name().to_lowercase());
+    sort(&mut scripts);
     scripts
+}
+
+/// Order rows by what they are called on screen, case-insensitively.
+///
+/// Public because the caller lays the user's own names over the rows
+/// ([`crate::userscript_state::Aliases::apply`]) after [`read`] has sorted
+/// them, and a renamed script should sit where its new name puts it.
+pub fn sort(scripts: &mut [Userscript]) {
+    scripts.sort_by_key(|script| script.display_name().to_lowercase());
+}
+
+/// The installed source of a script: `<id>.user.js` beside its metadata.
+pub fn source_path(dir: &Path, id: &str) -> std::path::PathBuf {
+    dir.join(format!("{id}{SOURCE_SUFFIX}"))
+}
+
+/// The page a script was installed from, worked out from its `downloadURL`.
+///
+/// **The homepage is not this, and #9's screenshot is why the cog needs
+/// both.** A script's `@homepage` is whatever its author says it is — for a
+/// Greasy Fork downloader it was the author's own product site — while the
+/// person who installed it remembers the listing they clicked *Install* on.
+/// AdGuard records only the address it downloaded from, which for every host
+/// worth handling here is a fixed transformation of that listing's address:
+///
+/// | `downloadURL` | page |
+/// | --- | --- |
+/// | `update.greasyfork.org/scripts/<n>/<file>` | `greasyfork.org/scripts/<n>` |
+/// | `greasyfork.org/scripts/<n>/code/<file>` | `greasyfork.org/scripts/<n>` |
+/// | the same two on `sleazyfork.org` | `sleazyfork.org/scripts/<n>` |
+/// | `openuserjs.org/install/<user>/<file>.user.js` | `openuserjs.org/scripts/<user>/<file>` |
+/// | `raw.githubusercontent.com/<o>/<r>/<ref>/<path>` | `github.com/<o>/<r>/blob/<ref>/<path>` |
+/// | `github.com/<o>/<r>/raw/<ref>/<path>` | `github.com/<o>/<r>/blob/<ref>/<path>` |
+/// | `github.com/<o>/<r>/releases/download/<tag>/<file>` | `github.com/<o>/<r>/releases/tag/<tag>` |
+/// | `gist.githubusercontent.com/<user>/<id>/raw/…` | `gist.github.com/<user>/<id>` |
+///
+/// `None` for any other host, and the caller offers the download address
+/// itself instead — which is still where the script came from, just not a
+/// page about it. Path segments are carried over still escaped: they were
+/// valid in the address AdGuard fetched, and decoding them could only make
+/// them less so.
+pub fn script_page(download_url: &str) -> Option<String> {
+    let (host, path) = split_url(download_url)?;
+    let segments: Vec<&str> = path.split('/').filter(|segment| !segment.is_empty()).collect();
+    let host = host.to_ascii_lowercase();
+    let at = |index: usize| segments.get(index).copied();
+
+    match host.as_str() {
+        "greasyfork.org" | "update.greasyfork.org" | "sleazyfork.org" | "update.sleazyfork.org" => {
+            let site = host.trim_start_matches("update.");
+            // A language prefix (`/en/scripts/…`) is legal on the listing
+            // host, so the number is found after `scripts` wherever it is.
+            let scripts = segments.iter().position(|segment| *segment == "scripts")?;
+            let number = at(scripts + 1)?;
+            Some(format!("https://{site}/scripts/{number}"))
+        }
+        "openuserjs.org" => {
+            // `/install/<user>/<file>.user.js`, and the older
+            // `/src/scripts/<user>/<file>.user.js` that serves the same file.
+            let (user, file) = match (at(0)?, at(1)?) {
+                ("install", user) => (user, at(2)?),
+                ("src", "scripts") => (at(2)?, at(3)?),
+                _ => return None,
+            };
+            let name = file.strip_suffix(".user.js").unwrap_or(file);
+            Some(format!("https://openuserjs.org/scripts/{user}/{name}"))
+        }
+        "raw.githubusercontent.com" => {
+            let (owner, repo) = (at(0)?, at(1)?);
+            // `refs/heads/<branch>` and `refs/tags/<tag>` are the long form of
+            // the ref segment GitHub's own *Raw* button now links to.
+            let (reference, rest) = match (at(2)?, at(3)) {
+                ("refs", Some("heads" | "tags")) => (at(4)?, 5),
+                (reference, _) => (reference, 3),
+            };
+            let file = segments.get(rest..).filter(|file| !file.is_empty())?.join("/");
+            Some(format!("https://github.com/{owner}/{repo}/blob/{reference}/{file}"))
+        }
+        "github.com" => {
+            let (owner, repo) = (at(0)?, at(1)?);
+            match (at(2)?, at(3)?) {
+                ("raw", reference) => {
+                    let file = segments.get(4..).filter(|file| !file.is_empty())?.join("/");
+                    Some(format!("https://github.com/{owner}/{repo}/blob/{reference}/{file}"))
+                }
+                ("releases", "download") => {
+                    let tag = at(4)?;
+                    Some(format!("https://github.com/{owner}/{repo}/releases/tag/{tag}"))
+                }
+                _ => None,
+            }
+        }
+        "gist.githubusercontent.com" | "gist.github.com" => {
+            let (user, gist) = (at(0)?, at(1)?);
+            // Only a raw address: anything else on `gist.github.com` is
+            // already a page, and is not what AdGuard downloads from.
+            (at(2)? == "raw").then(|| format!("https://gist.github.com/{user}/{gist}"))
+        }
+        _ => None,
+    }
+}
+
+/// The host of an http(s) address, for the dim note beside a menu item —
+/// `greasyfork.org`, not the whole escaped address.
+///
+/// Lowercased, without a port, a login or a leading `www.`: it is there to be
+/// recognised at a glance. `None` for anything that is not http or https.
+pub fn host(url: &str) -> Option<String> {
+    let (host, _) = split_url(url)?;
+    let host = host.to_ascii_lowercase();
+    Some(host.strip_prefix("www.").map_or(host.clone(), str::to_owned))
+}
+
+/// An http(s) address cut into its host and its path, the query and fragment
+/// dropped.
+///
+/// Hand-rolled rather than a URL crate's, for the reason the module header
+/// gives about JSON: this workspace has no URL parser and these addresses are
+/// ones AdGuard has already fetched, so the only question is where the host
+/// ends. A login (`user@`) and a port are stripped from the host.
+fn split_url(url: &str) -> Option<(&str, &str)> {
+    let url = url.trim();
+    let rest = ["https://", "http://"]
+        .iter()
+        .find_map(|scheme| {
+            url.get(..scheme.len())
+                .filter(|head| head.eq_ignore_ascii_case(scheme))
+                .map(|_| &url[scheme.len()..])
+        })?;
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let (authority, tail) = rest.split_at(end);
+    let path = tail.split(['?', '#']).next().unwrap_or("");
+    let host = authority.rsplit('@').next().unwrap_or(authority);
+    // A port, but not the colons of a bracketed IPv6 address.
+    let host = match host.rfind(':') {
+        Some(colon) if !host[colon..].contains(']') => &host[..colon],
+        _ => host,
+    };
+    (!host.is_empty()).then_some((host, path))
 }
 
 /// The recommended scripts the user does not have.
@@ -180,6 +322,11 @@ fn is_enabled(id: &str, enabled: &[&str]) -> bool {
 /// Compared against the other script's id and title but never against its own:
 /// every id contains itself, so a self-comparison would mark every script on
 /// the page unreachable.
+///
+/// **Against [`Userscript::name`], never a user's alias.** A rename lives in
+/// this application alone ([`crate::userscript_state::Aliases`]); the CLI
+/// has never heard of it and goes on matching the title the metadata carries,
+/// so that is the only title that can collide.
 fn mark_ambiguous(scripts: &mut [Userscript]) {
     let others: Vec<(String, String)> = scripts
         .iter()
@@ -273,6 +420,10 @@ impl Meta {
             // Set by `mark_ambiguous` once every sibling is known; it cannot be
             // decided from one file.
             ambiguous: false,
+            // Both this application's, not AdGuard's: the caller lays them
+            // over the row once it has read its own files.
+            alias: None,
+            edited: false,
         }
     }
 }
@@ -307,6 +458,8 @@ mod tests {
             download_url: None,
             enabled: false,
             ambiguous: false,
+            alias: None,
+            edited: false,
         }
     }
 
@@ -770,5 +923,123 @@ mod tests {
     fn recommended_ignores_unrelated_scripts() {
         let installed = vec![script("sponsorblock", "SponsorBlock")];
         assert_eq!(recommended(&installed).len(), 4);
+    }
+
+    /// The case #9's screenshot showed: a Greasy Fork script whose homepage is
+    /// its author's product site. The page it was installed from is the
+    /// listing, and the address AdGuard kept is enough to find it.
+    #[test]
+    fn a_greasy_fork_update_address_leads_to_the_listing() {
+        let url = "https://update.greasyfork.org/scripts/597631/%F0%9F%93%A5%20Free%20All-in-One.user.js";
+        assert_eq!(script_page(url).as_deref(), Some("https://greasyfork.org/scripts/597631"));
+        assert_eq!(
+            script_page("https://update.sleazyfork.org/scripts/12/x.user.js").as_deref(),
+            Some("https://sleazyfork.org/scripts/12")
+        );
+    }
+
+    /// The older `code/` form, with the slug still on the number and a
+    /// language in front: the listing keeps the slug, which Greasy Fork
+    /// accepts, and drops the language, which it does not need.
+    #[test]
+    fn a_greasy_fork_code_address_leads_to_the_listing() {
+        let url = "https://greasyfork.org/en/scripts/28497-remove-web-limits/code/x.user.js";
+        assert_eq!(
+            script_page(url).as_deref(),
+            Some("https://greasyfork.org/scripts/28497-remove-web-limits")
+        );
+    }
+
+    #[test]
+    fn an_openuserjs_install_address_leads_to_the_script_page() {
+        assert_eq!(
+            script_page("https://openuserjs.org/install/someone/Nice_Script.user.js").as_deref(),
+            Some("https://openuserjs.org/scripts/someone/Nice_Script")
+        );
+        assert_eq!(
+            script_page("https://openuserjs.org/src/scripts/someone/Nice_Script.user.js").as_deref(),
+            Some("https://openuserjs.org/scripts/someone/Nice_Script")
+        );
+    }
+
+    /// The address of this application's own helper, among others.
+    #[test]
+    fn a_raw_github_address_leads_to_the_file_on_github() {
+        let url = "https://raw.githubusercontent.com/dominik-najberg/AdGuard-UI-Linux/main/data/userscripts/adguard-ui-install-links.user.js";
+        assert_eq!(
+            script_page(url).as_deref(),
+            Some("https://github.com/dominik-najberg/AdGuard-UI-Linux/blob/main/data/userscripts/adguard-ui-install-links.user.js")
+        );
+        // The long ref form the *Raw* button produces now.
+        assert_eq!(
+            script_page("https://raw.githubusercontent.com/o/r/refs/heads/dev/a/b.user.js").as_deref(),
+            Some("https://github.com/o/r/blob/dev/a/b.user.js")
+        );
+        // An owner and a repository with no file is not a script.
+        assert_eq!(script_page("https://raw.githubusercontent.com/o/r/main"), None);
+    }
+
+    #[test]
+    fn github_raw_and_release_addresses_lead_to_their_pages() {
+        assert_eq!(
+            script_page("https://github.com/o/r/raw/main/x.user.js").as_deref(),
+            Some("https://github.com/o/r/blob/main/x.user.js")
+        );
+        assert_eq!(
+            script_page("https://github.com/o/r/releases/download/v1.2/x.user.js").as_deref(),
+            Some("https://github.com/o/r/releases/tag/v1.2")
+        );
+        assert_eq!(script_page("https://github.com/o/r/issues/1"), None);
+    }
+
+    #[test]
+    fn a_raw_gist_address_leads_to_the_gist() {
+        let url = "https://gist.githubusercontent.com/someone/abc123/raw/def456/x.user.js";
+        assert_eq!(script_page(url).as_deref(), Some("https://gist.github.com/someone/abc123"));
+    }
+
+    /// AdGuard's own CDN has no page per script, and a guessed one would be a
+    /// link that 404s. The caller shows the download address instead.
+    #[test]
+    fn an_unknown_host_has_no_derived_page() {
+        assert_eq!(
+            script_page("https://userscripts.adtidy.org/release/assistant/4.3/assistant.user.js"),
+            None
+        );
+        assert_eq!(script_page("not a url"), None);
+        assert_eq!(script_page("file:///tmp/x.user.js"), None);
+    }
+
+    /// A query or fragment is not part of the path a page is built from.
+    #[test]
+    fn a_query_does_not_leak_into_the_page() {
+        assert_eq!(
+            script_page("https://update.greasyfork.org/scripts/1/x.user.js?v=2").as_deref(),
+            Some("https://greasyfork.org/scripts/1")
+        );
+    }
+
+    #[test]
+    fn the_host_note_is_short_and_recognisable() {
+        assert_eq!(host("https://www.Example.org:8443/a").as_deref(), Some("example.org"));
+        assert_eq!(host("http://user@127.0.0.1:8731/hello.user.js").as_deref(), Some("127.0.0.1"));
+        assert_eq!(host("https://greasyfork.org").as_deref(), Some("greasyfork.org"));
+        assert_eq!(host("ftp://example.org/x"), None);
+    }
+
+    /// The alias is what a row is called and sorted by; the original title is
+    /// still what the CLI matches, so it alone decides ambiguity.
+    #[test]
+    fn an_alias_renames_the_row_but_not_what_the_cli_matches() {
+        let mut scripts = vec![script("extra", "Extra"), script("other", "Other")];
+        scripts[1].alias = Some("Extra stuff".to_owned());
+        mark_ambiguous(&mut scripts);
+        assert!(!scripts[0].ambiguous, "the alias contains `extra`, but the CLI never sees it");
+        assert_eq!(scripts[1].display_name(), "Extra stuff");
+        assert_eq!(scripts[1].original_name(), "Other");
+
+        // A blank alias is no alias.
+        scripts[1].alias = Some("  ".to_owned());
+        assert_eq!(scripts[1].display_name(), "Other");
     }
 }

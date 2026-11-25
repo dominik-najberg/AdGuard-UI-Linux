@@ -2198,6 +2198,20 @@ That makes *Reinstall* buildable from the recorded `downloadURL`, and it is the 
 
 **It also turns a disabled script back on.** The script above was disabled before the second install and enabled after it, with no mention of the fact in the output. Anything offering a reinstall has to disclose that, because the user who disabled a script and then updates it did not ask for it to start running again.
 
+### Only `check-update` updates a userscript, and it goes by the version alone
+
+**The daemon does not update userscripts on its own.** Read from the reference machine's `app.log` and its rotations, covering 4 October to 25 November 2026: `UserscriptsManager update_all` appears only right after a `check_all_updates` that a CLI invocation started (`AdGuardCli: Start AdGuard CLI App` on the line before), never from the running daemon by itself. So a script installed today stays at its version until somebody runs `check-update` — the About page's button, or a terminal.
+
+**The decision is the metadata's `version` against the remote one, not the file's content.** Measured 25 November 2026 on 1.5.1, in a throwaway `$XDG_DATA_HOME` seeded with the real `proxy.yaml` and `userscripts/`: two scripts were given an extra comment line in their `.user.js` at an unchanged version, and a third was given the same line *and* its metadata aged to `0.0.1`. `check-update` reported `2 userscript(s) updated`. The two edited at the current version came through **byte-for-byte untouched**, logged as `version 1.0.0 is the latest (remote version is 1.0.0)`. The aged one came back at `2.5.117`, identical to the real install's copy, **with the edit gone**. The other updated script was AdGuard Extra, really behind (1.1.38 to 1.1.41). So an edit survives `check-update` until the script's author publishes a new version, and is then overwritten without a word. That is why the Extensions page keeps the edit and the copy it was made on (`architecture.md` §7).
+
+### An edited source is not served until AdGuard reloads it, and a no-op `enable` does that
+
+**AdGuard serves a userscript from memory, not from the file.** A page through the proxy carries the scripts in one `<script src="//local.adguard.org?ts=<n>&name=…&type=user-script">`, and fetching that address returns them wrapped. Measured 25 November 2026 on 1.5.1, against the running daemon, with this application's own helper script (backed up first and restored byte-for-byte afterwards): after a comment line was appended to its `.user.js`, the page still carried the same `ts=`, and the bundle still lacked the line after 2 seconds and again after 22.
+
+**`userscripts enable <id>` on the already-enabled script made it re-read.** The confirmation was the usual `enabled successfully`, `proxy.yaml` was rewritten (its mtime moved, its content not), the next page carried a new `ts=`, and the bundle served the edit. Restoring the file and enabling again served the original. So the Extensions page, when it sees a switched-on script's source change, runs that `enable` to make the change live. It never does so for a switched-off script, so it never switches anything on. An ambiguous script cannot be named this way, and its row says to restart protection instead.
+
+**What was not measured**: whether `restart` reloads sources too (it presumably does, being a fresh start, but nobody restarted protection to find out). Also unmeasured: whether `check-update` turns a disabled script back on the way a reinstall does.
+
 ### Every refusal is exit 0, and each has its own sentence
 
 [§3](#3-exit-codes-are-only-half-trustworthy) once more. Success must be defined positively, and the refusals are worth telling apart because they mean different things:

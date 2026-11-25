@@ -24,14 +24,15 @@
 //! is where the condition is computed.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 use std::time::Duration;
 
+use adguard_core::userscript_state::{Aliases, Copies};
 use adguard_core::userscripts::{self, Helper};
 use adguard_core::{Cli, Config, Locale, Userscript, INSTALL_LINKS};
 use adw::prelude::*;
-use gtk::glib;
+use gtk::{gio, glib};
 use gtk4 as gtk;
 use libadwaita as adw;
 
@@ -60,8 +61,13 @@ struct Row {
     /// The trash, held so it can be greyed out with the switch while something
     /// else is in flight against this script.
     remove: gtk::Button,
-    /// The cog, on the rows that have anything to put in it.
-    menu: Option<gtk::MenuButton>,
+    /// The cog.
+    menu: gtk::MenuButton,
+    /// The *Edited* note beside the cog, and the cog's *Revert to original*:
+    /// shown together, whenever the source differs from AdGuard's copy, and
+    /// moved without a rebuild when an editor saves ([`ExtensionsPage::watch`]).
+    edited: gtk::Box,
+    revert: gtk::Button,
 }
 
 impl Row {
@@ -70,12 +76,35 @@ impl Row {
     /// One place rather than three call sites, because a row that is half
     /// fenced is worse than one that is not fenced at all: the switch would be
     /// safe and the trash would not.
+    ///
+    /// An ambiguous row's switch and trash stay out whatever this is told:
+    /// they cannot work for it at all, and finishing some other action on the
+    /// row must not hand them back.
     fn set_busy(&self, busy: bool) {
-        self.switch.set_sensitive(!busy);
-        self.remove.set_sensitive(!busy);
-        if let Some(menu) = &self.menu {
-            menu.set_sensitive(!busy);
-        }
+        let actionable = self.script.borrow().actionable();
+        self.switch.set_sensitive(!busy && actionable);
+        self.remove.set_sensitive(!busy && actionable);
+        self.menu.set_sensitive(!busy);
+    }
+
+    /// Paint the name, from the last state on record.
+    fn show_name(&self) {
+        let script = self.script.borrow();
+        self.switch.set_title(script.display_name());
+        // The original name stays one hover away: it is what AdGuard, its
+        // logs and `adguard-cli userscripts list` go on calling the script.
+        let original = script
+            .alias
+            .is_some()
+            .then(|| format!("Originally “{}”", script.original_name()));
+        self.switch.set_tooltip_text(original.as_deref());
+    }
+
+    /// Show or hide everything that says the source was edited.
+    fn show_edited(&self, edited: bool) {
+        self.script.borrow_mut().edited = edited;
+        self.edited.set_visible(edited);
+        self.revert.set_visible(edited);
     }
 }
 
@@ -86,9 +115,14 @@ impl Row {
 /// sentences sharing a two-line ellipsised subtitle leave whichever came second
 /// truncated, and the fact that a control does nothing outranks the script's
 /// account of itself.
+///
+/// It no longer says *rename* the other one. The cog now has a *Rename…*
+/// that changes only what this application shows, and the CLI's substring
+/// match never sees it — so pointing at renaming here would send the user to
+/// a control that cannot fix this.
 const AMBIGUOUS_SUBTITLE: &str =
     "AdGuard cannot tell this apart from another installed script, so it cannot be \
-     switched or removed — rename or remove the other one";
+     switched or removed until the other one is removed";
 
 /// What the add row's group says above the field.
 ///
@@ -148,6 +182,15 @@ pub struct ExtensionsPage {
     asking: RefCell<Option<String>>,
     /// Whether this run has already suggested the browser helper.
     hinted: Cell<bool>,
+    /// Watches AdGuard's `userscripts/` directory for a save from an editor
+    /// ([`Self::watch`]). Held, because a monitor nobody holds is dropped, and
+    /// a dropped monitor stops reporting.
+    monitor: RefCell<Option<gio::FileMonitor>>,
+    /// The pending re-check after a burst of changes in that directory.
+    settle_edits: RefCell<Option<glib::SourceId>>,
+    /// The ids whose source changed in that burst: the ones to have AdGuard
+    /// load again once it is over.
+    touched: RefCell<HashSet<String>>,
 }
 
 impl ExtensionsPage {
@@ -177,6 +220,9 @@ impl ExtensionsPage {
             offers: RefCell::new(VecDeque::new()),
             asking: RefCell::new(None),
             hinted: Cell::new(false),
+            monitor: RefCell::new(None),
+            settle_edits: RefCell::new(None),
+            touched: RefCell::new(HashSet::new()),
         });
 
         // *Show* rather than an install from the banner: the group it points
@@ -193,6 +239,7 @@ impl ExtensionsPage {
             }
         });
 
+        this.watch();
         this.reload();
         this
     }
@@ -359,7 +406,7 @@ impl ExtensionsPage {
                 return;
             }
             let field = Some((entry.clone(), spinner.clone()));
-            glib::spawn_future_local(async move { this.install(url, field).await });
+            glib::spawn_future_local(async move { this.install(url, field, None).await });
         });
 
         group.add(&entry);
@@ -596,15 +643,15 @@ impl ExtensionsPage {
 
     /// One script's row: a switch, what it is, and the controls that change it.
     fn row(self: &Rc<Self>, script: &Userscript) -> adw::SwitchRow {
-        let switch = adw::SwitchRow::builder()
-            .title(script.display_name())
-            .subtitle(subtitle(script))
-            .active(script.enabled)
-            .build();
+        let switch = adw::SwitchRow::builder().active(script.enabled).build();
         // A userscript's name and description are written by whoever wrote the
         // script. `&` is ordinary in both, and `use-markup` defaults to true —
         // left on, Pango fails the whole string and the row renders mangled.
+        // Off *before* either is set: given to the builder, they were parsed
+        // as markup once on the way in, which is the warning a `&` in a Greasy
+        // Fork name printed on every load. The title is [`Row::show_name`]'s.
         switch.set_use_markup(false);
+        switch.set_subtitle(&subtitle(script));
         switch.set_subtitle_lines(2);
 
         // The same glyph the Protection, DNS and Filters rows use for a
@@ -615,30 +662,26 @@ impl ExtensionsPage {
         caveat.set_visible(script.ambiguous);
         switch.add_prefix(&caveat);
 
+        let edited = edited_note();
         let remove = self.remove_button(script);
-        let menu = self.menu_button(script);
+        let (menu, revert) = self.menu_button(script);
 
         // Order matters: the trash goes last so it is furthest from the switch,
         // the two controls that must never be confused sitting at opposite ends
-        // of the row's suffix area.
-        if let Some(menu) = &menu {
-            switch.add_suffix(menu);
-        }
+        // of the row's suffix area. The note sits before the cog, whose
+        // *Revert to original* is what it is about.
+        switch.add_suffix(&edited);
+        switch.add_suffix(&menu);
         switch.add_suffix(&remove);
 
         if script.ambiguous {
-            // Everything that writes is unreachable for this script, so nothing
-            // that writes is offered. The row still reads — its name, version
-            // and state are all true, and hiding it would be a worse lie than
-            // showing a control that does not work.
+            // The switch and the trash go through the CLI's substring match,
+            // which cannot single this script out, so neither is offered. The
+            // cog stays: renaming, editing and the links are this
+            // application's and the browser's business, not the CLI's, and
+            // its *Reinstall* is left out ([`Self::menu_button`]).
             switch.set_sensitive(false);
             remove.set_sensitive(false);
-            if let Some(menu) = &menu {
-                // The homepage would be safe, but a half-live cog invites a
-                // second look for the entry that is missing. The link is not
-                // worth that.
-                menu.set_sensitive(false);
-            }
         }
 
         let this = Rc::downgrade(self);
@@ -654,43 +697,60 @@ impl ExtensionsPage {
             this.toggle(&id, switch.is_active());
         });
 
-        self.rows.borrow_mut().insert(
-            script.id.clone(),
-            Row {
-                switch: switch.clone(),
-                script: RefCell::new(script.clone()),
-                remove,
-                menu,
-            },
-        );
+        let row = Row {
+            switch: switch.clone(),
+            script: RefCell::new(script.clone()),
+            remove,
+            menu,
+            edited,
+            revert,
+        };
+        row.show_name();
+        row.show_edited(script.edited);
+        self.rows.borrow_mut().insert(script.id.clone(), row);
 
         switch
     }
 
-    /// The cog: a homepage to open, and a reinstall.
+    /// The cog: where the script came from, what it is called, its source,
+    /// and a reinstall. Returns the button and its *Revert to original*,
+    /// which the row shows only while the source is edited.
     ///
-    /// `None` when the script offers neither, which is the ordinary case for
-    /// one installed from a bare URL with no `@homepage`. An empty menu button
-    /// is a control that opens onto nothing.
+    /// **Two links, because a homepage is not where a script came from.** The
+    /// author's `@homepage` can be anything — for #9's Greasy Fork downloader
+    /// it was the author's product site — while the user remembers the listing
+    /// they installed it from. That page is worked out from the address AdGuard
+    /// downloaded from ([`userscripts::script_page`]); for a host with no page
+    /// to work out, the address itself is offered as *Installed from*. When
+    /// the two would open the same address, only one is shown.
     ///
-    /// *Edit* and *Storage*, which AdGuard for Windows also offers here, are
-    /// out by decision rather than provisionally — `architecture.md` §7.
-    fn menu_button(self: &Rc<Self>, script: &Userscript) -> Option<gtk::MenuButton> {
-        let has_home = script.homepage.is_some();
-        let has_source = script.download_url.is_some();
-        if !has_home && !has_source {
-            return None;
-        }
-
+    /// *Storage*, which AdGuard for Windows also offers here, is out by
+    /// decision — `architecture.md` §7. *Edit* is in, through the user's own
+    /// editor rather than one of ours.
+    fn menu_button(self: &Rc<Self>, script: &Userscript) -> (gtk::MenuButton, gtk::Button) {
         let items = gtk::Box::builder()
             .orientation(gtk::Orientation::Vertical)
             .spacing(2)
             .build();
         let popover = gtk::Popover::builder().child(&items).build();
 
-        if let Some(homepage) = &script.homepage {
-            let button = menu_item("Homepage");
-            let uri = homepage.clone();
+        let source = script.download_url.as_deref().map(|url| {
+            match userscripts::script_page(url) {
+                Some(page) => ("Script page", page),
+                None => ("Installed from", url.to_owned()),
+            }
+        });
+        let homepage = script
+            .homepage
+            .clone()
+            .filter(|home| source.as_ref().is_none_or(|(_, page)| !same_address(page, home)));
+        let links = source
+            .into_iter()
+            .chain(homepage.map(|home| ("Author’s homepage", home)));
+        let mut linked = false;
+        for (label, uri) in links {
+            let button = menu_item(label, userscripts::host(&uri).as_deref());
+            button.set_tooltip_text(Some(&uri));
             let popover_ = popover.clone();
             button.connect_clicked(move |button| {
                 popover_.popdown();
@@ -698,26 +758,57 @@ impl ExtensionsPage {
                 // About page's links already use and it respects the portal.
                 gtk::UriLauncher::new(&uri).launch(
                     button.root().and_downcast::<gtk::Window>().as_ref(),
-                    gtk::gio::Cancellable::NONE,
+                    gio::Cancellable::NONE,
                     |_| {},
                 );
             });
             items.append(&button);
+            linked = true;
+        }
+        if linked {
+            items.append(&menu_separator());
         }
 
-        if script.download_url.is_some() {
-            let button = menu_item("Reinstall");
+        let rename = menu_item("Rename…", None);
+        items.append(&rename);
+        let edit = menu_item("Edit source…", None);
+        items.append(&edit);
+        let revert = menu_item("Revert to original…", None);
+        items.append(&revert);
+
+        // Not on an ambiguous row. A reinstall is an install by address, which
+        // the substring trap does not reach — but it also switches the script
+        // back on, and a switched-on script this page cannot switch off again
+        // is the one outcome worse than not offering it.
+        if script.download_url.is_some() && script.actionable() {
+            items.append(&menu_separator());
+            let reinstall = menu_item("Reinstall", None);
+            let this = Rc::downgrade(self);
+            let id = script.id.clone();
+            let popover_ = popover.clone();
+            reinstall.connect_clicked(move |_| {
+                popover_.popdown();
+                if let Some(this) = this.upgrade() {
+                    this.begin_reinstall(&id);
+                }
+            });
+            items.append(&reinstall);
+        }
+
+        for (button, action) in [
+            (&rename, Self::begin_rename as fn(&Rc<Self>, &str)),
+            (&edit, Self::edit_source),
+            (&revert, Self::begin_revert),
+        ] {
             let this = Rc::downgrade(self);
             let id = script.id.clone();
             let popover_ = popover.clone();
             button.connect_clicked(move |_| {
                 popover_.popdown();
-                let Some(this) = this.upgrade() else {
-                    return;
-                };
-                this.begin_reinstall(&id);
+                if let Some(this) = this.upgrade() {
+                    action(&this, &id);
+                }
             });
-            items.append(&button);
         }
 
         let menu = gtk::MenuButton::builder()
@@ -732,7 +823,332 @@ impl ExtensionsPage {
             "More options for {}",
             script.display_name()
         ))]);
-        Some(menu)
+        (menu, revert)
+    }
+
+    /// Ask for a new name, and keep it as this application's alias.
+    ///
+    /// The dialog says up front that the name is ours alone: AdGuard has no
+    /// rename, so `adguard-cli`, its logs and its notifications go on using
+    /// the original — which would otherwise look like the rename failing.
+    fn begin_rename(self: &Rc<Self>, id: &str) {
+        let Some((current, original, alias_now)) = self.rows.borrow().get(id).map(|row| {
+            let script = row.script.borrow();
+            (
+                script.display_name().to_owned(),
+                script.original_name().to_owned(),
+                script.alias.clone(),
+            )
+        }) else {
+            return;
+        };
+        let renamed = alias_now.is_some();
+
+        let dialog = adw::AlertDialog::new(Some("Rename userscript"), Some(RENAME_BODY));
+        dialog.set_body_use_markup(false);
+        let list = gtk::ListBox::builder()
+            .selection_mode(gtk::SelectionMode::None)
+            .build();
+        list.add_css_class("boxed-list");
+        let entry = adw::EntryRow::builder().title("Name").text(&current).build();
+        entry.set_activates_default(true);
+        list.append(&entry);
+        if renamed {
+            let was = static_row("Original name");
+            was.set_subtitle(&original);
+            was.set_subtitle_lines(0);
+            list.append(&was);
+        }
+        dialog.set_extra_child(Some(&list));
+        dialog.add_response("cancel", "Cancel");
+        if renamed {
+            dialog.add_response("reset", "Use original");
+        }
+        dialog.add_response("rename", "Rename");
+        dialog.set_response_appearance("rename", adw::ResponseAppearance::Suggested);
+        dialog.set_default_response(Some("rename"));
+        dialog.set_close_response("cancel");
+
+        let this = self.clone();
+        let id = id.to_owned();
+        glib::spawn_future_local(async move {
+            let alias = match dialog.choose_future(Some(&this.bin)).await.as_str() {
+                "rename" => Some(entry.text().to_string()),
+                "reset" => None,
+                _ => return,
+            };
+            // Saying the original name is the same as asking for it back.
+            let alias = alias
+                .map(|alias| alias.trim().to_owned())
+                .filter(|alias| !alias.is_empty() && *alias != original);
+            // *Rename* on an unchanged name is a way of closing the dialog,
+            // not a reason to write a file.
+            if alias != alias_now {
+                this.rename(&id, alias);
+            }
+        });
+    }
+
+    /// Store an alias, or drop it, and repaint the one row.
+    ///
+    /// The row is not moved to where its new name sorts: a rename is not worth
+    /// throwing away the scroll position for, and the next reload puts it
+    /// there anyway.
+    fn rename(self: &Rc<Self>, id: &str, alias: Option<String>) {
+        let saved = match Aliases::locate() {
+            Some(aliases) => aliases.set(id, alias.as_deref()).map_err(|err| err.to_string()),
+            None => Err("there is no home directory to keep it in".to_owned()),
+        };
+        if let Err(err) = saved {
+            self.toasts.add_toast(toast(&format!("Could not save the name: {err}")));
+            return;
+        }
+        if let Some(row) = self.rows.borrow().get(id) {
+            row.script.borrow_mut().alias = alias;
+            row.show_name();
+        }
+    }
+
+    /// Open the installed source in the user's own editor.
+    ///
+    /// Whatever the desktop opens a `.js` file with — through the portal,
+    /// like every other link here. Nothing is copied or locked first: the
+    /// pristine copy is already kept ([`Copies`]), and the directory watch
+    /// notices the save whichever program makes it.
+    fn edit_source(self: &Rc<Self>, id: &str) {
+        let Some(dir) = adguard_core::paths::userscripts_dir() else {
+            return;
+        };
+        let file = gio::File::for_path(userscripts::source_path(&dir, id));
+        let launcher = gtk::FileLauncher::new(Some(&file));
+        let window = self.bin.root().and_downcast::<gtk::Window>();
+        let toasts = self.toasts.clone();
+        glib::spawn_future_local(async move {
+            if let Err(err) = launcher.launch_future(window.as_ref()).await {
+                // Dismissing the portal's chooser is an answer, not a fault.
+                if !err.matches(gtk::DialogError::Dismissed) {
+                    toasts.add_toast(toast(&format!("Could not open the source: {err}")));
+                }
+            }
+        });
+    }
+
+    /// Ask before throwing an edit away, since nothing else keeps it.
+    fn begin_revert(self: &Rc<Self>, id: &str) {
+        let Some(name) = self
+            .rows
+            .borrow()
+            .get(id)
+            .map(|row| row.script.borrow().display_name().to_owned())
+        else {
+            return;
+        };
+        if let Some(row) = self.rows.borrow().get(id) {
+            row.set_busy(true);
+        }
+        let dialog = adw::AlertDialog::new(
+            Some("Revert to the original?"),
+            Some(&format!(
+                "Your changes to {name} will be replaced with the copy AdGuard installed. \
+                 They are not kept anywhere else."
+            )),
+        );
+        dialog.set_body_use_markup(false);
+        dialog.add_response("cancel", "Cancel");
+        dialog.add_response("revert", "Revert");
+        dialog.set_response_appearance("revert", adw::ResponseAppearance::Destructive);
+        dialog.set_default_response(Some("cancel"));
+        dialog.set_close_response("cancel");
+
+        let this = self.clone();
+        let id = id.to_owned();
+        glib::spawn_future_local(async move {
+            if dialog.choose_future(Some(&this.bin)).await != "revert" {
+                if let Some(row) = this.rows.borrow().get(&id) {
+                    row.set_busy(false);
+                }
+                return;
+            }
+            let wanted = id.clone();
+            let reverted = worker::job(move || {
+                let dir = adguard_core::paths::userscripts_dir()
+                    .ok_or_else(|| "AdGuard's data directory is unknown".to_owned())?;
+                let copies =
+                    Copies::locate().ok_or_else(|| "there is no copy to revert to".to_owned())?;
+                copies
+                    .revert(&wanted, &userscripts::source_path(&dir, &wanted))
+                    .map_err(|err| err.to_string())
+            })
+            .await;
+            if let Some(row) = this.rows.borrow().get(&id) {
+                row.set_busy(false);
+            }
+            match reverted {
+                Some(Ok(())) => {
+                    this.toasts.add_toast(toast(&format!("Reverted {name}")));
+                    // Through the same path as a save from an editor, so the
+                    // directory watch reporting this write too is one reload
+                    // and not two.
+                    this.source_changed(&id);
+                }
+                Some(Err(err)) => {
+                    this.toasts.add_toast(toast(&format!("Could not revert {name}: {err}")));
+                }
+                None => {}
+            }
+        });
+    }
+
+    /// Watch AdGuard's `userscripts/` directory, so a save from an editor
+    /// moves the *Edited* note without a refresh.
+    ///
+    /// Editors save in bursts — a temporary file, a rename, an attribute
+    /// change — so a change only schedules a re-check, a moment after the
+    /// last one. A directory that cannot be watched, or does not exist yet,
+    /// costs the live update and nothing else: every reload still compares.
+    fn watch(self: &Rc<Self>) {
+        let Some(dir) = adguard_core::paths::userscripts_dir() else {
+            return;
+        };
+        let Ok(monitor) = gio::File::for_path(&dir)
+            .monitor_directory(gio::FileMonitorFlags::WATCH_MOVES, gio::Cancellable::NONE)
+        else {
+            return;
+        };
+        let page = Rc::downgrade(self);
+        monitor.connect_changed(move |_, file, other, _| {
+            let Some(page) = page.upgrade() else {
+                return;
+            };
+            // Only a script's source; metadata moves with installs and
+            // updates, which reload the page on their own. An editor's save
+            // is often a rename onto the name, so the other file counts too.
+            let id_of = |file: &gio::File| {
+                file.basename().and_then(|name| {
+                    name.to_string_lossy().strip_suffix(".user.js").map(str::to_owned)
+                })
+            };
+            for id in [Some(file), other].into_iter().flatten().filter_map(id_of) {
+                page.source_changed(&id);
+            }
+        });
+        self.monitor.replace(Some(monitor));
+    }
+
+    /// Note that `id`'s source changed on disk, and re-check once things are
+    /// quiet.
+    ///
+    /// Editors save in bursts, so the re-check waits until [`EDIT_SETTLE`]
+    /// has passed without another change, and then handles every id the
+    /// burst touched at once.
+    fn source_changed(self: &Rc<Self>, id: &str) {
+        self.touched.borrow_mut().insert(id.to_owned());
+        if let Some(pending) = self.settle_edits.take() {
+            pending.remove();
+        }
+        let later = Rc::downgrade(self);
+        let pending = glib::timeout_add_local_once(EDIT_SETTLE, move || {
+            if let Some(page) = later.upgrade() {
+                page.settle_edits.take();
+                let touched = page.touched.take();
+                page.recheck_edits(touched);
+            }
+        });
+        self.settle_edits.replace(Some(pending));
+    }
+
+    /// Compare every row's source with its pristine copy again, move the
+    /// notes that changed, and have AdGuard load the sources in `touched`
+    /// again — off the main thread, since a script can be half a megabyte.
+    ///
+    /// **The reload is what makes an edit do anything.** AdGuard reads a
+    /// script into memory and serves it from there: measured 25 November
+    /// 2026 on 1.5.1, a source changed on disk was still served unchanged 22
+    /// seconds later, with the same `ts=` in the page's script address. What
+    /// made it load the file again was `userscripts enable` on the
+    /// already-enabled script — a no-op as far as the switch goes, which
+    /// moved `ts=` and served the edit on the next page load (contract §15).
+    ///
+    /// Only for a script that is switched on, so this can never switch
+    /// anything on: a switched-off script loads its source when it is
+    /// switched on, which is soon enough. And not for an ambiguous one,
+    /// which `enable` cannot single out; the toast says to restart instead.
+    fn recheck_edits(self: &Rc<Self>, touched: HashSet<String>) {
+        let scripts: Vec<Userscript> = self
+            .rows
+            .borrow()
+            .values()
+            .map(|row| row.script.borrow().clone())
+            .collect();
+        if scripts.is_empty() {
+            return;
+        }
+        let reload: Vec<(String, String, bool)> = scripts
+            .iter()
+            .filter(|script| script.enabled && touched.contains(&script.id))
+            .map(|script| {
+                (script.id.clone(), script.display_name().to_owned(), script.actionable())
+            })
+            .collect();
+        let cli = self.cli.clone();
+        let this = self.clone();
+        worker::run(
+            move || {
+                let mut scripts = scripts;
+                if let (Some(dir), Some(copies)) =
+                    (adguard_core::paths::userscripts_dir(), Copies::locate())
+                {
+                    copies.observe_all(&dir, &mut scripts);
+                }
+                let edited: Vec<(String, bool)> = scripts
+                    .into_iter()
+                    .map(|script| (script.id, script.edited))
+                    .collect();
+                let reloaded: Vec<(String, String, Result<(), String>)> = reload
+                    .into_iter()
+                    .map(|(id, name, actionable)| {
+                        let outcome = if actionable {
+                            cli.userscripts_enable(&id).map_err(|err| err.to_string())
+                        } else {
+                            Err(format!(
+                                "Restart protection to run your changes to {name}: AdGuard \
+                                 cannot be asked to reload it on its own"
+                            ))
+                        };
+                        (id, name, outcome)
+                    })
+                    .collect();
+                (edited, reloaded)
+            },
+            move |(edited, reloaded)| {
+                {
+                    let rows = this.rows.borrow();
+                    for (id, edited) in &edited {
+                        if let Some(row) = rows.get(id) {
+                            row.show_edited(*edited);
+                        }
+                    }
+                }
+                // Said only about an edit. A reinstall, an update and a revert
+                // change the source too, and each already says so itself;
+                // they are reloaded all the same, silently.
+                let is_edited =
+                    |id: &str| edited.iter().any(|(other, edited)| other == id && *edited);
+                for (id, name, outcome) in reloaded {
+                    if !is_edited(&id) {
+                        continue;
+                    }
+                    let message = match outcome {
+                        Ok(()) => format!(
+                            "AdGuard loaded the changed {name}. Reload the page in your browser \
+                             to run it."
+                        ),
+                        Err(err) => err,
+                    };
+                    this.toasts.add_toast(toast(&message));
+                }
+            },
+        );
     }
 
     /// The one control on this page that destroys something.
@@ -845,6 +1261,9 @@ impl ExtensionsPage {
             },
             move |(refused, still_there)| match still_there {
                 Some(false) => {
+                    // Its name and copies were about a script that is gone; a
+                    // later install of the same id starts afresh.
+                    forget(&id);
                     this.toasts.add_toast(toast(&format!("Removed {name}")));
                     // A row has disappeared, so there is nothing to patch.
                     this.reload();
@@ -967,7 +1386,7 @@ impl ExtensionsPage {
     }
 
     async fn confirm_reinstall(&self, id: &str) -> bool {
-        let (name, url, enabled) = {
+        let (name, url, enabled, edited) = {
             let rows = self.rows.borrow();
             let Some(row) = rows.get(id) else {
                 return false;
@@ -976,13 +1395,16 @@ impl ExtensionsPage {
             let Some(url) = script.download_url.clone() else {
                 return false;
             };
-            (script.display_name().to_owned(), url, script.enabled)
+            (script.display_name().to_owned(), url, script.enabled, script.edited)
         };
 
         let mut body = format!(
             "AdGuard will fetch {name} from {url} again and replace the installed copy \
              with whatever is there now."
         );
+        if edited {
+            body.push_str("\n\nYour changes to its source will be replaced too.");
+        }
         if !enabled {
             body.push_str(
                 "\n\nIt will also switch this userscript back on — reinstalling always \
@@ -1021,6 +1443,12 @@ impl ExtensionsPage {
         worker::run(
             move || {
                 let refused = cli.userscripts_install(&url).err().map(|e| e.to_string());
+                if refused.is_none() {
+                    // What is on disk now is AdGuard's fresh copy, even if
+                    // the author changed it without moving the version — so it
+                    // is the pristine copy, and not an edit, from here on.
+                    rebase(&wanted);
+                }
                 let observed = read(&locale)
                     .ok()
                     .and_then(|loaded| loaded.scripts.into_iter().find(|s| s.id == wanted));
@@ -1082,8 +1510,8 @@ impl ExtensionsPage {
                     break;
                 };
                 this.asking.replace(Some(url.clone()));
-                if let Some(served) = this.confirm_install(&url).await {
-                    this.install(served, None).await;
+                if let Some((served, alias)) = this.confirm_install(&url).await {
+                    this.install(served, None, alias).await;
                 }
                 this.asking.replace(None);
             }
@@ -1109,8 +1537,9 @@ impl ExtensionsPage {
     /// On *Add*, the address to install from: where the link's redirects led
     /// once the script was read there, so AdGuard — which follows none (#29) —
     /// fetches the file the dialog described. The link itself when it could
-    /// not be read.
-    async fn confirm_install(&self, url: &str) -> Option<String> {
+    /// not be read. Beside it, the name the user gave the script in the
+    /// dialog, when they changed the one it came with.
+    async fn confirm_install(&self, url: &str) -> Option<(String, Option<String>)> {
         let dialog = adw::AlertDialog::new(Some("Add this userscript?"), Some(INSTALL_BODY));
         dialog.set_body_use_markup(false);
         // Room for the rows to read as rows rather than as a column of
@@ -1118,7 +1547,27 @@ impl ExtensionsPage {
         dialog.set_prefer_wide_layout(true);
         let details = Rc::new(InstallDetails::new(url));
         details.show(&install_link::summary(url, &Details::Reading));
-        dialog.set_extra_child(Some(&details.list));
+
+        // The name it will be listed under, editable before it is added:
+        // Greasy Fork names run to a hundred characters of emoji and
+        // keywords. Its own list below the details, because those describe
+        // the script and this is a choice about it. Filled in once the
+        // script's `@name` is read, and left alone if the user has typed.
+        let naming = gtk::ListBox::builder()
+            .selection_mode(gtk::SelectionMode::None)
+            .build();
+        naming.add_css_class("boxed-list");
+        let name_entry = adw::EntryRow::builder().title("List it as").build();
+        name_entry.set_sensitive(false);
+        naming.append(&name_entry);
+        let content = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(12)
+            .build();
+        content.append(&details.list);
+        content.append(&naming);
+        dialog.set_extra_child(Some(&content));
+        let given = Rc::new(RefCell::new(String::new()));
         dialog.add_response("cancel", "Cancel");
         dialog.add_response("install", "Add");
         dialog.set_default_response(Some("cancel"));
@@ -1136,6 +1585,8 @@ impl ExtensionsPage {
             let countdown = countdown.clone();
             let details_view = details.clone();
             let served = served.clone();
+            let given = given.clone();
+            let name_entry = name_entry.clone();
             glib::spawn_future_local(async move {
                 let fetched = {
                     let url = url.clone();
@@ -1147,6 +1598,13 @@ impl ExtensionsPage {
                             details_view.readdress(&fetched.url);
                         }
                         served.replace(fetched.url.clone());
+                        if let Some(name) = fetched.preview.name.as_deref() {
+                            given.replace(name.to_owned());
+                            if name_entry.text().is_empty() {
+                                name_entry.set_text(name);
+                            }
+                        }
+                        name_entry.set_sensitive(true);
                         Details::Read(fetched)
                     }
                     Some(Err(err)) => Details::Unread(err.to_string()),
@@ -1184,7 +1642,10 @@ impl ExtensionsPage {
         if let (Some(window), Some(focus)) = (window, focus) {
             window.disconnect(focus);
         }
-        (answer == "install").then(|| served.take())
+        // A name left as the script gave it, or emptied, is no alias.
+        let typed = name_entry.text().trim().to_owned();
+        let alias = (!typed.is_empty() && typed != given.borrow().trim()).then_some(typed);
+        (answer == "install").then(|| (served.take(), alias))
     }
 
     /// Fetch and install a userscript, then confirm it against the directory.
@@ -1198,7 +1659,15 @@ impl ExtensionsPage {
     /// `field` is the add row and its spinner when the URL was typed there, and
     /// `None` when it arrived as an install link (`crate::install_link`) — that
     /// row is rebuilt with the page, so it cannot be held across a dialog.
-    async fn install(self: &Rc<Self>, url: String, field: Option<(adw::EntryRow, adw::Spinner)>) {
+    ///
+    /// `alias` is the name the user gave it in the install dialog, if they
+    /// changed it there; kept once the new id is known.
+    async fn install(
+        self: &Rc<Self>,
+        url: String,
+        field: Option<(adw::EntryRow, adw::Spinner)>,
+        alias: Option<String>,
+    ) {
         let typed = field.is_some();
         let set_busy = |busy: bool, clear: bool| {
             if let Some((entry, spinner)) = &field {
@@ -1247,7 +1716,14 @@ impl ExtensionsPage {
         match after.iter().find(|s| !before.contains(&s.id)) {
             Some(new) => {
                 set_busy(false, true);
-                self.toasts.add_toast(toast(&format!("Added {}", new.display_name())));
+                let mut shown = new.display_name().to_owned();
+                if let Some(alias) = alias.filter(|alias| alias.trim() != new.original_name()) {
+                    match Aliases::locate().map(|aliases| aliases.set(&new.id, Some(&alias))) {
+                        Some(Ok(())) => shown = alias.trim().to_owned(),
+                        _ => self.toasts.add_toast(toast("Could not save the name you gave it")),
+                    }
+                }
+                self.toasts.add_toast(toast(&format!("Added {shown}")));
                 // The moment the helper is worth mentioning: someone has just
                 // copied a script's address out of a browser and pasted it
                 // here, which is exactly what it saves. Once per run, and only
@@ -1284,6 +1760,16 @@ impl ExtensionsPage {
 }
 
 /// Read both sources, the way the page renders them.
+/// The line under the rename question. The name is ours alone, and saying so
+/// here is what stops the CLI's own messages looking like a failed rename.
+const RENAME_BODY: &str = "Only this application shows the new name. AdGuard and adguard-cli \
+                           keep using the original one.";
+
+/// How long the userscripts directory has to be quiet before the *Edited*
+/// notes are re-checked: long enough for an editor's save — temporary file,
+/// rename, attributes — to finish, short enough to look immediate.
+const EDIT_SETTLE: Duration = Duration::from_millis(400);
+
 /// The one line under an install link's question. Short, because the rows
 /// below carry the specifics and a long warning is the paragraph people skip.
 const INSTALL_BODY: &str = "Add only scripts from sources you trust. It can read and change \
@@ -1708,7 +2194,16 @@ fn read(locale: &Locale) -> Result<Loaded, String> {
     let config = Config::load().map_err(|err| err.to_string())?;
     let dir = adguard_core::paths::userscripts_dir()
         .ok_or_else(|| "Could not locate AdGuard's data directory".to_owned())?;
-    let scripts = userscripts::read(&dir, &config.enabled_userscripts(), locale);
+    let mut scripts = userscripts::read(&dir, &config.enabled_userscripts(), locale);
+    // This application's own layer over AdGuard's rows: the names the user
+    // gave them, and whether the source still matches what AdGuard delivered.
+    // Neither is fatal to read — without them the rows say what AdGuard says.
+    if let Some(aliases) = Aliases::locate() {
+        aliases.apply(&mut scripts);
+    }
+    if let Some(copies) = Copies::locate() {
+        copies.observe_all(&dir, &mut scripts);
+    }
     let offered = userscripts::recommended(&scripts);
     let install_links = userscripts::install_links(&scripts);
     Ok(Loaded {
@@ -1716,6 +2211,35 @@ fn read(locale: &Locale) -> Result<Loaded, String> {
         offered,
         install_links,
     })
+}
+
+/// Take what is installed for `id` now as AdGuard's own copy. Run on the
+/// worker after AdGuard has just fetched the script; a failure costs only the
+/// accuracy of the *Edited* note, which the next comparison may then get wrong
+/// in the harmless direction.
+fn rebase(id: &str) {
+    let (Some(dir), Some(copies)) = (adguard_core::paths::userscripts_dir(), Copies::locate()) else {
+        return;
+    };
+    let Ok(current) = std::fs::read(userscripts::source_path(&dir, id)) else {
+        return;
+    };
+    let version = userscripts::read(&dir, &[], &Locale::english())
+        .into_iter()
+        .find(|script| script.id == id)
+        .and_then(|script| script.version);
+    let _ = copies.rebase(id, version.as_deref(), &current);
+}
+
+/// Drop this application's name and copies for a script that was removed.
+/// Best effort: a leftover is a few files nobody reads, not a fault.
+fn forget(id: &str) {
+    if let Some(aliases) = Aliases::locate() {
+        let _ = aliases.set(id, None);
+    }
+    if let Some(copies) = Copies::locate() {
+        let _ = copies.forget(id);
+    }
 }
 
 /// Is `id` among these `meta:` paths? The config holds a path and the page
@@ -1779,18 +2303,73 @@ fn inert_row(title: &str, subtitle: &str) -> adw::ActionRow {
     row
 }
 
-/// One entry in the cog's popover.
-fn menu_item(label: &str) -> gtk::Button {
+/// One entry in the cog's popover, with an optional dim note at its end —
+/// the host a link opens, so *Script page* says `greasyfork.org` before it is
+/// clicked.
+fn menu_item(label: &str, note: Option<&str>) -> gtk::Button {
+    let content = gtk::Box::builder().spacing(18).build();
+    // Left-aligned like a menu, rather than centred like a button.
+    let title = gtk::Label::builder().label(label).xalign(0.0).hexpand(true).build();
+    content.append(&title);
+    if let Some(note) = note {
+        let note = gtk::Label::builder()
+            .label(note)
+            .xalign(1.0)
+            .use_markup(false)
+            .ellipsize(gtk::pango::EllipsizeMode::Middle)
+            .max_width_chars(28)
+            .build();
+        note.add_css_class("dim-label");
+        note.add_css_class("caption");
+        content.append(&note);
+    }
     let button = gtk::Button::builder()
-        .label(label)
+        .child(&content)
         .halign(gtk::Align::Fill)
         .build();
     button.add_css_class("flat");
-    // Left-aligned like a menu, rather than centred like a button.
-    if let Some(child) = button.child().and_downcast::<gtk::Label>() {
-        child.set_xalign(0.0);
-    }
     button
+}
+
+/// A rule between groups of entries in the cog's popover.
+fn menu_separator() -> gtk::Separator {
+    let separator = gtk::Separator::new(gtk::Orientation::Horizontal);
+    separator.set_margin_top(4);
+    separator.set_margin_bottom(4);
+    separator
+}
+
+/// The *Edited* note on a row: an icon and the word, so it does not rest on
+/// the icon alone, dim so it does not compete with the name.
+fn edited_note() -> gtk::Box {
+    let note = gtk::Box::builder()
+        .spacing(4)
+        .valign(gtk::Align::Center)
+        .build();
+    note.append(&gtk::Image::from_icon_name("document-edit-symbolic"));
+    note.append(&gtk::Label::new(Some("Edited")));
+    note.add_css_class("dim-label");
+    note.add_css_class("caption");
+    note.set_tooltip_text(Some(
+        "The source differs from the copy AdGuard installed. Revert to original is in the menu.",
+    ));
+    note
+}
+
+/// Whether two addresses open the same page, ignoring the differences no
+/// server cares about — the scheme's case, `www.` and a trailing slash — so
+/// the cog does not offer the same page twice under two names.
+fn same_address(a: &str, b: &str) -> bool {
+    let normal = |url: &str| {
+        let url = url.trim().trim_end_matches('/').to_ascii_lowercase();
+        let url = url
+            .strip_prefix("https://")
+            .or_else(|| url.strip_prefix("http://"))
+            .map(str::to_owned)
+            .unwrap_or(url);
+        url.strip_prefix("www.").map(str::to_owned).unwrap_or(url)
+    };
+    normal(a) == normal(b)
 }
 
 fn loading_view() -> adw::Spinner {
@@ -1824,6 +2403,8 @@ mod tests {
             download_url: None,
             enabled: false,
             ambiguous: false,
+            alias: None,
+            edited: false,
         }
     }
 
