@@ -930,6 +930,14 @@ impl ExtensionsPage {
         };
         let file = gio::File::for_path(userscripts::source_path(&dir, id));
         let launcher = gtk::FileLauncher::new(Some(&file));
+        // An editor reached through the document portal gets the file
+        // read-only unless writable access is asked for, and then cannot save
+        // — the one thing *Edit* is for. The property arrived in GTK 4.14,
+        // and this application builds against 4.10, so it is set by name
+        // where the running GTK has it rather than by raising the floor.
+        if launcher.find_property("writable").is_some() {
+            launcher.set_property("writable", true);
+        }
         let window = self.bin.root().and_downcast::<gtk::Window>();
         let toasts = self.toasts.clone();
         glib::spawn_future_local(async move {
@@ -1111,7 +1119,7 @@ impl ExtensionsPage {
                     .iter()
                     .map(|script| (script.id.clone(), script.edited))
                     .collect();
-                let reloaded: Vec<(String, String, Result<(), String>)> = loaded
+                let reloaded: Vec<(String, Option<String>, Result<(), String>)> = loaded
                     .scripts
                     .iter()
                     .filter(|script| touched.contains(&script.id))
@@ -1124,7 +1132,7 @@ impl ExtensionsPage {
                                     "Restart protection to run your changes to {name}: \
                                      AdGuard cannot be asked to reload it on its own"
                                 );
-                                (script.id.clone(), name, Err(reason))
+                                (script.id.clone(), Some(name), Err(reason))
                             });
                         }
                         let id = script.id.clone();
@@ -1134,16 +1142,13 @@ impl ExtensionsPage {
                             on.then(|| cli.userscripts_enable(&id).map_err(|err| err.to_string()))
                         });
                         match outcome {
-                            Some(Some(outcome)) => Some((id, name, outcome)),
+                            Some(Some(outcome)) => Some((id, Some(name), outcome)),
                             // Switched off: nothing to reload.
                             Some(None) => None,
-                            None => Some((
-                                id,
-                                name,
-                                Err("AdGuard was busy, so the change is not running yet. \
-                                     Refresh the page to try again"
-                                    .to_owned()),
-                            )),
+                            // Another command of ours held AdGuard for the
+                            // whole wait. Not an answer to give the user: the
+                            // id goes back on the list and is tried again.
+                            None => Some((id, None, Ok(()))),
                         }
                     })
                     .collect();
@@ -1158,13 +1163,19 @@ impl ExtensionsPage {
                         }
                     }
                 }
-                // Said only about an edit. A reinstall, an update and a revert
-                // change the source too, and each already says so itself;
-                // they are reloaded all the same, silently.
+                // Success is said only about an edit. A reinstall, an update
+                // and a revert change the source too, and each already says
+                // so itself; they are reloaded all the same, silently. A
+                // failure is said whatever changed the source: after a revert
+                // it means AdGuard is still running the edit.
                 let is_edited =
                     |id: &str| edited.iter().any(|(other, edited)| other == id && *edited);
                 for (id, name, outcome) in reloaded {
-                    if !is_edited(&id) {
+                    let Some(name) = name else {
+                        this.source_changed(&id);
+                        continue;
+                    };
+                    if outcome.is_ok() && !is_edited(&id) {
                         continue;
                     }
                     let message = match outcome {

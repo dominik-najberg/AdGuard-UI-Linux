@@ -237,13 +237,20 @@ impl Copies {
 
         if recorded != version {
             let mine_version = read_text(&dir.join(MINE_VERSION));
-            if dir.join(MINE).is_file() && mine_version.as_deref() == Some(recorded.as_str()) {
+            let has_mine = dir.join(MINE).is_file();
+            if has_mine && mine_version.as_deref() == Some(recorded.as_str()) {
                 // The edit was made on the copy being replaced: keep that copy
                 // as its ancestor before the new one takes its place.
                 write_atomically(&dir.join(MINE_ANCESTOR), &base)?;
+            } else if has_mine && dir.join(MINE_ANCESTOR).is_file() {
+                // An edit from an older release, already set aside with its
+                // ancestor by an earlier update. Another release arriving does
+                // not make that pair any less mergeable, and it is the only
+                // record of the edit: it stays until the user replaces it with
+                // a new one or reverts.
             } else {
-                // An edit older than the copy being replaced, or none: nothing
-                // a merge could use.
+                // No edit, or one without the copy it was made on — nothing a
+                // merge could use.
                 remove_if_present(&dir.join(MINE))?;
                 remove_if_present(&dir.join(MINE_VERSION))?;
                 remove_if_present(&dir.join(MINE_ANCESTOR))?;
@@ -590,6 +597,22 @@ mod tests {
         assert!(copies.observe("x", Some("1.1"), b"edited again").unwrap());
         assert_eq!(sandbox.kept("x", MINE).as_deref(), Some(&b"edited again"[..]));
         assert_eq!(sandbox.kept("x", MINE_ANCESTOR), None);
+    }
+
+    /// A second release does not cost the edit set aside at the first: the
+    /// edit and the copy it was made on are still a mergeable pair.
+    #[test]
+    fn a_second_update_keeps_the_edit_set_aside_at_the_first() {
+        let sandbox = Sandbox::new("second-update");
+        let copies = sandbox.copies();
+        copies.observe("x", Some("1.0"), b"original").unwrap();
+        copies.observe("x", Some("1.0"), b"edited").unwrap();
+        copies.observe("x", Some("1.1"), b"release two").unwrap();
+        copies.observe("x", Some("1.2"), b"release three").unwrap();
+        assert_eq!(sandbox.kept("x", BASE).as_deref(), Some(&b"release three"[..]));
+        assert_eq!(sandbox.kept("x", MINE).as_deref(), Some(&b"edited"[..]));
+        assert_eq!(sandbox.kept("x", MINE_ANCESTOR).as_deref(), Some(&b"original"[..]));
+        assert_eq!(sandbox.kept("x", MINE_VERSION).as_deref(), Some(&b"1.0"[..]));
     }
 
     #[test]
