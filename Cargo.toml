@@ -54,3 +54,7 @@ ureq = { version = "3", default-features = false, features = ["rustls", "platfor
 # because that is a format the release workflow can produce with one apt
 # package and one secret.
 minisign-verify = "0.3"
+# The three-way merge that carries a user's edits to a userscript across an
+# update (script_merge.rs). Default features only: no colour, no binary
+# patches. Its one mandatory dependency, hashbrown 0.17, was already locked.
+diffy = "0.5"
