@@ -432,14 +432,19 @@ fn write_atomically_with(
     // worker thread at a time — a reload and a directory-watch re-check can
     // overlap — and two writers sharing one staging name would rename each
     // other's file away mid-write.
+    //
+    // A name of its own rather than the target's with a suffix: an id may be
+    // up to 245 bytes (AdGuard's `<id>.meta.json` has to fit in 255), so the
+    // target's name plus anything is past the limit, and *Revert* on the
+    // longest Greasy Fork names would fail with `ENAMETOOLONG`. A leading dot
+    // and no `.user.js` or `.meta.json` keep AdGuard and the directory watch
+    // from taking it for a script.
     static WRITES: AtomicU64 = AtomicU64::new(0);
-    let mut staging = path.as_os_str().to_owned();
-    staging.push(format!(
-        ".{}-{}.part",
+    let staging = dir.join(format!(
+        ".adguard-ui-{}-{}.part",
         std::process::id(),
         WRITES.fetch_add(1, Ordering::Relaxed)
     ));
-    let staging = PathBuf::from(staging);
     let written = fs::write(&staging, bytes)
         .and_then(|()| match permissions {
             Some(permissions) => fs::set_permissions(&staging, permissions),
@@ -703,6 +708,21 @@ mod tests {
 
     /// A reinstall from here at the same version: whatever AdGuard fetched is
     /// the new pristine copy, even if the author changed it without a bump.
+    /// The longest id AdGuard's own files allow still reverts: the staging
+    /// file must not be named after the target.
+    #[test]
+    fn reverting_a_script_with_the_longest_id_works() {
+        let sandbox = Sandbox::new("long-id");
+        let copies = sandbox.copies();
+        let id = "x".repeat(255 - ".meta.json".len());
+        let target = sandbox.dir.join(format!("{id}.user.js"));
+        fs::write(&target, b"original").unwrap();
+        copies.observe(&id, Some("1.0"), b"original").unwrap();
+        fs::write(&target, b"edited").unwrap();
+        copies.revert(&id, &target).expect("revert a 245-byte id");
+        assert_eq!(fs::read(&target).unwrap(), b"original");
+    }
+
     #[test]
     fn rebasing_takes_the_bytes_as_delivered() {
         let sandbox = Sandbox::new("rebase");

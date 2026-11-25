@@ -194,6 +194,29 @@ pub struct ExtensionsPage {
     /// The ids whose source changed in that burst: the ones to have AdGuard
     /// load again once it is over.
     touched: RefCell<HashSet<String>>,
+    /// How many installs and reinstalls of ours are fetching right now
+    /// ([`Fetching`]). While any is, the re-check waits: AdGuard writes the
+    /// fresh source before the fetch's own worker records it as pristine, and
+    /// a comparison in between would file AdGuard's bytes as the user's edit,
+    /// overwriting the one that was kept.
+    fetching: Rc<Cell<u32>>,
+}
+
+/// One install or reinstall of ours in flight; see
+/// [`ExtensionsPage::fetching`]. Counted down when dropped, on every path.
+struct Fetching(Rc<Cell<u32>>);
+
+impl Fetching {
+    fn start(count: &Rc<Cell<u32>>) -> Self {
+        count.set(count.get() + 1);
+        Self(count.clone())
+    }
+}
+
+impl Drop for Fetching {
+    fn drop(&mut self) {
+        self.0.set(self.0.get().saturating_sub(1));
+    }
 }
 
 impl ExtensionsPage {
@@ -226,6 +249,7 @@ impl ExtensionsPage {
             monitor: RefCell::new(None),
             settle_edits: RefCell::new(None),
             touched: RefCell::new(HashSet::new()),
+            fetching: Rc::new(Cell::new(0)),
         });
 
         // *Show* rather than an install from the banner: the group it points
@@ -1104,6 +1128,15 @@ impl ExtensionsPage {
         if self.rows.borrow().is_empty() {
             return;
         }
+        if self.fetching.get() > 0 {
+            // Again once the fetch is over. Its own reload compares every
+            // source anyway; this keeps the ids so the reload of AdGuard's
+            // copy still happens.
+            for id in &touched {
+                self.source_changed(id);
+            }
+            return;
+        }
         let cli = self.cli.clone();
         let locale = self.locale.clone();
         let this = self.clone();
@@ -1480,6 +1513,7 @@ impl ExtensionsPage {
         let locale = self.locale.clone();
         let this = self.clone();
         let wanted = id.clone();
+        let fetching = Fetching::start(&self.fetching);
         worker::run(
             move || {
                 let refused = cli.userscripts_install(&url).err().map(|e| e.to_string());
@@ -1495,6 +1529,7 @@ impl ExtensionsPage {
                 (refused, observed)
             },
             move |(refused, observed)| {
+                drop(fetching);
                 if let Some(row) = this.rows.borrow().get(&id) {
                     row.set_busy(false);
                 }
@@ -1709,6 +1744,7 @@ impl ExtensionsPage {
         alias: Option<String>,
     ) {
         let typed = field.is_some();
+        let _fetching = Fetching::start(&self.fetching);
         let set_busy = |busy: bool, clear: bool| {
             if let Some((entry, spinner)) = &field {
                 entry.set_sensitive(!busy);
@@ -1748,14 +1784,17 @@ impl ExtensionsPage {
                 // version that may not have moved — and then the fresh copy
                 // would read as the user's edit. It is AdGuard's copy, so it
                 // is the pristine one.
-                if let Ok(loaded) = read(&locale) {
-                    refetched = loaded
-                        .scripts
-                        .iter()
+                //
+                // Found from the metadata alone. The page's own `read` would
+                // compare the sources first, and file the fresh copy as an
+                // edit before it could be recorded as pristine.
+                if let Some(dir) = adguard_core::paths::userscripts_dir() {
+                    refetched = userscripts::read(&dir, &[], &Locale::english())
+                        .into_iter()
                         .filter(|script| {
                             script.download_url.as_deref() == Some(fetched_from.as_str())
                         })
-                        .map(|script| script.id.clone())
+                        .map(|script| script.id)
                         .collect();
                     for id in &refetched {
                         rebase(id, false);
