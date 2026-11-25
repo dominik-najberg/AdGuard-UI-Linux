@@ -1263,14 +1263,20 @@ impl ExtensionsPage {
                 let Ok(loaded) = read(&locale) else {
                     return (Vec::new(), Vec::new());
                 };
-                // With whether a replaced edit is still missing: a save on
+                // With whether a replaced edit is still missing — a save on
                 // top of the update makes a new edit, and the old one stops
-                // being anything to bring back.
-                let edited: Vec<(String, bool, Option<Pending>)> = loaded
+                // being anything to bring back — and whether the source still
+                // names an update address, which a save can add or remove.
+                let edited: Vec<(String, bool, Extra)> = loaded
                     .scripts
                     .iter()
                     .map(|script| {
-                        (script.id.clone(), script.edited, loaded.pending.get(&script.id).copied())
+                        let extra = Extra {
+                            available: None,
+                            pending: loaded.pending.get(&script.id).copied(),
+                            bare: loaded.bare.contains(&script.id),
+                        };
+                        (script.id.clone(), script.edited, extra)
                     })
                     .collect();
                 let reloaded: Vec<(String, Option<String>, Result<(), String>)> = loaded
@@ -1311,10 +1317,14 @@ impl ExtensionsPage {
             move |(edited, reloaded)| {
                 {
                     let rows = this.rows.borrow();
-                    for (id, edited, pending) in &edited {
+                    for (id, edited, fresh) in &edited {
                         if let Some(row) = rows.get(id) {
                             row.show_edited(*edited);
-                            row.extra.borrow_mut().pending = *pending;
+                            {
+                                let mut extra = row.extra.borrow_mut();
+                                extra.pending = fresh.pending;
+                                extra.bare = fresh.bare;
+                            }
                             row.paint();
                         }
                     }
@@ -1467,11 +1477,7 @@ impl ExtensionsPage {
                 }
                 this.paint_check_state();
                 if announce {
-                    this.toasts.add_toast(toast(&match found {
-                        0 => "Every userscript is up to date".to_owned(),
-                        1 => "An update is available for one userscript".to_owned(),
-                        n => format!("Updates are available for {n} userscripts"),
-                    }));
+                    this.toasts.add_toast(toast(&check_summary(found, unknown)));
                 }
             },
         );
@@ -1598,7 +1604,12 @@ impl ExtensionsPage {
                     Some(version) => format!("Updated {name} to {version}"),
                     None => format!("Updated {name}"),
                 };
-                this.report_carry(&id, &name, &updated, carried.unwrap_or(Carry::Nothing));
+                let carried = carried.unwrap_or(Carry::Nothing);
+                let done = match carried {
+                    Carry::Kept => format!("{updated}, your changes kept"),
+                    _ => updated,
+                };
+                this.report_carry(&id, &name, &done, carried);
                 this.reload();
             },
         );
@@ -1630,14 +1641,10 @@ impl ExtensionsPage {
     /// Say how carrying an edit went, and ask about a clash.
     ///
     /// `done` is the sentence for when there was nothing to carry or it went
-    /// in cleanly; a clean carry adds that the changes were kept.
+    /// in cleanly; the caller words it for each.
     fn report_carry(self: &Rc<Self>, id: &str, name: &str, done: &str, carried: Carry) {
         match carried {
-            Carry::Nothing => self.toasts.add_toast(toast(done)),
-            Carry::Kept if done.starts_with("Updated") => {
-                self.toasts.add_toast(toast(&format!("{done}, your changes kept")));
-            }
-            Carry::Kept => self.toasts.add_toast(toast(done)),
+            Carry::Nothing | Carry::Kept => self.toasts.add_toast(toast(done)),
             Carry::Moved => self.toasts.add_toast(toast(&format!(
                 "The source of {name} changed meanwhile, so your changes were not put back. \
                  They are kept; try again from the menu."
@@ -3153,6 +3160,28 @@ fn set_menu_label(button: &gtk::Button, label: &str) {
     }
 }
 
+/// What *Check now* says when it is done. "Up to date" only when every
+/// script answered: a check that could not reach a server verified nothing,
+/// and offline, every one of them fails.
+fn check_summary(found: usize, unknown: usize) -> String {
+    let found = match found {
+        0 => None,
+        1 => Some("An update is available for one userscript".to_owned()),
+        n => Some(format!("Updates are available for {n} userscripts")),
+    };
+    let missed = match unknown {
+        0 => None,
+        1 => Some("one could not be checked".to_owned()),
+        n => Some(format!("{n} could not be checked")),
+    };
+    match (found, missed) {
+        (None, None) => "Every userscript is up to date".to_owned(),
+        (Some(found), None) => found,
+        (Some(found), Some(missed)) => format!("{found}; {missed}"),
+        (None, Some(missed)) => format!("No updates found, but {missed}"),
+    }
+}
+
 /// The local time, for "Checked at 14:05".
 fn clock() -> String {
     glib::DateTime::now_local()
@@ -3299,6 +3328,15 @@ mod tests {
     }
 
     /// The version leads the subtitle, because that is what #9 asks to show.
+    /// "Up to date" is said only when every check answered.
+    #[test]
+    fn a_failed_check_is_not_up_to_date() {
+        assert_eq!(check_summary(0, 0), "Every userscript is up to date");
+        assert_eq!(check_summary(0, 3), "No updates found, but 3 could not be checked");
+        assert!(!check_summary(0, 1).contains("Every"));
+        assert_eq!(check_summary(2, 1), "Updates are available for 2 userscripts; one could not be checked");
+    }
+
     /// A newer version joins the description after the installed one.
     #[test]
     fn an_available_update_joins_the_description() {

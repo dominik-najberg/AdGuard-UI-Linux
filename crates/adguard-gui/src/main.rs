@@ -983,6 +983,18 @@ fn main_view(cli: &Cli, updater: &Rc<updater::Updater>) -> MainView {
         }
     });
 
+    // A run that crashed partway may still have re-downloaded scripts over
+    // their edits before it reached the one it crashed on, so the same
+    // reconciliation follows it.
+    about.connect_crashed({
+        let extensions = Rc::downgrade(&extensions);
+        move || {
+            if let Some(extensions) = extensions.upgrade() {
+                extensions.after_check_update();
+            }
+        }
+    });
+
     let content_header = adw::HeaderBar::new();
     let content_title = adw::WindowTitle::new(PAGES[0].title, "");
     content_header.set_title_widget(Some(&content_title));
