@@ -415,6 +415,7 @@ impl Meta {
             // it, and the row offers one link.
             homepage: self.first(&["homepageURL", "supportURL"]),
             download_url: self.string("downloadURL"),
+            update_url: self.string("updateURL"),
             id,
             enabled,
             // Set by `mark_ambiguous` once every sibling is known; it cannot be
@@ -456,6 +457,7 @@ mod tests {
             version: None,
             homepage: None,
             download_url: None,
+            update_url: None,
             enabled: false,
             ambiguous: false,
             alias: None,

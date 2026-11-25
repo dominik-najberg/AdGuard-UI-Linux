@@ -2532,6 +2532,7 @@ mod tests {
             version: None,
             homepage: None,
             download_url: None,
+            update_url: None,
             enabled: false,
             ambiguous: false,
             alias: None,
