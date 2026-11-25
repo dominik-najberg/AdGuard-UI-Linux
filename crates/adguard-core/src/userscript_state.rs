@@ -242,6 +242,18 @@ fn exclusive() -> MutexGuard<'static, ()> {
 /// and overwrite the edit that was kept.
 static DELIVERY: RwLock<()> = RwLock::new(());
 
+/// One script as [`Copies::observe_installed`] read and compared it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Observed {
+    /// Whether the source differs from AdGuard's copy at this version.
+    pub edited: bool,
+    /// The metadata's `version` as read under the lock — `None` for none.
+    pub version: Option<String>,
+    /// The installed `.user.js` exactly as compared, so a caller acting on
+    /// the result acts on these bytes rather than reading the file again.
+    pub source: Vec<u8>,
+}
+
 /// The copies of each script that tell an edit from the script as AdGuard
 /// delivered it.
 pub struct Copies {
@@ -291,8 +303,47 @@ impl Copies {
     ///
     /// `Err` when the copies cannot be read or written; the caller shows the
     /// row as unedited, the one answer that cannot be wrong in a harmful way.
+    ///
+    /// **`current` and `version` must not be older than this call**, which is
+    /// what makes this the low-level form. Bytes read before a fetch of ours
+    /// and compared after it are the old pristine copy set against the new
+    /// one: an edit that never happened, filed over the one that did. The
+    /// page's callers use [`Self::observe_installed`], which reads both under
+    /// the same lock that holds fetches off.
     pub fn observe(&self, id: &str, version: Option<&str>, current: &[u8]) -> io::Result<bool> {
         let _delivered = DELIVERY.read().unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.observe_unlocked(id, version, current)
+    }
+
+    /// Read script `id`'s metadata version and source from AdGuard's `dir`,
+    /// and [`Self::observe`] them — all under the delivery lock, so a fetch
+    /// of ours ([`Self::delivering`]) is entirely before the read or entirely
+    /// after the comparison, never in between.
+    ///
+    /// The read is the part that has to be inside. Holding the lock only
+    /// around the comparison let a refresh read the old pristine bytes, wait
+    /// out a same-version re-fetch, and then compare those bytes with the new
+    /// copy on record — filing them as an edit, overwriting the kept one and
+    /// dropping its ancestor. Found by review; `a_reader_blocked_by_a_delivery
+    /// _reads_after_it` reproduces it.
+    ///
+    /// `Err` when the source cannot be read, or the copies cannot be kept.
+    pub fn observe_installed(&self, dir: &Path, id: &str) -> io::Result<Observed> {
+        let _delivered = DELIVERY.read().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let version = crate::userscripts::installed_version(dir, id);
+        let source = fs::read(crate::userscripts::source_path(dir, id))?;
+        // The lock-free body: a second `read()` of a `std` `RwLock` from this
+        // thread can deadlock behind a writer that is waiting for the first.
+        let edited = self.observe_unlocked(id, version.as_deref(), &source)?;
+        Ok(Observed {
+            edited,
+            version,
+            source,
+        })
+    }
+
+    /// [`Self::observe`] without taking [`DELIVERY`]; the caller holds it.
+    fn observe_unlocked(&self, id: &str, version: Option<&str>, current: &[u8]) -> io::Result<bool> {
         let _held = exclusive();
         let dir = self.dir(id)?;
         let version = version.unwrap_or("");
@@ -345,15 +396,20 @@ impl Copies {
     /// A source that cannot be read, or copies that cannot be kept, leave the
     /// row unedited: the marker is a hint about the user's own change, and
     /// one that cannot be backed by a comparison is not shown.
+    ///
+    /// Each script is read afresh through [`Self::observe_installed`], not
+    /// from the row: the row's version was read before any of this, and a
+    /// fetch may have landed since. The fresh version replaces the row's, so
+    /// what the page shows is what was compared.
     pub fn observe_all(&self, dir: &Path, scripts: &mut [Userscript]) {
         for script in scripts.iter_mut() {
-            let path = crate::userscripts::source_path(dir, &script.id);
-            script.edited = fs::read(&path)
-                .ok()
-                .and_then(|current| {
-                    self.observe(&script.id, script.version.as_deref(), &current).ok()
-                })
-                .unwrap_or(false);
+            match self.observe_installed(dir, &script.id) {
+                Ok(observed) => {
+                    script.edited = observed.edited;
+                    script.version = observed.version;
+                }
+                Err(_) => script.edited = false,
+            }
         }
     }
 
@@ -968,6 +1024,53 @@ mod tests {
         copies.rebase("x", Some("1"), b"changed upstream").unwrap();
         assert_eq!(sandbox.kept("x", MINE_ANCESTOR).as_deref(), Some(&b"original"[..]));
         copies.observe("x", Some("2"), b"release 2").unwrap();
+        assert_eq!(sandbox.kept("x", MINE).as_deref(), Some(&b"my edit"[..]));
+        assert_eq!(sandbox.kept("x", MINE_ANCESTOR).as_deref(), Some(&b"original"[..]));
+    }
+
+    /// The review's case: a refresh starts while a same-version re-fetch of
+    /// ours is being recorded. Reading the bytes before taking the lock, it
+    /// got the old pristine copy, compared it with the new one, and filed it
+    /// as an edit over the kept one. Read under the lock, it sees the new
+    /// copy, finds nothing edited, and the kept edit and its ancestor stay.
+    #[test]
+    fn a_reader_blocked_by_a_delivery_reads_after_it() {
+        let sandbox = Sandbox::new("blocked-reader");
+        let installed = sandbox.dir.join("adguard-cli/userscripts");
+        fs::create_dir_all(&installed).unwrap();
+        fs::write(installed.join("x.meta.json"), r#"{"name": "X", "version": "1"}"#).unwrap();
+        let source = installed.join("x.user.js");
+        let copies = sandbox.copies();
+
+        fs::write(&source, b"original").unwrap();
+        assert!(!copies.observe_installed(&installed, "x").unwrap().edited);
+        fs::write(&source, b"my edit").unwrap();
+        assert!(copies.observe_installed(&installed, "x").unwrap().edited);
+        // AdGuard wiped the edit at the same version, as `check-update` does
+        // for a script with no `updateURL`; the edit lives on in `mine`.
+        fs::write(&source, b"original").unwrap();
+
+        let (inside, waiting) = std::sync::mpsc::channel();
+        let reader = {
+            let copies = sandbox.copies();
+            let installed = installed.clone();
+            std::thread::spawn(move || {
+                waiting.recv().unwrap();
+                copies.observe_installed(&installed, "x").unwrap()
+            })
+        };
+        Copies::delivering(|| {
+            inside.send(()).unwrap();
+            // Long enough for the reader to be parked on the lock.
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            fs::write(&source, b"changed upstream").unwrap();
+            copies.rebase("x", Some("1"), b"changed upstream").unwrap();
+        });
+
+        let observed = reader.join().unwrap();
+        assert_eq!(observed.source, b"changed upstream", "read after the delivery");
+        assert!(!observed.edited);
+        assert_eq!(observed.version.as_deref(), Some("1"));
         assert_eq!(sandbox.kept("x", MINE).as_deref(), Some(&b"my edit"[..]));
         assert_eq!(sandbox.kept("x", MINE_ANCESTOR).as_deref(), Some(&b"original"[..]));
     }
