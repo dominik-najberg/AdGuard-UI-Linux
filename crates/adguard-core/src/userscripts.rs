@@ -81,6 +81,17 @@ pub fn sort(scripts: &mut [Userscript]) {
     scripts.sort_by_key(|script| script.display_name().to_lowercase());
 }
 
+/// The `version` in one script's metadata, read now.
+///
+/// `None` when the script carries none, or its metadata cannot be read —
+/// the same `None` [`read`] gives [`Userscript::version`]. For the one place
+/// that needs a script's version at a moment of its own choosing
+/// ([`crate::userscript_state::Copies::observe_installed`]) rather than the
+/// whole page's.
+pub fn installed_version(dir: &Path, id: &str) -> Option<String> {
+    Meta::read(&dir.join(format!("{id}{META_SUFFIX}"))).string("version")
+}
+
 /// The installed source of a script: `<id>.user.js` beside its metadata.
 pub fn source_path(dir: &Path, id: &str) -> std::path::PathBuf {
     dir.join(format!("{id}{SOURCE_SUFFIX}"))
