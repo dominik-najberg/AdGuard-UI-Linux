@@ -24,7 +24,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Mutex, MutexGuard, RwLock};
 
 use yaml_rust2::yaml::Hash;
 use yaml_rust2::{Yaml, YamlEmitter, YamlLoader};
@@ -195,6 +195,17 @@ fn exclusive() -> MutexGuard<'static, ()> {
     LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// Held for writing while AdGuard fetches a script on our behalf and the
+/// fresh copy is recorded ([`Copies::delivering`]), and for reading by every
+/// comparison ([`Copies::observe`]).
+///
+/// Between AdGuard writing a re-fetched source and this application recording
+/// it as pristine, the file on disk is AdGuard's, but the copy on record is
+/// still the old one. A comparison in that window — any page refresh, toggle
+/// or directory-watch re-check — would file AdGuard's bytes as the user's edit
+/// and overwrite the edit that was kept.
+static DELIVERY: RwLock<()> = RwLock::new(());
+
 /// The copies of each script that tell an edit from the script as AdGuard
 /// delivered it.
 pub struct Copies {
@@ -245,6 +256,7 @@ impl Copies {
     /// `Err` when the copies cannot be read or written; the caller shows the
     /// row as unedited, the one answer that cannot be wrong in a harmful way.
     pub fn observe(&self, id: &str, version: Option<&str>, current: &[u8]) -> io::Result<bool> {
+        let _delivered = DELIVERY.read().unwrap_or_else(|poisoned| poisoned.into_inner());
         let _held = exclusive();
         let dir = self.dir(id)?;
         let version = version.unwrap_or("");
@@ -270,15 +282,24 @@ impl Copies {
         // Edited. Kept only when it changed, so a page reload does not rewrite
         // half a megabyte to say what is already on disk.
         if fs::read(dir.join(MINE)).ok().as_deref() != Some(current) {
-            if read_text(&dir.join(MINE_VERSION)).as_deref() != Some(version) {
-                // A new edit on a new version: the ancestor kept for the old
-                // one no longer belongs to anything.
-                remove_if_present(&dir.join(MINE_ANCESTOR))?;
-            }
+            // A new edit, made on the file as it is now, whose ancestor is the
+            // copy on record. One set aside for an earlier edit no longer
+            // belongs to anything.
+            remove_if_present(&dir.join(MINE_ANCESTOR))?;
             write_atomically(&dir.join(MINE), current)?;
             write_atomically(&dir.join(MINE_VERSION), version.as_bytes())?;
         }
         Ok(true)
+    }
+
+    /// Run `fetch` — have AdGuard install a script, then [`Self::rebase`] what
+    /// it wrote — with no comparison running until it is over.
+    ///
+    /// **Nothing inside may compare**: a [`Self::observe`] from `fetch` would
+    /// wait for this same lock and never get it. Read the result afterwards.
+    pub fn delivering<T>(fetch: impl FnOnce() -> T) -> T {
+        let _delivering = DELIVERY.write().unwrap_or_else(|poisoned| poisoned.into_inner());
+        fetch()
     }
 
     /// [`Self::observe`] every script in `dir`, setting [`Userscript::edited`].
@@ -318,6 +339,16 @@ impl Copies {
         match (recorded, base) {
             (Some(recorded), Some(base)) if recorded != version => {
                 new_release(&dir, &recorded, &base, version, current)
+            }
+            (Some(_), Some(base)) if base != current => {
+                // The same version with different bytes: the author changed
+                // it without a bump. A kept edit was made on the copy being
+                // replaced, so that copy is its ancestor, unless one is
+                // already set aside.
+                if dir.join(MINE).is_file() && !dir.join(MINE_ANCESTOR).is_file() {
+                    write_atomically(&dir.join(MINE_ANCESTOR), &base)?;
+                }
+                write_base(&dir, version, current)
             }
             _ => write_base(&dir, version, current),
         }
@@ -397,15 +428,16 @@ fn new_release(
 ) -> io::Result<()> {
     let mine_version = read_text(&dir.join(MINE_VERSION));
     let has_mine = dir.join(MINE).is_file();
-    if has_mine && mine_version.as_deref() == Some(recorded) {
+    if has_mine && dir.join(MINE_ANCESTOR).is_file() {
+        // The edit already has the copy it was made on set aside — by an
+        // earlier update, or by a same-version re-fetch. Another release
+        // arriving does not make that pair any less mergeable, and it is the
+        // only record of the edit: it stays until the user replaces it with a
+        // new one or reverts.
+    } else if has_mine && mine_version.as_deref() == Some(recorded) {
         // The edit was made on the copy being replaced: keep that copy as its
         // ancestor before the new one takes its place.
         write_atomically(&dir.join(MINE_ANCESTOR), base)?;
-    } else if has_mine && dir.join(MINE_ANCESTOR).is_file() {
-        // An edit from an older release, already set aside with its ancestor
-        // by an earlier update. Another release arriving does not make that
-        // pair any less mergeable, and it is the only record of the edit: it
-        // stays until the user replaces it with a new one or reverts.
     } else {
         // No edit, or one without the copy it was made on — nothing a merge
         // could use.
@@ -760,6 +792,47 @@ mod tests {
         copies.observe("x", Some("3"), b"release 3").unwrap();
         assert_eq!(sandbox.kept("x", MINE).as_deref(), Some(&b"my edit"[..]));
         assert_eq!(sandbox.kept("x", MINE_ANCESTOR).as_deref(), Some(&b"original"[..]));
+    }
+
+    /// The author changed version 1 without a bump and it was re-fetched:
+    /// the edit's ancestor is the copy it was made on, through the next
+    /// versioned update too.
+    #[test]
+    fn a_same_version_refetch_keeps_the_real_ancestor() {
+        let sandbox = Sandbox::new("same-version-refetch");
+        let copies = sandbox.copies();
+        copies.observe("x", Some("1"), b"original").unwrap();
+        copies.observe("x", Some("1"), b"my edit").unwrap();
+        copies.rebase("x", Some("1"), b"changed upstream").unwrap();
+        assert_eq!(sandbox.kept("x", MINE_ANCESTOR).as_deref(), Some(&b"original"[..]));
+        copies.observe("x", Some("2"), b"release 2").unwrap();
+        assert_eq!(sandbox.kept("x", MINE).as_deref(), Some(&b"my edit"[..]));
+        assert_eq!(sandbox.kept("x", MINE_ANCESTOR).as_deref(), Some(&b"original"[..]));
+    }
+
+    /// While a fetch is being recorded, comparisons wait for it.
+    #[test]
+    fn observing_waits_for_a_delivery() {
+        let sandbox = Sandbox::new("delivery");
+        let copies = sandbox.copies();
+        copies.observe("x", Some("1"), b"original").unwrap();
+        copies.observe("x", Some("1"), b"my edit").unwrap();
+        let (started, go) = std::sync::mpsc::channel();
+        let observer = {
+            let copies = sandbox.copies();
+            std::thread::spawn(move || {
+                go.recv().unwrap();
+                // AdGuard's fresh bytes, read mid-delivery.
+                copies.observe("x", Some("1"), b"changed upstream").unwrap()
+            })
+        };
+        Copies::delivering(|| {
+            started.send(()).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            copies.rebase("x", Some("1"), b"changed upstream").unwrap();
+        });
+        assert!(!observer.join().unwrap(), "recorded as pristine before it was compared");
+        assert_eq!(sandbox.kept("x", MINE).as_deref(), Some(&b"my edit"[..]));
     }
 
     #[test]
