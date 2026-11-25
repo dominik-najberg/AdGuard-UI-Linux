@@ -69,10 +69,13 @@ pub fn merge(base: &str, mine: &str, upstream: &str, upstream_label: &str) -> Me
         return Merged::Clean(mine.to_owned());
     }
 
-    // Markers one longer than any run of `<` already opening a line in the
-    // three inputs, so that a script which happens to contain `<<<<<<<` — in a
-    // string, in a comment — can never be mistaken for a conflict, and the
-    // count below counts ours alone.
+    // Markers one longer than any run of `<`, `|`, `=` or `>` already opening
+    // a line in the three inputs. A script can contain any of those lines — in
+    // a template literal, in a comment — and with markers longer than all of
+    // them, no line of the script can equal a marker: so the count below
+    // counts ours alone, and the relabelling cannot touch the script's text.
+    // Only `<` was guarded at first, and a literal `>>>>>>> theirs` line in a
+    // script was then rewritten as a label (found in review).
     let length = [base, mine, upstream]
         .iter()
         .map(|text| longest_marker_run(text))
@@ -104,10 +107,14 @@ pub fn merge(base: &str, mine: &str, upstream: &str, upstream_label: &str) -> Me
     }
 }
 
-/// The longest run of `<` that starts a line in `text`.
+/// The longest run of one marker character — `<`, `|`, `=` or `>` — that
+/// starts a line in `text`.
 fn longest_marker_run(text: &str) -> usize {
     text.lines()
-        .map(|line| line.chars().take_while(|&c| c == '<').count())
+        .filter_map(|line| {
+            let first = line.chars().next().filter(|c| matches!(c, '<' | '|' | '=' | '>'))?;
+            Some(line.chars().take_while(|&c| c == first).count())
+        })
         .max()
         .unwrap_or(0)
 }
@@ -199,6 +206,23 @@ mod tests {
         };
         assert_eq!(conflicts, 1, "the script's own `<<<<<<<` line is not counted");
         assert!(marked.contains("<<<<<<<< your version\n"), "markers lengthened past the script's");
+    }
+
+    /// Every kind of marker line, already in the script, survives a conflict
+    /// elsewhere untouched — the relabelling must only ever touch the merge's
+    /// own markers.
+    #[test]
+    fn marker_like_lines_in_the_script_are_left_alone() {
+        let literal = "const doc = `\n<<<<<<< ours\n||||||| original\n=======\n>>>>>>> theirs\n`;\n";
+        let base = format!("{literal}const x = 1;\n");
+        let mine = base.replace("x = 1", "x = 2");
+        let upstream = base.replace("x = 1", "x = 3");
+        let Merged::Conflict { marked, conflicts } = merge(&base, &mine, &upstream, "1.1") else {
+            panic!("both changed line x");
+        };
+        assert_eq!(conflicts, 1);
+        assert!(marked.starts_with(literal), "the script's own lines are as written: {marked:?}");
+        assert!(marked.contains("\n<<<<<<<< your version\n") && marked.contains("\n>>>>>>>> 1.1\n"));
     }
 
     /// A script without a final newline must still put every marker on a
