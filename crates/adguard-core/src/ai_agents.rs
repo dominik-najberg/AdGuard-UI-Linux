@@ -445,6 +445,53 @@ pub fn looks_like_userscript(text: &str) -> bool {
     head.contains("==UserScript==") && head.contains("==/UserScript==")
 }
 
+/// The userscript in what a chat handed back, or `None` when it cannot be
+/// told apart from the text around it.
+///
+/// A chat answers in Markdown, and copying its whole reply brings the prose and
+/// the fences with the script. Installed verbatim that is a syntax error in
+/// place of a working script. So: a fenced block holding the metadata block is
+/// taken alone, and the first such one wins; without fences the text has to
+/// *be* the script, starting at the metadata block, since nothing else says
+/// where prose would end. One fenced script among two is ambiguous and
+/// refused.
+pub fn extract_userscript(text: &str) -> Option<String> {
+    let mut blocks = Vec::new();
+    let mut lines = text.lines();
+    while let Some(line) = lines.next() {
+        let trimmed = line.trim_start();
+        let ticks = trimmed.chars().take_while(|c| *c == '`').count();
+        if ticks < 3 {
+            continue;
+        }
+        let fence = &trimmed[..ticks];
+        let mut body = Vec::new();
+        let mut closed = false;
+        for inner in lines.by_ref() {
+            let inner_trimmed = inner.trim();
+            if inner_trimmed.starts_with(fence) && inner_trimmed.trim_start_matches('`').is_empty() {
+                closed = true;
+                break;
+            }
+            body.push(inner);
+        }
+        if closed {
+            let body = body.join("\n");
+            if looks_like_userscript(&body) {
+                blocks.push(body);
+            }
+        }
+    }
+    match blocks.len() {
+        1 => return Some(format!("{}\n", blocks.remove(0).trim_end())),
+        0 => {}
+        _ => return None,
+    }
+    let trimmed = text.trim();
+    let starts = trimmed.starts_with("// ==UserScript==");
+    (starts && looks_like_userscript(trimmed)).then(|| format!("{}\n", trimmed))
+}
+
 /// The `==UserScript==` block of a source, as written, if it has one.
 ///
 /// Compared before and after an edit: a change here is the one thing an edit
@@ -1115,6 +1162,20 @@ mod tests {
             metadata_block(source),
             Some("// ==UserScript==\n// @name X\n// ==/UserScript==")
         );
+    }
+
+    #[test]
+    fn a_chat_reply_yields_only_its_script() {
+        let script = "// ==UserScript==\n// @name X\n// ==/UserScript==\ncode();";
+        let reply = format!("Here you go:\n\n```javascript\n{script}\n```\n\nIt now does Y.");
+        assert_eq!(extract_userscript(&reply), Some(format!("{script}\n")));
+        assert_eq!(extract_userscript(&format!("  {script}  ")), Some(format!("{script}\n")));
+        // Prose around an unfenced script: where it ends cannot be known.
+        assert_eq!(extract_userscript(&format!("Sure!\n{script}")), None);
+        // Two fenced scripts: which one is meant cannot be known either.
+        let two = format!("```\n{script}\n```\n```js\n{script}\n```");
+        assert_eq!(extract_userscript(&two), None);
+        assert_eq!(extract_userscript("no script here"), None);
     }
 
     #[test]

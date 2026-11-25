@@ -96,8 +96,6 @@ const INTRO: &str = "Describe the change. An agent on this computer edits the sc
 
 /// Present *Edit with AI…* for `script` over `parent`.
 pub fn present(parent: &impl IsA<gtk::Widget>, script: Script, toasts: adw::ToastOverlay) {
-    let settings = load_settings();
-
     let dialog = adw::Dialog::builder()
         .title("Edit with AI")
         .content_width(560)
@@ -158,108 +156,26 @@ pub fn present(parent: &impl IsA<gtk::Widget>, script: Script, toasts: adw::Toas
         }
     };
 
-    // The actions, most direct first.
+    // The actions, most direct first. Built by `fill_actions`, again after
+    // the agent settings close, so a change made there applies here without
+    // losing what was typed.
     let actions = gtk::Box::builder()
         .orientation(gtk::Orientation::Horizontal)
         .spacing(8)
         .halign(gtk::Align::End)
         .margin_top(12)
         .build();
-
-    let copy = gtk::Button::with_label("Copy prompt");
-    copy.set_tooltip_text(Some("For an agent that can read files on this computer"));
-    let copy_source = gtk::Button::with_label("Copy with source");
-    copy_source.set_tooltip_text(Some("For a chat in the browser: the whole script goes with it"));
-    actions.append(&copy_source);
-    actions.append(&copy);
-
-    let agents = available(&settings);
     let script = Rc::new(script);
-    if let Some((first, rest)) = agents.split_first() {
-        let open = adw::SplitButton::builder()
-            .label(format!("Open in {}", first.name))
-            .build();
-        open.add_css_class("suggested-action");
-        let launch = {
-            let script = script.clone();
-            let toasts = toasts.clone();
-            let text_of = text_of.clone();
-            let dialog = dialog.clone();
-            let settings = settings.clone();
-            move |agent: &Agent| {
-                match launch(&settings, agent, &script, &text_of()) {
-                    Ok(()) => {
-                        toasts.add_toast(toast(&format!(
-                            "{} is open in a terminal; the row shows Edited once it saves",
-                            agent.name
-                        )));
-                        dialog.close();
-                    }
-                    Err(message) => toasts.add_toast(toast(&message)),
-                }
-            }
-        };
-        {
-            let first = first.clone();
-            let launch = launch.clone();
-            open.connect_clicked(move |_| launch(&first));
-        }
-        if rest.is_empty() {
-            // A split button with nothing behind its arrow is a control that
-            // opens onto nothing.
-            open.set_dropdown_tooltip("No other agents found");
-            open.set_sensitive(true);
-        }
-        let others = gtk::Box::builder()
-            .orientation(gtk::Orientation::Vertical)
-            .spacing(2)
-            .build();
-        let popover = gtk::Popover::builder().child(&others).build();
-        for agent in rest {
-            let item = menu_item(&format!("Open in {}", agent.name));
-            let agent = agent.clone();
-            let launch = launch.clone();
-            let popover_ = popover.clone();
-            item.connect_clicked(move |_| {
-                popover_.popdown();
-                launch(&agent);
-            });
-            others.append(&item);
-        }
-        open.set_popover(Some(&popover));
-        actions.append(&open);
-    } else {
-        // No agent installed: copying is the way, and the default.
-        copy.add_css_class("suggested-action");
-    }
-
-    {
+    let text_of: Rc<dyn Fn() -> String> = Rc::new(text_of);
+    let refill: Rc<dyn Fn()> = {
+        let actions = actions.clone();
         let script = script.clone();
-        let toasts = toasts.clone();
         let text_of = text_of.clone();
-        let settings = settings.clone();
-        copy.connect_clicked(move |button| {
-            let text = ai_agents::prompt(settings.prompt_template(), &script.subject(&text_of()));
-            button.clipboard().set_text(&text);
-            toasts.add_toast(toast("Prompt copied. Paste it into your agent"));
-        });
-    }
-    {
-        let script = script.clone();
         let toasts = toasts.clone();
-        let text_of = text_of.clone();
-        copy_source.connect_clicked(move |button| match std::fs::read_to_string(&script.file) {
-            Ok(source) => {
-                let text = ai_agents::prompt_with_source(&script.subject(&text_of()), &source);
-                button.clipboard().set_text(&text);
-                toasts.add_toast(toast(
-                    "Prompt and script copied. When the chat answers, copy its script and \
-                     use Paste from clipboard",
-                ));
-            }
-            Err(err) => toasts.add_toast(toast(&format!("Could not read the script: {err}"))),
-        });
-    }
+        let dialog = dialog.clone();
+        Rc::new(move || fill_actions(&actions, &script, &text_of, &toasts, &dialog))
+    };
+    refill();
 
     let actions_group = adw::PreferencesGroup::new();
     actions_group.add(&actions);
@@ -304,7 +220,10 @@ pub fn present(parent: &impl IsA<gtk::Widget>, script: Script, toasts: adw::Toas
         .build();
     {
         let dialog = dialog.clone();
-        configure.connect_activated(move |_| present_settings(&dialog));
+        configure.connect_activated(move |_| {
+            let refill = refill.clone();
+            present_settings(&dialog, move || refill());
+        });
     }
     let configure_group = adw::PreferencesGroup::new();
     configure_group.add(&configure);
@@ -314,6 +233,117 @@ pub fn present(parent: &impl IsA<gtk::Widget>, script: Script, toasts: adw::Toas
     dialog.set_child(Some(&view));
     dialog.present(Some(parent));
     request.grab_focus();
+}
+
+/// Put the action buttons into `actions`, replacing what is there, from the
+/// settings as they are on disk now. Every click reads them again too, so a
+/// button never acts on settings older than the ones it was drawn from.
+fn fill_actions(
+    actions: &gtk::Box,
+    script: &Rc<Script>,
+    text_of: &Rc<dyn Fn() -> String>,
+    toasts: &adw::ToastOverlay,
+    dialog: &adw::Dialog,
+) {
+    while let Some(child) = actions.first_child() {
+        actions.remove(&child);
+    }
+
+    let copy = gtk::Button::with_label("Copy prompt");
+    copy.set_tooltip_text(Some("For an agent that can read files on this computer"));
+    let copy_source = gtk::Button::with_label("Copy with source");
+    copy_source.set_tooltip_text(Some("For a chat in the browser: the whole script goes with it"));
+    actions.append(&copy_source);
+    actions.append(&copy);
+
+    let agents = available(&load_settings());
+    if let Some((first, rest)) = agents.split_first() {
+        let launch = {
+            let script = script.clone();
+            let toasts = toasts.clone();
+            let text_of = text_of.clone();
+            let dialog = dialog.clone();
+            move |agent: &Agent| match launch(&load_settings(), agent, &script, &text_of()) {
+                Ok(()) => {
+                    toasts.add_toast(toast(&format!(
+                        "{} is open in a terminal; the row shows Edited once it saves",
+                        agent.name
+                    )));
+                    dialog.close();
+                }
+                Err(message) => toasts.add_toast(toast(&message)),
+            }
+        };
+        let label = format!("Open in {}", first.name);
+        let open: gtk::Widget = if rest.is_empty() {
+            // A split button with nothing behind its arrow is a control that
+            // opens onto nothing.
+            let button = gtk::Button::with_label(&label);
+            let first = first.clone();
+            let launch = launch.clone();
+            button.connect_clicked(move |_| launch(&first));
+            button.upcast()
+        } else {
+            let button = adw::SplitButton::builder().label(label.as_str()).build();
+            button.set_dropdown_tooltip("Other agents");
+            {
+                let first = first.clone();
+                let launch = launch.clone();
+                button.connect_clicked(move |_| launch(&first));
+            }
+            let others = gtk::Box::builder()
+                .orientation(gtk::Orientation::Vertical)
+                .spacing(2)
+                .build();
+            let popover = gtk::Popover::builder().child(&others).build();
+            for agent in rest {
+                let item = menu_item(&format!("Open in {}", agent.name));
+                let agent = agent.clone();
+                let launch = launch.clone();
+                let popover_ = popover.clone();
+                item.connect_clicked(move |_| {
+                    popover_.popdown();
+                    launch(&agent);
+                });
+                others.append(&item);
+            }
+            button.set_popover(Some(&popover));
+            button.upcast()
+        };
+        open.add_css_class("suggested-action");
+        actions.append(&open);
+    } else {
+        // No agent installed: copying is the way, and the default.
+        copy.add_css_class("suggested-action");
+    }
+
+    {
+        let script = script.clone();
+        let toasts = toasts.clone();
+        let text_of = text_of.clone();
+        copy.connect_clicked(move |button| {
+            let settings = load_settings();
+            let text = ai_agents::prompt(settings.prompt_template(), &script.subject(&text_of()));
+            button.clipboard().set_text(&text);
+            toasts.add_toast(toast("Prompt copied. Paste it into your agent"));
+        });
+    }
+    {
+        let script = script.clone();
+        let toasts = toasts.clone();
+        let text_of = text_of.clone();
+        copy_source.connect_clicked(move |button| match std::fs::read_to_string(&script.file) {
+            Ok(source) => {
+                let text = ai_agents::prompt_with_source(&script.subject(&text_of()), &source);
+                button.clipboard().set_text(&text);
+                toasts.add_toast(toast(
+                    "Prompt and script copied. When the chat answers, copy its script and \
+                     use Paste from clipboard",
+                ));
+            }
+            Err(err) => toasts.add_toast(toast(&format!("Could not read the script: {err}"))),
+        });
+    }
 }
 
 /// Open `agent` on `script` in a terminal, or on its own when it needs none.
@@ -373,13 +403,14 @@ async fn paste_back(
     text: &str,
     toasts: &adw::ToastOverlay,
 ) -> bool {
-    if !ai_agents::looks_like_userscript(text) {
+    let Some(text) = ai_agents::extract_userscript(text) else {
         toasts.add_toast(toast(
-            "The clipboard does not hold a userscript: copy the whole file from the chat, \
-             starting at // ==UserScript==",
+            "The clipboard does not hold one whole userscript: copy the script itself from \
+             the chat, starting at // ==UserScript==",
         ));
         return false;
-    }
+    };
+    let text = text.as_str();
     let current = std::fs::read_to_string(&script.file).unwrap_or_default();
     if current == text {
         toasts.add_toast(toast("That is the script as it is now; nothing to change"));
@@ -433,8 +464,9 @@ fn write_atomically(path: &Path, text: &str) -> std::io::Result<()> {
     Ok(())
 }
 
-/// The agent settings, over `parent`.
-pub fn present_settings(parent: &impl IsA<gtk::Widget>) {
+/// The agent settings, over `parent`. `on_closed` runs when the window
+/// closes, for whatever drew itself from the settings to draw itself again.
+pub fn present_settings(parent: &impl IsA<gtk::Widget>, on_closed: impl Fn() + 'static) {
     let state = Rc::new(SettingsWindow {
         settings: RefCell::new(load_settings()),
         dialog: adw::PreferencesDialog::builder()
@@ -453,6 +485,15 @@ pub fn present_settings(parent: &impl IsA<gtk::Widget>) {
     });
     state.dialog.add(&state.page);
     state.build();
+    // Every handler in the window holds the state weakly, so this is what
+    // keeps it alive while the window is up, and letting go of it on close
+    // is what frees it: held strongly by a handler with no release, the
+    // state would hold the dialog and the dialog the handler.
+    let owner = RefCell::new(Some(state.clone()));
+    state.dialog.connect_closed(move |_| {
+        owner.borrow_mut().take();
+        on_closed();
+    });
     state.dialog.present(Some(parent));
 }
 
