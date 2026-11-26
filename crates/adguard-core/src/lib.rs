@@ -30,6 +30,8 @@ pub mod rejected;
 pub mod release;
 pub mod requests;
 pub mod rules;
+pub mod script_merge;
+pub mod script_update;
 pub mod site;
 pub mod trust;
 pub mod update;
