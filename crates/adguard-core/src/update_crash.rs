@@ -161,6 +161,8 @@ mod tests {
             download_url: None,
             enabled,
             ambiguous: false,
+            alias: None,
+            edited: false,
         };
         let scripts = vec![script("bare", true), script("off", false), script("safe", true), script("gone", true)];
         let found: Vec<&str> = suspects(&dir, &scripts).iter().map(|s| s.id.as_str()).collect();

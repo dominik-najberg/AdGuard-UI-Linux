@@ -1609,6 +1609,19 @@ pub struct Userscript {
     /// worked this out for itself would be re-deriving a CLI behaviour from a
     /// widget.
     pub ambiguous: bool,
+    /// What the user renamed this script to, kept by this application rather
+    /// than by AdGuard ([`crate::userscript_state::Aliases`]).
+    ///
+    /// **Display only.** AdGuard has no rename, and the CLI goes on matching
+    /// `enable`, `disable` and `remove` against the id and the *original*
+    /// title — so [`Self::ambiguous`] is computed from [`Self::name`] and never
+    /// from this, and every command is still given [`Self::id`].
+    pub alias: Option<String>,
+    /// Whether the installed `.user.js` differs from the copy AdGuard
+    /// delivered for this version ([`crate::userscript_state::Copies`]).
+    /// `false` when that could not be told, which is the state to fall back to:
+    /// a marker that claims edits nobody made is worse than a missing one.
+    pub edited: bool,
 }
 
 /// One of AdGuard's own userscripts, offered before it is installed.
@@ -1731,7 +1744,21 @@ impl Userscript {
     /// user can act on, it is what the CLI's own messages will echo, and a
     /// script with no `@name` is far likelier than a filter with no title —
     /// nothing validates a userscript's metadata block.
+    ///
+    /// The user's own name for it comes first, when there is one: it is the
+    /// whole point of renaming. [`Self::original_name`] is what AdGuard calls
+    /// it.
     pub fn display_name(&self) -> &str {
+        match self.alias.as_deref().map(str::trim) {
+            Some(alias) if !alias.is_empty() => alias,
+            _ => self.original_name(),
+        }
+    }
+
+    /// The name AdGuard knows this script by: its metadata's `name`, or the
+    /// id when there is none. What a rename is measured against, and what an
+    /// alias is reset to.
+    pub fn original_name(&self) -> &str {
         if self.name.trim().is_empty() {
             &self.id
         } else {
