@@ -975,13 +975,24 @@ impl AboutPage {
         let cli = self.cli.clone();
         let this = self.clone();
         worker::run(
-            move || cli.check_update(),
-            move |result: Result<UpdateReport, adguard_core::Error>| {
+            move || {
+                let result = cli.check_update();
+                // Only after the measured crash, a segfault, and on this
+                // thread: it reads every enabled script's head, which is no
+                // work for the main loop. Any other death is not the scripts'.
+                let suspects = match &result {
+                    Err(err) if adguard_core::update_crash::is_the_measured_crash(err) => crash_suspects(),
+                    _ => Vec::new(),
+                };
+                (result, suspects)
+            },
+            move |(result, suspects): (Result<UpdateReport, adguard_core::Error>, Vec<String>)| {
                 this.busy.set(false);
                 this.check.set_sensitive(true);
                 this.check.set_label(UPDATE);
                 match result {
                     Ok(report) => this.render(&report),
+                    Err(err @ adguard_core::Error::Crashed { .. }) => this.render_crash(&err.to_string(), &suspects),
                     Err(err) => this.render_error(&err.to_string()),
                 }
             },
@@ -1100,11 +1111,76 @@ impl AboutPage {
         self.toasts.add_toast(toast(message));
     }
 
+    /// `check-update` was killed rather than finishing.
+    ///
+    /// Not [`Self::render_error`]'s *could not be asked*: AdGuard was asked,
+    /// and part of the update probably happened — the filters come before the
+    /// step that crashes — so there is no report to draw and no honest claim
+    /// that nothing changed. What there is, when the page can find it, is the
+    /// cause: an enabled userscript naming no update address, which is the one
+    /// measured crash (contract §15), and switching it off is a complete fix.
+    fn render_crash(self: &Rc<Self>, message: &str, suspects: &[String]) {
+        self.clear();
+
+        let subtitle = match suspects {
+            [] => format!(
+                "{message}. Some components may not have been updated. Try again; if it keeps \
+                 happening, AdGuard's log has the details."
+            ),
+            [one] => format!(
+                "AdGuard crashes when it updates the userscript \u{201c}{one}\u{201d}, which names no \
+                 address to update from, so the rest of the update did not run. Switch it off or \
+                 remove it on the Extensions page, then try again."
+            ),
+            many => format!(
+                "AdGuard crashes when it updates userscripts that name no address to update from, so \
+                 the rest of the update did not run. Switch these off or remove them on the \
+                 Extensions page, then try again: {}.",
+                many.iter().map(|name| format!("\u{201c}{name}\u{201d}")).collect::<Vec<_>>().join(", ")
+            ),
+        };
+
+        let row = adw::ActionRow::builder()
+            .title("AdGuard crashed during the update")
+            .subtitle(&subtitle)
+            .build();
+        // Script names are their authors' text.
+        row.set_use_markup(false);
+        row.set_subtitle_lines(6);
+        row.set_subtitle_selectable(true);
+        row.add_prefix(&gtk::Image::from_icon_name("dialog-error-symbolic"));
+
+        self.results.add(&row);
+        self.rows.borrow_mut().push(row);
+        self.results.set_title(&format!("Last tried {}", now()));
+        self.results.set_visible(true);
+        self.notice.set_visible(false);
+
+        self.toasts.add_toast(toast("AdGuard crashed during the update"));
+    }
+
     fn clear(&self) {
         for row in self.rows.borrow_mut().drain(..) {
             self.results.remove(&row);
         }
     }
+}
+
+/// The names of the enabled userscripts `check-update` crashes on, read from
+/// the machine's install. Empty when the install cannot be read: this names a
+/// cause, and without the files there is none to name.
+fn crash_suspects() -> Vec<String> {
+    let Ok(config) = Config::load() else {
+        return Vec::new();
+    };
+    let Some(dir) = adguard_core::paths::userscripts_dir() else {
+        return Vec::new();
+    };
+    let scripts = adguard_core::userscripts::read(&dir, &config.enabled_userscripts(), &adguard_core::Locale::from_env());
+    adguard_core::update_crash::suspects(&dir, &scripts)
+        .into_iter()
+        .map(|script| script.display_name().to_owned())
+        .collect()
 }
 
 /// `AdGuard CLI v1.4.13` -> `1.4.13`, and anything else through unchanged.
