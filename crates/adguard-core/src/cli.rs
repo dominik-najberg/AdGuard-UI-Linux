@@ -223,6 +223,18 @@ pub enum Error {
     #[error("{message}")]
     Refused { message: String },
 
+    /// The CLI was killed by a signal rather than exiting: it crashed.
+    ///
+    /// Its own variant because nothing it printed explains it. Measured on
+    /// 1.5.1 (contract §15): `check-update` segfaults on an enabled userscript
+    /// that names no update address, and its piped stdout — block-buffered,
+    /// and lost with the process — ends at `Checking filters updates...`
+    /// although the crash is in the userscripts step, two further on. Until
+    /// this variant existed, that header line was reported as a
+    /// [`Self::Refused`], as though it were AdGuard's reason.
+    #[error("AdGuard CLI crashed while running `{args}` ({})", signal_name(*signal))]
+    Crashed { args: String, signal: i32 },
+
     /// [`Cli::configure`] was called against a data directory that already has
     /// a `proxy.yaml`. **We** refused, before spawning anything.
     ///
@@ -539,6 +551,15 @@ impl Cli {
         // Before anything reads it, failure classification included: the hint
         // is appended to failures as well, and `last_line` would report it.
         let (stdout, newer) = split_update_hint(&stdout);
+
+        // Before any reading of the output: a process killed by a signal said
+        // nothing about why, and whatever it had printed is a fragment.
+        if let Some(signal) = std::os::unix::process::ExitStatusExt::signal(&status) {
+            return Err(Error::Crashed {
+                args: args.join(" "),
+                signal,
+            });
+        }
 
         if !status.success() {
             // Exit 1 is not exclusively our own malformed command line, which
@@ -1849,6 +1870,12 @@ fn redact_error(err: Error, secret: &str) -> Error {
         Error::Busy { args } => Error::Busy {
             args: redact(&args, secret),
         },
+        // Quotes the command line, as `TimedOut` does, and for its reason: a
+        // `config set` on a credential key can crash as readily as it can hang.
+        Error::Crashed { args, signal } => Error::Crashed {
+            args: redact(&args, secret),
+            signal,
+        },
         // Quotes no argument of ours today, but it carries a string the CLI
         // wrote and this match is the place that assumption gets checked.
         Error::Unlicensed { message, offline } => Error::Unlicensed {
@@ -2565,6 +2592,17 @@ fn activation_url(stdout: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// A signal's name, for a sentence about a crash. The usual three are named in
+/// words; anything else by number.
+fn signal_name(signal: i32) -> String {
+    match signal {
+        libc::SIGSEGV => "segmentation fault".to_owned(),
+        libc::SIGABRT => "aborted".to_owned(),
+        libc::SIGKILL => "killed".to_owned(),
+        other => format!("signal {other}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3180,6 +3218,30 @@ mod tests {
         // It was not killed: it finished its work, and the slot came back.
         cli.run_within(&["0"], Duration::from_secs(10)).expect("slot freed once it exited");
         assert!(marker.exists(), "the timed-out command was killed before finishing");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// The `check-update` crash, in miniature: a header printed, then death by
+    /// SIGSEGV. The header is a fragment, not AdGuard's reason, so it must not
+    /// come back as a `Refused` carrying it — which is what happened before
+    /// `Crashed` existed (contract §15).
+    #[test]
+    fn a_command_killed_by_a_signal_is_a_crash_not_a_refusal() {
+        let home = std::env::temp_dir().join(format!("adguard-ui-crash-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        let err = cli_for("/bin/sh")
+            .with_xdg_data_home(&home)
+            // Spelt with `%s` so the command line, which the message quotes, does
+            // not itself contain the fragment the last assertion looks for.
+            .run_within(&["-c", "printf 'Checking %s updates...\\n' filters; kill -SEGV $$"], Duration::from_secs(10))
+            .expect_err("a crash is not a success");
+        assert!(
+            matches!(err, Error::Crashed { signal: libc::SIGSEGV, .. }),
+            "expected a crash, got {err:?}"
+        );
+        assert!(err.to_string().contains("segmentation fault"), "{err}");
+        assert!(!err.to_string().contains("Checking filters"), "{err}");
         let _ = std::fs::remove_dir_all(&home);
     }
 

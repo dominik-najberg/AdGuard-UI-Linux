@@ -14,3 +14,4 @@ rusqlite.workspace = true
 yaml-rust2.workspace = true
 ureq.workspace = true
 minisign-verify.workspace = true
+diffy.workspace = true
