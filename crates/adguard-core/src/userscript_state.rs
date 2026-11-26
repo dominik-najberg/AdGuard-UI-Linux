@@ -459,25 +459,39 @@ impl Copies {
     /// edit as an edit, with the copy it was made on set aside, for the merge
     /// that follows.
     ///
-    /// Only sources whose bytes changed during the run are recorded: a script
-    /// it skipped — switched off, or never reached before a crash — still
-    /// holds whatever the user last saved, and that is not AdGuard's copy.
+    /// **Only what AdGuard rewrote is recorded, and its metadata says which.**
+    /// AdGuard writes a script's `.meta.json` with its source on every update
+    /// — measured 26 November 2026 on 1.5.1: a same-version re-download left
+    /// the metadata byte-identical but moved its mtime to the source's. An
+    /// editor saving during the run touches the source alone, and a script
+    /// the run skipped (switched off, or past a crash) touches neither. Each
+    /// of those still holds the user's bytes, which are not AdGuard's copy,
+    /// so a source is recorded only when its bytes *and* its metadata's mtime
+    /// both moved. What is left is an editor saving the same script in the
+    /// instant after AdGuard wrote it, which nothing here can tell apart.
     pub fn recording_delivery<T>(&self, dir: &Path, update: impl FnOnce() -> T) -> T {
         let _delivering = DELIVERY.write().unwrap_or_else(|poisoned| poisoned.into_inner());
-        let before: Vec<(String, Option<Vec<u8>>)> =
+        let meta_time = |id: &str| {
+            fs::metadata(crate::userscripts::meta_path(dir, id)).and_then(|meta| meta.modified()).ok()
+        };
+        let before: Vec<(String, Option<Vec<u8>>, Option<std::time::SystemTime>)> =
             crate::userscripts::read(dir, &[], &crate::locale::Locale::english())
                 .into_iter()
                 .map(|script| {
                     let source = fs::read(crate::userscripts::source_path(dir, &script.id)).ok();
-                    (script.id, source)
+                    let written = meta_time(&script.id);
+                    (script.id, source, written)
                 })
                 .collect();
         let answer = update();
-        for (id, before) in before {
+        for (id, source, written) in before {
+            if meta_time(&id) == written {
+                continue;
+            }
             let Ok(after) = fs::read(crate::userscripts::source_path(dir, &id)) else {
                 continue;
             };
-            if before.as_deref() != Some(after.as_slice()) {
+            if source.as_deref() != Some(after.as_slice()) {
                 let version = crate::userscripts::installed_version(dir, &id);
                 let _ = self.rebase(&id, version.as_deref(), &after);
             }
@@ -1387,12 +1401,26 @@ mod tests {
             assert!(copies.observe_installed(&installed, id).unwrap().edited);
         }
 
-        // The run re-downloads `s` with the author's same-version change and
-        // never reaches `untouched`.
+        // The run re-downloads `s` with the author's same-version change —
+        // metadata and source, as AdGuard writes them — never reaches
+        // `untouched`, and an editor saves `saved` meanwhile.
+        fs::write(installed.join("saved.meta.json"), r#"{"name": "S", "version": "1.0"}"#).unwrap();
+        fs::write(installed.join("saved.user.js"), V1).unwrap();
+        copies.observe_installed(&installed, "saved").unwrap();
+        // Coarse filesystem clocks: let the metadata rewrite land on a later tick.
+        std::thread::sleep(std::time::Duration::from_millis(20));
         let changed = V1.replace("a = 1", "a = 10");
-        copies.recording_delivery(&installed, || fs::write(installed.join("s.user.js"), &changed).unwrap());
+        copies.recording_delivery(&installed, || {
+            fs::write(installed.join("s.meta.json"), r#"{"name": "S", "version": "1.0"}"#).unwrap();
+            fs::write(installed.join("s.user.js"), &changed).unwrap();
+            fs::write(installed.join("saved.user.js"), &edited).unwrap();
+        });
 
         assert!(copies.observe_installed(&installed, "untouched").unwrap().edited, "not recorded as pristine");
+        assert!(
+            copies.observe_installed(&installed, "saved").unwrap().edited,
+            "an editor's save during the run is the user's, not AdGuard's"
+        );
         assert_eq!(copies.pending_installed(&installed, "s").unwrap(), Some(Pending::SetAside));
         assert_eq!(copies.carry_installed(&installed, "s").unwrap(), Carry::Kept);
         let now = fs::read_to_string(installed.join("s.user.js")).unwrap();

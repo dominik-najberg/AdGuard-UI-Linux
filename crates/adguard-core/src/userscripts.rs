@@ -92,6 +92,12 @@ pub fn installed_version(dir: &Path, id: &str) -> Option<String> {
     Meta::read(&dir.join(format!("{id}{META_SUFFIX}"))).string("version")
 }
 
+/// A script's metadata file: `<id>.meta.json`, which AdGuard rewrites with
+/// the source on every update it makes.
+pub fn meta_path(dir: &Path, id: &str) -> std::path::PathBuf {
+    dir.join(format!("{id}{META_SUFFIX}"))
+}
+
 /// The installed source of a script: `<id>.user.js` beside its metadata.
 pub fn source_path(dir: &Path, id: &str) -> std::path::PathBuf {
     dir.join(format!("{id}{SOURCE_SUFFIX}"))

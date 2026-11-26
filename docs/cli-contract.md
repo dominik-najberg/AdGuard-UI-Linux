@@ -2212,6 +2212,8 @@ That makes *Reinstall* buildable from the recorded `downloadURL`, and it is the 
 | enabled, source names neither `@updateURL` nor `@downloadURL` | **segfault**: the same warning, then `ffurl_parse: : more data`, then signal 11 | — |
 | disabled | not fetched, not replaced, **not re-enabled** | kept |
 
+**An update rewrites the metadata file with the source, and an editor does not.** Measured 26 November 2026 on 1.5.1: a same-version re-download of a script with no `updateURL` left its `.meta.json` byte-identical but moved its mtime to the instant the `.user.js` was written. That is how the Extensions page tells a source AdGuard re-delivered during a `check-update` from one an editor saved at the same time (`Copies::recording_delivery`): only the first moves both.
+
 Four consequences, each a constraint on the page rather than a curiosity:
 
 - **An edit can be destroyed with no new version anywhere.** A script without an `updateURL` — the third row, which is how AdGuard records any script whose source declared none — is reinstalled from scratch every time `check-update` runs. A page that keeps edits cannot rely on "no new version, so nothing happened"; it has to compare the file with its own copies after every run. That is why the Extensions page never discards a kept edit merely because the installed file matches AdGuard's copy again (`userscript_state::Copies::observe`).
