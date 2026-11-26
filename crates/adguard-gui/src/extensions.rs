@@ -29,7 +29,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use adguard_core::script_update::{self, Check};
-use adguard_core::userscript_state::{Aliases, Carried, Copies, Pending};
+use adguard_core::userscript_state::{Aliases, Carry as Carried, Copies, Pending};
 use adguard_core::userscripts::{self, Helper};
 use adguard_core::{Cli, Config, Locale, Userscript, INSTALL_LINKS};
 use adw::prelude::*;
@@ -2960,10 +2960,9 @@ fn read(locale: &Locale) -> Result<Loaded, String> {
         let Some(copies) = &copies else {
             continue;
         };
-        let Ok(current) = std::fs::read(userscripts::source_path(&dir, &script.id)) else {
-            continue;
-        };
-        if let Ok(Some(state)) = copies.pending(&script.id, script.version.as_deref(), &current) {
+        // Read under the delivery lock, never from bytes read before it:
+        // a pending edit is what the after-check pass writes back.
+        if let Ok(Some(state)) = copies.pending_installed(&dir, &script.id) {
             pending.insert(script.id.clone(), state);
         }
     }
@@ -3077,36 +3076,17 @@ enum Carry {
 }
 
 /// Carry `id`'s kept edit into its installed source, on the worker
-/// ([`Copies::carry_over`], then [`Copies::put_source`]).
+/// ([`Copies::carry_installed`], which reads and writes under the delivery
+/// lock).
 fn carry(id: &str) -> Carry {
     let (Some(dir), Some(copies)) = (adguard_core::paths::userscripts_dir(), Copies::locate()) else {
         return Carry::Failed("the copies cannot be found".to_owned());
     };
-    let path = userscripts::source_path(&dir, id);
-    let current = match std::fs::read(&path) {
-        Ok(current) => current,
-        Err(err) => return Carry::Failed(err.to_string()),
-    };
-    let version = userscripts::read(&dir, &[], &Locale::english())
-        .into_iter()
-        .find(|script| script.id == id)
-        .and_then(|script| script.version);
-    let label = version.clone().unwrap_or_else(|| "the update".to_owned());
-    match copies.carry_over(id, version.as_deref(), &current, &label) {
-        Ok(None) => Carry::Nothing,
-        Ok(Some(Carried::Clean(merged))) => match copies.put_source(id, &path, &current, &merged) {
-            Ok(true) => Carry::Kept,
-            Ok(false) => Carry::Moved,
-            Err(err) => Carry::Failed(err.to_string()),
-        },
-        Ok(Some(Carried::Conflict { marked, conflicts })) => Carry::Clash {
-            marked: Some(marked),
-            conflicts,
-        },
-        Ok(Some(Carried::Unmergeable)) => Carry::Clash {
-            marked: None,
-            conflicts: 0,
-        },
+    match copies.carry_installed(&dir, id) {
+        Ok(Carried::Nothing) => Carry::Nothing,
+        Ok(Carried::Kept) => Carry::Kept,
+        Ok(Carried::Moved) => Carry::Moved,
+        Ok(Carried::Clash { marked, conflicts }) => Carry::Clash { marked, conflicts },
         Err(err) => Carry::Failed(err.to_string()),
     }
 }
@@ -3116,11 +3096,7 @@ fn keep_mine(id: &str) -> Carry {
     let (Some(dir), Some(copies)) = (adguard_core::paths::userscripts_dir(), Copies::locate()) else {
         return Carry::Failed("the copies cannot be found".to_owned());
     };
-    let path = userscripts::source_path(&dir, id);
-    let (Ok(current), Ok(mine)) = (std::fs::read(&path), copies.kept_edit(id)) else {
-        return Carry::Failed("your changes could not be read".to_owned());
-    };
-    match copies.put_source(id, &path, &current, &mine) {
+    match copies.keep_edit_installed(&dir, id) {
         Ok(true) => Carry::Kept,
         Ok(false) => Carry::Moved,
         Err(err) => Carry::Failed(err.to_string()),

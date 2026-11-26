@@ -64,6 +64,7 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
+use adguard_core::userscript_state::Copies;
 use adguard_core::{Catalogue, Channel, Cli, Config, FilterSet, Standing, UpdateReport, Verdict};
 use adw::prelude::*;
 use gtk::glib;
@@ -986,7 +987,14 @@ impl AboutPage {
         let this = self.clone();
         worker::run(
             move || {
-                let result = cli.check_update();
+                // A delivery like the Extensions page's own fetches: no
+                // comparison of a script's source runs while AdGuard rewrites
+                // them, and each one it changed is recorded as AdGuard's copy
+                // before any can (`Copies::recording_delivery`).
+                let result = match (adguard_core::paths::userscripts_dir(), Copies::locate()) {
+                    (Some(dir), Some(copies)) => copies.recording_delivery(&dir, || cli.check_update()),
+                    _ => cli.check_update(),
+                };
                 // Only after the measured crash, a segfault, and on this
                 // thread: it reads every enabled script's head, which is no
                 // work for the main loop. Any other death is not the scripts'.

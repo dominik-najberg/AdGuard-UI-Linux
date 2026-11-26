@@ -254,6 +254,20 @@ pub struct Observed {
     pub source: Vec<u8>,
 }
 
+/// What [`Copies::carry_installed`] did with a kept edit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Carry {
+    /// Nothing was pending.
+    Nothing,
+    /// The edit is installed again.
+    Kept,
+    /// It clashes with what is installed; `marked` is the merge with git's
+    /// markers, `None` when the copies could not be merged as text at all.
+    Clash { marked: Option<String>, conflicts: usize },
+    /// The source changed between the read and the write, and was left alone.
+    Moved,
+}
+
 /// The copies of each script that tell an edit from the script as AdGuard
 /// delivered it.
 pub struct Copies {
@@ -379,6 +393,96 @@ impl Copies {
             write_atomically(&dir.join(MINE_VERSION), version.as_bytes())?;
         }
         Ok(true)
+    }
+
+    /// [`Self::pending`] for script `id` as installed in `dir` now: its version
+    /// and source read under the delivery lock, for the reason
+    /// [`Self::observe_installed`] gives.
+    pub fn pending_installed(&self, dir: &Path, id: &str) -> io::Result<Option<Pending>> {
+        let _delivered = DELIVERY.read().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let version = crate::userscripts::installed_version(dir, id);
+        let source = fs::read(crate::userscripts::source_path(dir, id))?;
+        let _held = exclusive();
+        Ok(pending_in(&self.dir(id)?, version.as_deref().unwrap_or(""), &source))
+    }
+
+    /// Carry script `id`'s kept edit into its installed source
+    /// ([`Self::carry_over`], then [`Self::put_source`]), reading the version
+    /// and the source under the delivery lock and writing before it is let
+    /// go — so no fetch of ours lands between the bytes the merge was made
+    /// against and the write, where the merge would go over AdGuard's fresh
+    /// copy and then be recorded as pristine.
+    pub fn carry_installed(&self, dir: &Path, id: &str) -> io::Result<Carry> {
+        let _delivered = DELIVERY.read().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let version = crate::userscripts::installed_version(dir, id);
+        let target = crate::userscripts::source_path(dir, id);
+        let current = fs::read(&target)?;
+        let label = version.clone().unwrap_or_else(|| "the update".to_owned());
+        Ok(match self.carry_over(id, version.as_deref(), &current, &label)? {
+            None => Carry::Nothing,
+            Some(Carried::Clean(merged)) => match self.put_source(id, &target, &current, &merged)? {
+                true => Carry::Kept,
+                false => Carry::Moved,
+            },
+            Some(Carried::Conflict { marked, conflicts }) => Carry::Clash {
+                marked: Some(marked),
+                conflicts,
+            },
+            Some(Carried::Unmergeable) => Carry::Clash {
+                marked: None,
+                conflicts: 0,
+            },
+        })
+    }
+
+    /// *Keep my version*: install the kept edit as it was over script `id`'s
+    /// source, under the delivery lock as [`Self::carry_installed`] is.
+    /// `Ok(false)` when the source moved meanwhile.
+    pub fn keep_edit_installed(&self, dir: &Path, id: &str) -> io::Result<bool> {
+        let _delivered = DELIVERY.read().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let target = crate::userscripts::source_path(dir, id);
+        let current = fs::read(&target)?;
+        let mine = self.kept_edit(id)?;
+        self.put_source(id, &target, &current, &mine)
+    }
+
+    /// Run `update` — AdGuard's own `check-update` — as a delivery: no
+    /// comparison runs while it does, and every installed source it changed
+    /// is then recorded as AdGuard's copy ([`Self::rebase`]) before any can.
+    ///
+    /// **A `check-update` is a fetch like ours**, and the page compares the
+    /// moment a source changes (the directory watch). A script with no
+    /// `updateURL` is downloaded again at the same version on every run
+    /// (contract §15), and if its author changed it without a bump, a
+    /// comparison in the middle would file AdGuard's new bytes as the user's
+    /// edit — over the kept one. Recording each changed source here keeps the
+    /// edit as an edit, with the copy it was made on set aside, for the merge
+    /// that follows.
+    ///
+    /// Only sources whose bytes changed during the run are recorded: a script
+    /// it skipped — switched off, or never reached before a crash — still
+    /// holds whatever the user last saved, and that is not AdGuard's copy.
+    pub fn recording_delivery<T>(&self, dir: &Path, update: impl FnOnce() -> T) -> T {
+        let _delivering = DELIVERY.write().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let before: Vec<(String, Option<Vec<u8>>)> =
+            crate::userscripts::read(dir, &[], &crate::locale::Locale::english())
+                .into_iter()
+                .map(|script| {
+                    let source = fs::read(crate::userscripts::source_path(dir, &script.id)).ok();
+                    (script.id, source)
+                })
+                .collect();
+        let answer = update();
+        for (id, before) in before {
+            let Ok(after) = fs::read(crate::userscripts::source_path(dir, &id)) else {
+                continue;
+            };
+            if before.as_deref() != Some(after.as_slice()) {
+                let version = crate::userscripts::installed_version(dir, &id);
+                let _ = self.rebase(&id, version.as_deref(), &after);
+            }
+        }
+        answer
     }
 
     /// Run `fetch` — have AdGuard install a script, then [`Self::rebase`] what
@@ -1260,6 +1364,40 @@ mod tests {
         };
         let merged = String::from_utf8(merged).unwrap();
         assert!(merged.contains("a = 10") && merged.contains("c = 30"), "{merged}");
+    }
+
+    /// The installed-file forms read the script where it is. `check-update`
+    /// re-delivering the same bytes over an edit, recorded as a delivery,
+    /// leaves it pending; carrying puts it back; and a script the run did
+    /// not touch is not recorded at all.
+    #[test]
+    fn a_recorded_delivery_and_carry_bring_an_edit_back() {
+        let sandbox = Sandbox::new("recorded-delivery");
+        let installed = sandbox.dir.join("adguard-cli/userscripts");
+        fs::create_dir_all(&installed).unwrap();
+        for id in ["s", "untouched"] {
+            fs::write(installed.join(format!("{id}.meta.json")), r#"{"name": "S", "version": "1.0"}"#).unwrap();
+            fs::write(installed.join(format!("{id}.user.js")), V1).unwrap();
+        }
+        let copies = sandbox.copies();
+        let edited = V1.replace("c = 3", "c = 30");
+        for id in ["s", "untouched"] {
+            copies.observe_installed(&installed, id).unwrap();
+            fs::write(installed.join(format!("{id}.user.js")), &edited).unwrap();
+            assert!(copies.observe_installed(&installed, id).unwrap().edited);
+        }
+
+        // The run re-downloads `s` with the author's same-version change and
+        // never reaches `untouched`.
+        let changed = V1.replace("a = 1", "a = 10");
+        copies.recording_delivery(&installed, || fs::write(installed.join("s.user.js"), &changed).unwrap());
+
+        assert!(copies.observe_installed(&installed, "untouched").unwrap().edited, "not recorded as pristine");
+        assert_eq!(copies.pending_installed(&installed, "s").unwrap(), Some(Pending::SetAside));
+        assert_eq!(copies.carry_installed(&installed, "s").unwrap(), Carry::Kept);
+        let now = fs::read_to_string(installed.join("s.user.js")).unwrap();
+        assert!(now.contains("a = 10") && now.contains("c = 30"), "{now}");
+        assert_eq!(copies.carry_installed(&installed, "s").unwrap(), Carry::Nothing);
     }
 
     /// A source that moved since the merge was made is not written over.
