@@ -6,6 +6,7 @@
 //! measured CLI behaviour the wrapper encodes.
 
 mod about;
+mod ai_edit;
 mod activity;
 mod advanced;
 mod autostart;

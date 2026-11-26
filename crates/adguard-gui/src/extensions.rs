@@ -29,6 +29,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use adguard_core::script_update::{self, Check};
+use adguard_core::userscript_prefs::{self, AutoUpdate};
 use adguard_core::userscript_state::{Aliases, Carry as Carried, Copies, Pending};
 use adguard_core::userscripts::{self, Helper};
 use adguard_core::{Cli, Config, Locale, Userscript, INSTALL_LINKS};
@@ -275,6 +276,14 @@ pub struct ExtensionsPage {
     /// Whether this run has checked at all: the first build of the page does,
     /// once, and the daily timer after that.
     ever_checked: Cell<bool>,
+    /// Set while [`Self::auto_update`]'s job runs, so a second check landing
+    /// meanwhile does not start the same installs again.
+    auto_updating: Cell<bool>,
+    /// When *Edit source…* or *Edit with AI…* was last opened, by id. The
+    /// automatic update leaves such a script alone for [`EDITING_GRACE`]:
+    /// an editor or agent may still be about to save, and no lock reaches
+    /// another program, so a save during the download would be overwritten.
+    opened_for_edit: RefCell<HashMap<String, std::time::Instant>>,
     /// The *Installed* group's header: when it last checked, and *Check now*.
     check_label: RefCell<Option<gtk::Label>>,
     check_button: RefCell<Option<gtk::Button>>,
@@ -334,6 +343,8 @@ impl ExtensionsPage {
             checked: RefCell::new(None),
             checking: Cell::new(false),
             ever_checked: Cell::new(false),
+            auto_updating: Cell::new(false),
+            opened_for_edit: RefCell::new(HashMap::new()),
             check_label: RefCell::new(None),
             check_button: RefCell::new(None),
         });
@@ -504,7 +515,166 @@ impl ExtensionsPage {
             group.add(&self.row(script));
         }
         page.add(&group);
+        if let Some(updates) = self.auto_update_group() {
+            page.add(&updates);
+        }
         page.upcast()
+    }
+
+    /// The switch that lets the daily check install what it finds.
+    ///
+    /// Below the list rather than in its header: it is a standing choice made
+    /// once, where *Check now* beside the title is an action taken often. Off
+    /// by default; `userscript_prefs` says why. `None` with no home directory,
+    /// where the choice could not be kept.
+    fn auto_update_group(self: &Rc<Self>) -> Option<adw::PreferencesGroup> {
+        let prefs = AutoUpdate::locate()?;
+        let group = adw::PreferencesGroup::new();
+        let row = adw::SwitchRow::builder()
+            .title("Update userscripts automatically")
+            .subtitle(
+                "After each check, about once a day. Scripts you edited or switched off \
+                 only show that an update is there.",
+            )
+            .active(prefs.enabled())
+            .build();
+        row.set_subtitle_lines(0);
+        let page = Rc::downgrade(self);
+        row.connect_active_notify(move |row| {
+            let on = row.is_active();
+            let Some(page) = page.upgrade() else { return };
+            if let Err(err) = prefs.set(on) {
+                page.toasts.add_toast(toast(&format!("Could not save the setting: {err}")));
+                return;
+            }
+            // Switched on with updates already showing: act on them now
+            // rather than a day from now.
+            if on {
+                page.auto_update();
+            }
+        });
+        group.add(&row);
+        Some(group)
+    }
+
+    /// Install every waiting update that may be installed without asking
+    /// ([`userscript_prefs::eligible`]), one after another in a single job,
+    /// and say once what changed.
+    ///
+    /// Through the same steps *Update to x.y* takes — a read first, the
+    /// install, [`rebase`] and [`carry`] — under [`Fetching`], so the edit
+    /// watch does not file AdGuard's fresh copy as an edit. `carry` finds
+    /// nothing to carry for these, since an edited script is never eligible;
+    /// it runs anyway so the copies stay in step exactly as they would after
+    /// a manual update.
+    fn auto_update(self: &Rc<Self>) {
+        if !AutoUpdate::locate().is_some_and(|prefs| prefs.enabled()) || self.auto_updating.get() {
+            return;
+        }
+        let targets: Vec<(String, String, String)> = self
+            .rows
+            .borrow()
+            .iter()
+            .filter_map(|(id, row)| {
+                let to = row.available()?;
+                let opened = self.opened_for_edit.borrow().get(id).copied();
+                if opened.is_some_and(|at| at.elapsed() < EDITING_GRACE) {
+                    return None;
+                }
+                let script = row.script.borrow();
+                let eligible = userscript_prefs::eligible(
+                    script.enabled,
+                    script.edited,
+                    row.extra.borrow().pending.is_some(),
+                    script.actionable(),
+                );
+                let url = script.download_url.clone()?;
+                eligible.then(|| (id.clone(), url, format!("{} {to}", script.display_name())))
+            })
+            .collect();
+        if targets.is_empty() {
+            return;
+        }
+        self.auto_updating.set(true);
+        for (id, _, _) in &targets {
+            if let Some(row) = self.rows.borrow().get(id) {
+                row.set_busy(true);
+            }
+        }
+
+        let cli = self.cli.clone();
+        let locale = self.locale.clone();
+        let this = self.clone();
+        let fetching = Fetching::start(&self.fetching);
+        worker::run(
+            move || {
+                let mut done = Vec::new();
+                let mut failed = Vec::new();
+                for (id, url, label) in targets {
+                    // Switched off while an earlier one downloaded: what is
+                    // already installing finishes, nothing after it starts.
+                    if !AutoUpdate::locate().is_some_and(|prefs| prefs.enabled()) {
+                        break;
+                    }
+                    // Confirmed unedited first, holding no lock: the
+                    // comparison takes the delivery lock for reading, so it
+                    // cannot run inside the delivery below. What it confirmed
+                    // is pinned by the bytes it read.
+                    let Some(seen) = may_update_unattended(&locale, &id) else {
+                        continue;
+                    };
+                    // Then the delivery lock and the CLI slot, in the order
+                    // *Update to x.y* takes them, so the two cannot wait on
+                    // each other. Inside both, the switch, the script's
+                    // being on and its bytes are asked again: a switch-off of
+                    // ours running a moment ago has finished and the files
+                    // say so, an edit since would show as different bytes,
+                    // and nothing of ours can change either before the
+                    // install. The fresh copy is recorded before any
+                    // comparison can see it, as `Copies::delivering` requires.
+                    let outcome = Copies::delivering(|| {
+                        cli.exclusively(RELOAD_WAIT, || {
+                            let wanted = AutoUpdate::locate().is_some_and(|prefs| prefs.enabled());
+                            let unchanged = wanted && still_as_seen(&id, &seen);
+                            unchanged.then(|| {
+                                let installed =
+                                    cli.userscripts_install(&url).map_err(|err| err.to_string());
+                                if installed.is_ok() {
+                                    rebase(&id, false);
+                                }
+                                installed
+                            })
+                        })
+                    });
+                    match outcome {
+                        Some(Some(Ok(_))) => {
+                            let _ = carry(&id);
+                            done.push(label);
+                        }
+                        Some(Some(Err(err))) => failed.push(format!("{label}: {err}")),
+                        // No longer eligible, or AdGuard was busy with another
+                        // command of ours for the whole wait: left for the
+                        // badge and the next check.
+                        Some(None) | None => {}
+                    }
+                }
+                (done, failed)
+            },
+            move |(done, failed): (Vec<String>, Vec<String>)| {
+                drop(fetching);
+                this.auto_updating.set(false);
+                if !done.is_empty() {
+                    this.toasts.add_toast(toast(&format!("Updated {}", done.join(", "))));
+                }
+                if !failed.is_empty() {
+                    this.toasts.add_toast(toast(&format!(
+                        "Could not update {}",
+                        failed.join("; ")
+                    )));
+                }
+                this.reload();
+            },
+        );
     }
 
     /// The install-by-URL row.
@@ -932,6 +1102,8 @@ impl ExtensionsPage {
         items.append(&rename);
         let edit = menu_item("Edit source…", None);
         items.append(&edit);
+        let edit_ai = menu_item("Edit with AI…", None);
+        items.append(&edit_ai);
         let revert = menu_item("Revert to original…", None);
         items.append(&revert);
         let restore = menu_item("Bring back your changes…", None);
@@ -959,6 +1131,7 @@ impl ExtensionsPage {
         for (button, action) in [
             (&rename, Self::begin_rename as fn(&Rc<Self>, &str)),
             (&edit, Self::edit_source),
+            (&edit_ai, Self::edit_with_ai),
             (&revert, Self::begin_revert),
             (&update, Self::begin_update),
             (&restore, Self::begin_restore),
@@ -1087,7 +1260,35 @@ impl ExtensionsPage {
         let Some(dir) = adguard_core::paths::userscripts_dir() else {
             return;
         };
+        self.opened_for_edit.borrow_mut().insert(id.to_owned(), std::time::Instant::now());
         self.open_file(&userscripts::source_path(&dir, id), true);
+    }
+
+    /// Hand the script to an AI agent (`crate::ai_edit`).
+    ///
+    /// Nothing here waits on the outcome: the agent saves the file and the
+    /// edit watch takes it from there, exactly as for *Edit source…*. That is
+    /// also what has AdGuard reload the changed source (contract §15).
+    fn edit_with_ai(self: &Rc<Self>, id: &str) {
+        let Some(dir) = adguard_core::paths::userscripts_dir() else {
+            return;
+        };
+        self.opened_for_edit.borrow_mut().insert(id.to_owned(), std::time::Instant::now());
+        let Some(script) = self.rows.borrow().get(id).map(|row| {
+            let script = row.script.borrow();
+            crate::ai_edit::Script {
+                id: id.to_owned(),
+                file: userscripts::source_path(&dir, id),
+                meta: userscripts::meta_path(&dir, id),
+                name: script.original_name().to_owned(),
+                display_name: script.display_name().to_owned(),
+                version: script.version.clone(),
+                matches: userscripts::run_patterns(&dir, id),
+            }
+        }) else {
+            return;
+        };
+        crate::ai_edit::present(&self.bin, script, self.toasts.clone());
     }
 
     /// Ask before throwing an edit away, since nothing else keeps it.
@@ -1478,6 +1679,9 @@ impl ExtensionsPage {
                 this.paint_check_state();
                 if announce {
                     this.toasts.add_toast(toast(&check_summary(found, unknown)));
+                }
+                if found > 0 {
+                    this.auto_update();
                 }
             },
         );
@@ -2504,6 +2708,19 @@ impl ExtensionsPage {
 const RENAME_BODY: &str = "Only this application shows the new name. AdGuard and adguard-cli \
                            keep using the original one.";
 
+/// How long the automatic update leaves alone a script whose editor or agent
+/// was opened from here, and one whose source was saved, by anyone.
+///
+/// **This narrows a race and does not close it.** An editor or agent that
+/// saves while AdGuard downloads the update has its save overwritten, and no
+/// lock of ours reaches another program. Both are guesses at "somebody is
+/// working on it": an hour after opening, a quarter of an hour after a save.
+/// A save outside both, landing in the seconds of a download, can still be
+/// lost; the same is true of *Update to x.y* and of `check-update`, where at
+/// least someone pressed the button.
+const EDITING_GRACE: Duration = Duration::from_secs(60 * 60);
+const RECENTLY_SAVED: Duration = Duration::from_secs(15 * 60);
+
 /// How long a reload after an edit waits for another command of ours to
 /// finish before giving up — long enough for a toggle or an install, short of
 /// leaving a worker parked on a CLI that has hung.
@@ -2975,6 +3192,56 @@ fn read(locale: &Locale) -> Result<Loaded, String> {
         pending,
         bare,
     })
+}
+
+/// Whether `id` may be updated with nobody asked, judged from the files now.
+///
+/// **Every part has to be confirmed, not merely not contradicted.** The page's
+/// own read shows a row as unedited when the copies cannot be compared, which
+/// is the safe answer for a note and the dangerous one here: with the copies
+/// directory unwritable, an edited script would read as unedited and be
+/// replaced with no copy of the edit kept. So this compares again, and an
+/// error at any step is a no. `userscript_prefs::eligible` says what the
+/// parts are and why.
+///
+/// The source as it was confirmed, for [`still_as_seen`] to check again under
+/// the locks; `None` is a no.
+fn may_update_unattended(locale: &Locale, id: &str) -> Option<Vec<u8>> {
+    let (Ok(config), Some(dir), Some(copies)) =
+        (Config::load(), adguard_core::paths::userscripts_dir(), Copies::locate())
+    else {
+        return None;
+    };
+    let scripts = userscripts::read(&dir, &config.enabled_userscripts(), locale);
+    let script = scripts.iter().find(|script| script.id == id)?;
+    // The version and the source read under the delivery lock, together with
+    // the comparison: bytes read before a fetch of ours and compared after it
+    // would be filed as an edit over the real one (`Copies::observe_installed`).
+    // Saved a moment ago: somebody is working on it, and their next save
+    // could land during the download, where nothing can protect it.
+    let touched = std::fs::metadata(userscripts::source_path(&dir, id))
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|at| at.elapsed().ok());
+    if touched.is_none_or(|ago| ago < RECENTLY_SAVED) {
+        return None;
+    }
+    let observed = copies.observe_installed(&dir, id).ok()?;
+    let pending = copies.pending(id, observed.version.as_deref(), &observed.source).ok()?;
+    userscript_prefs::eligible(script.enabled, observed.edited, pending.is_some(), script.actionable())
+        .then_some(observed.source)
+}
+
+/// Whether `id` is still switched on and its source still the bytes
+/// [`may_update_unattended`] confirmed. Asked under the delivery lock and the
+/// CLI slot, where no comparison may run: equal bytes need none, since they
+/// are the ones already compared.
+fn still_as_seen(id: &str, seen: &[u8]) -> bool {
+    let (Ok(config), Some(dir)) = (Config::load(), adguard_core::paths::userscripts_dir()) else {
+        return false;
+    };
+    is_enabled(id, &config.enabled_userscripts())
+        && std::fs::read(userscripts::source_path(&dir, id)).is_ok_and(|now| now == seen)
 }
 
 /// Take what is installed for `id` now as AdGuard's own copy. Run on the
