@@ -25,11 +25,15 @@ use gtk::glib;
 use gtk4 as gtk;
 use libadwaita as adw;
 
+use adguard_core::userscript_state::Copies;
+
 use crate::toast;
 
 /// The script being edited, as the Extensions page knows it.
 #[derive(Debug, Clone)]
 pub struct Script {
+    /// AdGuard's id for it, the filename stem.
+    pub id: String,
     /// The installed `<id>.user.js`.
     pub file: PathBuf,
     /// The installed `<id>.meta.json`.
@@ -474,36 +478,43 @@ async fn paste_back(
         return false;
     }
 
-    match write_atomically(&script.file, text) {
-        Ok(()) => {
+    // Through stage 1's `put_source`, under the delivery lock, on a worker:
+    // the lock keeps the write from landing between AdGuard writing a fetched
+    // copy and its being recorded, which would file the paste as pristine;
+    // `put_source` keeps the file's permissions and writes only if the source
+    // is still the one this dialog compared against. On a worker because the
+    // lock can be held by a download for seconds.
+    let (id, file, expected, bytes) = (
+        script.id.clone(),
+        script.file.clone(),
+        current.into_bytes(),
+        text.as_bytes().to_vec(),
+    );
+    let written = crate::worker::job(move || {
+        let copies = Copies::locate().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotFound, "there is no data directory")
+        })?;
+        Copies::delivering(|| copies.put_source(&id, &file, &expected, &bytes))
+    })
+    .await;
+    match written {
+        Some(Ok(true)) => {
             ui.report(&format!("Replaced {}", script.display_name));
             true
         }
-        Err(err) => {
+        Some(Ok(false)) => {
+            ui.say("The script changed while this was open, so nothing was replaced. Paste again");
+            false
+        }
+        Some(Err(err)) => {
             ui.say(&format!("Could not write the script: {err}"));
             false
         }
+        None => {
+            ui.say("Could not write the script");
+            false
+        }
     }
-}
-
-/// Write `text` over `path` through a staging file in the same directory.
-///
-/// The staging file has a short name of its own rather than the script's
-/// with a suffix: AdGuard allows ids up to the filesystem's limit, and a
-/// suffix on one of those fails with `ENAMETOOLONG` (found by the stage 1
-/// review). It starts with a dot and ends in neither `.user.js` nor
-/// `.meta.json`, so nothing reading the directory takes it for a script.
-fn write_atomically(path: &Path, text: &str) -> std::io::Result<()> {
-    let dir = path.parent().ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::InvalidInput, "the script has no directory")
-    })?;
-    let staging = dir.join(format!(".adguard-ui-paste-{}.part", std::process::id()));
-    std::fs::write(&staging, text)?;
-    if let Err(err) = std::fs::rename(&staging, path) {
-        let _ = std::fs::remove_file(&staging);
-        return Err(err);
-    }
-    Ok(())
 }
 
 /// The agent settings, over `parent`. `on_closed` runs when the window

@@ -279,6 +279,11 @@ pub struct ExtensionsPage {
     /// Set while [`Self::auto_update`]'s job runs, so a second check landing
     /// meanwhile does not start the same installs again.
     auto_updating: Cell<bool>,
+    /// When *Edit source…* or *Edit with AI…* was last opened, by id. The
+    /// automatic update leaves such a script alone for [`EDITING_GRACE`]:
+    /// an editor or agent may still be about to save, and no lock reaches
+    /// another program, so a save during the download would be overwritten.
+    opened_for_edit: RefCell<HashMap<String, std::time::Instant>>,
     /// The *Installed* group's header: when it last checked, and *Check now*.
     check_label: RefCell<Option<gtk::Label>>,
     check_button: RefCell<Option<gtk::Button>>,
@@ -339,6 +344,7 @@ impl ExtensionsPage {
             checking: Cell::new(false),
             ever_checked: Cell::new(false),
             auto_updating: Cell::new(false),
+            opened_for_edit: RefCell::new(HashMap::new()),
             check_label: RefCell::new(None),
             check_button: RefCell::new(None),
         });
@@ -571,6 +577,10 @@ impl ExtensionsPage {
             .iter()
             .filter_map(|(id, row)| {
                 let to = row.available()?;
+                let opened = self.opened_for_edit.borrow().get(id).copied();
+                if opened.is_some_and(|at| at.elapsed() < EDITING_GRACE) {
+                    return None;
+                }
                 let script = row.script.borrow();
                 let eligible = userscript_prefs::eligible(
                     script.enabled,
@@ -1250,6 +1260,7 @@ impl ExtensionsPage {
         let Some(dir) = adguard_core::paths::userscripts_dir() else {
             return;
         };
+        self.opened_for_edit.borrow_mut().insert(id.to_owned(), std::time::Instant::now());
         self.open_file(&userscripts::source_path(&dir, id), true);
     }
 
@@ -1262,9 +1273,11 @@ impl ExtensionsPage {
         let Some(dir) = adguard_core::paths::userscripts_dir() else {
             return;
         };
+        self.opened_for_edit.borrow_mut().insert(id.to_owned(), std::time::Instant::now());
         let Some(script) = self.rows.borrow().get(id).map(|row| {
             let script = row.script.borrow();
             crate::ai_edit::Script {
+                id: id.to_owned(),
                 file: userscripts::source_path(&dir, id),
                 meta: userscripts::meta_path(&dir, id),
                 name: script.original_name().to_owned(),
@@ -2695,6 +2708,19 @@ impl ExtensionsPage {
 const RENAME_BODY: &str = "Only this application shows the new name. AdGuard and adguard-cli \
                            keep using the original one.";
 
+/// How long the automatic update leaves alone a script whose editor or agent
+/// was opened from here, and one whose source was saved, by anyone.
+///
+/// **This narrows a race and does not close it.** An editor or agent that
+/// saves while AdGuard downloads the update has its save overwritten, and no
+/// lock of ours reaches another program. Both are guesses at "somebody is
+/// working on it": an hour after opening, a quarter of an hour after a save.
+/// A save outside both, landing in the seconds of a download, can still be
+/// lost; the same is true of *Update to x.y* and of `check-update`, where at
+/// least someone pressed the button.
+const EDITING_GRACE: Duration = Duration::from_secs(60 * 60);
+const RECENTLY_SAVED: Duration = Duration::from_secs(15 * 60);
+
 /// How long a reload after an edit waits for another command of ours to
 /// finish before giving up — long enough for a toggle or an install, short of
 /// leaving a worker parked on a CLI that has hung.
@@ -3191,6 +3217,15 @@ fn may_update_unattended(locale: &Locale, id: &str) -> Option<Vec<u8>> {
     // The version and the source read under the delivery lock, together with
     // the comparison: bytes read before a fetch of ours and compared after it
     // would be filed as an edit over the real one (`Copies::observe_installed`).
+    // Saved a moment ago: somebody is working on it, and their next save
+    // could land during the download, where nothing can protect it.
+    let touched = std::fs::metadata(userscripts::source_path(&dir, id))
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|at| at.elapsed().ok());
+    if touched.is_none_or(|ago| ago < RECENTLY_SAVED) {
+        return None;
+    }
     let observed = copies.observe_installed(&dir, id).ok()?;
     let pending = copies.pending(id, observed.version.as_deref(), &observed.source).ok()?;
     userscript_prefs::eligible(script.enabled, observed.edited, pending.is_some(), script.actionable())
