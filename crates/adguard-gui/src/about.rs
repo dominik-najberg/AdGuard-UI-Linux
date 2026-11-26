@@ -64,6 +64,7 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
+use adguard_core::userscript_state::Copies;
 use adguard_core::{Catalogue, Channel, Cli, Config, FilterSet, Standing, UpdateReport, Verdict};
 use adw::prelude::*;
 use gtk::glib;
@@ -330,6 +331,10 @@ pub struct AboutPage {
     /// catalogue is `main_view`'s business. It cannot hold those pages itself —
     /// it is built alongside them and the sidebar already holds it.
     checked: RefCell<Option<Box<dyn Fn(&UpdateReport)>>>,
+    /// Notified when a run crashed partway. There is no report to pass, but
+    /// whatever ran before the crash has happened: the userscripts step may
+    /// have replaced edits on its way to the script it crashed on.
+    crashed: RefCell<Option<Box<dyn Fn()>>>,
 }
 
 impl AboutPage {
@@ -557,6 +562,7 @@ impl AboutPage {
             run_update: run_update.clone(),
             to_release: Cell::new(false),
             checked: RefCell::new(None),
+            crashed: RefCell::new(None),
         });
 
         check.connect_clicked({
@@ -667,6 +673,11 @@ impl AboutPage {
     /// Called after a run, with what AdGuard said.
     pub fn connect_checked(&self, checked: impl Fn(&UpdateReport) + 'static) {
         self.checked.replace(Some(Box::new(checked)));
+    }
+
+    /// Called after a run that crashed partway (`Error::Crashed`).
+    pub fn connect_crashed(&self, crashed: impl Fn() + 'static) {
+        self.crashed.replace(Some(Box::new(crashed)));
     }
 
     fn read_version(self: &Rc<Self>) {
@@ -976,7 +987,14 @@ impl AboutPage {
         let this = self.clone();
         worker::run(
             move || {
-                let result = cli.check_update();
+                // A delivery like the Extensions page's own fetches: no
+                // comparison of a script's source runs while AdGuard rewrites
+                // them, and each one it changed is recorded as AdGuard's copy
+                // before any can (`Copies::recording_delivery`).
+                let result = match (adguard_core::paths::userscripts_dir(), Copies::locate()) {
+                    (Some(dir), Some(copies)) => copies.recording_delivery(&dir, || cli.check_update()),
+                    _ => cli.check_update(),
+                };
                 // Only after the measured crash, a segfault, and on this
                 // thread: it reads every enabled script's head, which is no
                 // work for the main loop. Any other death is not the scripts'.
@@ -992,7 +1010,12 @@ impl AboutPage {
                 this.check.set_label(UPDATE);
                 match result {
                     Ok(report) => this.render(&report),
-                    Err(err @ adguard_core::Error::Crashed { .. }) => this.render_crash(&err.to_string(), &suspects),
+                    Err(err @ adguard_core::Error::Crashed { .. }) => {
+                        this.render_crash(&err.to_string(), &suspects);
+                        if let Some(crashed) = this.crashed.borrow().as_ref() {
+                            crashed();
+                        }
+                    }
                     Err(err) => this.render_error(&err.to_string()),
                 }
             },

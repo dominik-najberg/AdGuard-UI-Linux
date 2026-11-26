@@ -2212,12 +2212,14 @@ That makes *Reinstall* buildable from the recorded `downloadURL`, and it is the 
 | enabled, source names neither `@updateURL` nor `@downloadURL` | **segfault**: the same warning, then `ffurl_parse: : more data`, then signal 11 | — |
 | disabled | not fetched, not replaced, **not re-enabled** | kept |
 
+**An update rewrites the metadata file with the source, and an editor does not.** Measured 26 November 2026 on 1.5.1: a same-version re-download of a script with no `updateURL` left its `.meta.json` byte-identical but moved its mtime to the instant the `.user.js` was written. That is how the Extensions page tells a source AdGuard re-delivered during a `check-update` from one an editor saved at the same time (`Copies::recording_delivery`): only the first moves both.
+
 Four consequences, each a constraint on the page rather than a curiosity:
 
 - **An edit can be destroyed with no new version anywhere.** A script without an `updateURL` — the third row, which is how AdGuard records any script whose source declared none — is reinstalled from scratch every time `check-update` runs. A page that keeps edits cannot rely on "no new version, so nothing happened"; it has to compare the file with its own copies after every run. That is why the Extensions page never discards a kept edit merely because the installed file matches AdGuard's copy again (`userscript_state::Copies::observe`).
 - **`1 userscript(s) updated` is not news while such a script is installed.** The count includes the refetch above, so it is printed on every run that changed nothing, the same way §14 found `Updated` from Safe Browsing and CRLite to be.
 - **A script the user switched off never updates.** It is skipped entirely, which is the opposite of a reinstall (*re-enables silently*, above). So a per-script check of its own is the only way such a script can learn it is out of date, and the only way an *Update* can be offered for it.
-- **One bare script stops the whole content update.** The crash is in the userscripts step, which runs fourth of six, so Safe Browsing, CRLite and the application check after it never run — and stdout, cut off by the signal, holds only `Checking filters updates...`. `Cli::check_update` currently reports that as `Refused { message: "Checking filters updates..." }`, a header line presented as though it were an error. Installing a script from a raw URL with no `@updateURL` and no `@downloadURL` — a gist, a pastebin, a personal server — is all it takes, and it persists until the script is removed or switched off.
+- **One bare script stops the whole content update.** The crash is in the userscripts step, which runs fourth of six, so Safe Browsing, CRLite and the application check after it never run — and stdout, cut off by the signal, holds only `Checking filters updates...`. `Cli::check_update` used to report that as `Refused { message: "Checking filters updates..." }`, a header line presented as though it were an error; a death by signal is now `Error::Crashed`, and the About page names the script behind it (`update_crash`), as does that script's row on the Extensions page. Installing a script from a raw URL with no `@updateURL` and no `@downloadURL` — a gist, a pastebin, a personal server — is all it takes, and it persists until the script is removed or switched off.
 
 ### An edited source is not served until AdGuard reloads it, and a no-op `enable` does that
 
@@ -2226,7 +2228,6 @@ Four consequences, each a constraint on the page rather than a curiosity:
 **`userscripts enable <id>` on the already-enabled script made it re-read.** The confirmation was the usual `enabled successfully`, `proxy.yaml` was rewritten (its mtime moved, its content not), the next page carried a new `ts=`, and the bundle served the edit. Restoring the file and enabling again served the original. So the Extensions page, when it sees a switched-on script's source change, runs that `enable` to make the change live. It never does so for a switched-off script, so it never switches anything on. An ambiguous script cannot be named this way, and its row says to restart protection instead.
 
 **What was not measured**: whether `restart` reloads sources too. It presumably does, being a fresh start, but nobody restarted protection to find out.
-
 ### Every refusal is exit 0, and each has its own sentence
 
 [§3](#3-exit-codes-are-only-half-trustworthy) once more. Success must be defined positively, and the refusals are worth telling apart because they mean different things:

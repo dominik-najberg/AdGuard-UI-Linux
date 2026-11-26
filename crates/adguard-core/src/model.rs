@@ -1594,6 +1594,13 @@ pub struct Userscript {
     /// `downloadURL` — where the script came from, and the only thing that
     /// makes a reinstall possible. `None` for a script whose metadata omits it.
     pub download_url: Option<String>,
+    /// `updateURL`: where a newer version is announced, usually the metadata
+    /// block alone (`.meta.js`). `None` when it is empty, which is how AdGuard
+    /// records a script whose source declared none — and such a script is
+    /// re-downloaded whole on every `check-update` (contract §15), so its
+    /// update check falls back to [`Self::download_url`]
+    /// ([`crate::script_update::check`]).
+    pub update_url: Option<String>,
     /// Whether `proxy.yaml`'s `userscripts:` list carries this script.
     pub enabled: bool,
     /// Whether the CLI can be made to act on this script at all.

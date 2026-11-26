@@ -38,11 +38,15 @@ pub fn suspects<'a>(dir: &Path, scripts: &'a [Userscript]) -> Vec<&'a Userscript
     scripts
         .iter()
         .filter(|script| script.enabled)
-        .filter(|script| {
-            head(&dir.join(format!("{}.user.js", script.id)))
-                .is_some_and(|source| names_no_update_address(&source))
-        })
+        .filter(|script| is_bare(dir, &script.id))
         .collect()
+}
+
+/// Whether the script `id` in `dir` names no update address, switched on or
+/// not — for a row that has to say so the moment it is switched on, rather
+/// than only after the next read. `false` when its source cannot be read.
+pub fn is_bare(dir: &Path, id: &str) -> bool {
+    head(&dir.join(format!("{id}.user.js"))).is_some_and(|source| names_no_update_address(&source))
 }
 
 /// Whether `err` is the crash this module explains: a segmentation fault.
@@ -159,6 +163,7 @@ mod tests {
             version: Some("1.0".to_owned()),
             homepage: None,
             download_url: None,
+            update_url: None,
             enabled,
             ambiguous: false,
             alias: None,

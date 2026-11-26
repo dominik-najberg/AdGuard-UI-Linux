@@ -58,11 +58,47 @@ const MINE_VERSION: &str = "mine.version";
 /// side of a merge — which this release does not attempt, but which is
 /// impossible to attempt later from data that was not kept.
 const MINE_ANCESTOR: &str = "mine.base.user.js";
+/// A merge that conflicted, with git's markers in it, written for the user to
+/// read beside the updated script ([`Copies::write_merge`]). Never installed:
+/// a script with markers in it is not JavaScript.
+const MERGE: &str = "merge.user.js";
 
 /// Every file a script's directory may hold, for [`Copies::forget`] — named
 /// rather than removed with the directory, so a file this module did not
 /// write is never deleted by it.
-const FILES: [&str; 5] = [BASE, BASE_VERSION, MINE, MINE_VERSION, MINE_ANCESTOR];
+const FILES: [&str; 6] = [BASE, BASE_VERSION, MINE, MINE_VERSION, MINE_ANCESTOR, MERGE];
+
+/// The files that make up a kept edit, dropped together whenever the edit is.
+const EDIT_FILES: [&str; 4] = [MINE, MINE_VERSION, MINE_ANCESTOR, MERGE];
+
+/// A kept edit that is no longer in the installed source.
+///
+/// Both are AdGuard's doing, never the user's: an update replaced the file
+/// over the edit (contract §15, *What `check-update` does to a userscript*).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pending {
+    /// The same bytes were delivered again over it. `check-update` does this
+    /// on every run to an enabled script with no `updateURL`. Bringing the edit
+    /// back is exact: nothing upstream moved.
+    Overwritten,
+    /// What the edit was made on was replaced — by a new release, or by the
+    /// author changing the script without a version bump — and
+    /// [`MINE_ANCESTOR`] holds that copy. Bringing the edit back is a
+    /// three-way merge, which can conflict.
+    SetAside,
+}
+
+/// What carrying a kept edit into the installed version produced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Carried {
+    /// The edit, applied to the installed version. Ready to install.
+    Clean(Vec<u8>),
+    /// The edit and the release changed the same lines; the whole script with
+    /// git's markers, for a person to read.
+    Conflict { marked: String, conflicts: usize },
+    /// One of the three copies is not UTF-8, so it cannot be merged as text.
+    Unmergeable,
+}
 
 /// The user's own names for scripts, by id.
 ///
@@ -218,6 +254,20 @@ pub struct Observed {
     pub source: Vec<u8>,
 }
 
+/// What [`Copies::carry_installed`] did with a kept edit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Carry {
+    /// Nothing was pending.
+    Nothing,
+    /// The edit is installed again.
+    Kept,
+    /// It clashes with what is installed; `marked` is the merge with git's
+    /// markers, `None` when the copies could not be merged as text at all.
+    Clash { marked: Option<String>, conflicts: usize },
+    /// The source changed between the read and the write, and was left alone.
+    Moved,
+}
+
 /// The copies of each script that tell an edit from the script as AdGuard
 /// delivered it.
 pub struct Copies {
@@ -335,12 +385,118 @@ impl Copies {
         if fs::read(dir.join(MINE)).ok().as_deref() != Some(current) {
             // A new edit, made on the file as it is now, whose ancestor is the
             // copy on record. One set aside for an earlier edit no longer
-            // belongs to anything.
+            // belongs to anything, and nor does a merge of it the user may
+            // have been reading.
             remove_if_present(&dir.join(MINE_ANCESTOR))?;
+            remove_if_present(&dir.join(MERGE))?;
             write_atomically(&dir.join(MINE), current)?;
             write_atomically(&dir.join(MINE_VERSION), version.as_bytes())?;
         }
         Ok(true)
+    }
+
+    /// [`Self::pending`] for script `id` as installed in `dir` now: its version
+    /// and source read under the delivery lock, for the reason
+    /// [`Self::observe_installed`] gives.
+    pub fn pending_installed(&self, dir: &Path, id: &str) -> io::Result<Option<Pending>> {
+        let _delivered = DELIVERY.read().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let version = crate::userscripts::installed_version(dir, id);
+        let source = fs::read(crate::userscripts::source_path(dir, id))?;
+        let _held = exclusive();
+        Ok(pending_in(&self.dir(id)?, version.as_deref().unwrap_or(""), &source))
+    }
+
+    /// Carry script `id`'s kept edit into its installed source
+    /// ([`Self::carry_over`], then [`Self::put_source`]), reading the version
+    /// and the source under the delivery lock and writing before it is let
+    /// go — so no fetch of ours lands between the bytes the merge was made
+    /// against and the write, where the merge would go over AdGuard's fresh
+    /// copy and then be recorded as pristine.
+    pub fn carry_installed(&self, dir: &Path, id: &str) -> io::Result<Carry> {
+        let _delivered = DELIVERY.read().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let version = crate::userscripts::installed_version(dir, id);
+        let target = crate::userscripts::source_path(dir, id);
+        let current = fs::read(&target)?;
+        let label = version.clone().unwrap_or_else(|| "the update".to_owned());
+        Ok(match self.carry_over(id, version.as_deref(), &current, &label)? {
+            None => Carry::Nothing,
+            Some(Carried::Clean(merged)) => match self.put_source(id, &target, &current, &merged)? {
+                true => Carry::Kept,
+                false => Carry::Moved,
+            },
+            Some(Carried::Conflict { marked, conflicts }) => Carry::Clash {
+                marked: Some(marked),
+                conflicts,
+            },
+            Some(Carried::Unmergeable) => Carry::Clash {
+                marked: None,
+                conflicts: 0,
+            },
+        })
+    }
+
+    /// *Keep my version*: install the kept edit as it was over script `id`'s
+    /// source, under the delivery lock as [`Self::carry_installed`] is.
+    /// `Ok(false)` when the source moved meanwhile.
+    pub fn keep_edit_installed(&self, dir: &Path, id: &str) -> io::Result<bool> {
+        let _delivered = DELIVERY.read().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let target = crate::userscripts::source_path(dir, id);
+        let current = fs::read(&target)?;
+        let mine = self.kept_edit(id)?;
+        self.put_source(id, &target, &current, &mine)
+    }
+
+    /// Run `update` — AdGuard's own `check-update` — as a delivery: no
+    /// comparison runs while it does, and every installed source it changed
+    /// is then recorded as AdGuard's copy ([`Self::rebase`]) before any can.
+    ///
+    /// **A `check-update` is a fetch like ours**, and the page compares the
+    /// moment a source changes (the directory watch). A script with no
+    /// `updateURL` is downloaded again at the same version on every run
+    /// (contract §15), and if its author changed it without a bump, a
+    /// comparison in the middle would file AdGuard's new bytes as the user's
+    /// edit — over the kept one. Recording each changed source here keeps the
+    /// edit as an edit, with the copy it was made on set aside, for the merge
+    /// that follows.
+    ///
+    /// **Only what AdGuard rewrote is recorded, and its metadata says which.**
+    /// AdGuard writes a script's `.meta.json` with its source on every update
+    /// — measured 26 November 2026 on 1.5.1: a same-version re-download left
+    /// the metadata byte-identical but moved its mtime to the source's. An
+    /// editor saving during the run touches the source alone, and a script
+    /// the run skipped (switched off, or past a crash) touches neither. Each
+    /// of those still holds the user's bytes, which are not AdGuard's copy,
+    /// so a source is recorded only when its bytes *and* its metadata's mtime
+    /// both moved. What is left is an editor saving the same script in the
+    /// instant after AdGuard wrote it, which nothing here can tell apart.
+    pub fn recording_delivery<T>(&self, dir: &Path, update: impl FnOnce() -> T) -> T {
+        let _delivering = DELIVERY.write().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let meta_time = |id: &str| {
+            fs::metadata(crate::userscripts::meta_path(dir, id)).and_then(|meta| meta.modified()).ok()
+        };
+        let before: Vec<(String, Option<Vec<u8>>, Option<std::time::SystemTime>)> =
+            crate::userscripts::read(dir, &[], &crate::locale::Locale::english())
+                .into_iter()
+                .map(|script| {
+                    let source = fs::read(crate::userscripts::source_path(dir, &script.id)).ok();
+                    let written = meta_time(&script.id);
+                    (script.id, source, written)
+                })
+                .collect();
+        let answer = update();
+        for (id, source, written) in before {
+            if meta_time(&id) == written {
+                continue;
+            }
+            let Ok(after) = fs::read(crate::userscripts::source_path(dir, &id)) else {
+                continue;
+            };
+            if source.as_deref() != Some(after.as_slice()) {
+                let version = crate::userscripts::installed_version(dir, &id);
+                let _ = self.rebase(&id, version.as_deref(), &after);
+            }
+        }
+        answer
     }
 
     /// Run `fetch` — have AdGuard install a script, then [`Self::rebase`] what
@@ -415,7 +571,7 @@ impl Copies {
     pub fn discard_edit(&self, id: &str) -> io::Result<()> {
         let _held = exclusive();
         let dir = self.dir(id)?;
-        for file in [MINE, MINE_VERSION, MINE_ANCESTOR] {
+        for file in EDIT_FILES {
             remove_if_present(&dir.join(file))?;
         }
         Ok(())
@@ -434,10 +590,105 @@ impl Copies {
         let base = fs::read(dir.join(BASE))?;
         let permissions = fs::metadata(target).ok().map(|meta| meta.permissions());
         write_atomically_with(target, &base, permissions)?;
-        for file in [MINE, MINE_VERSION, MINE_ANCESTOR] {
+        for file in EDIT_FILES {
             remove_if_present(&dir.join(file))?;
         }
         Ok(())
+    }
+
+    /// Whether a kept edit is missing from the installed source, and why.
+    ///
+    /// Read only, and meaningful after [`Self::observe`] has seen `current` at
+    /// `version` — which is what every read of the page does first. `None` when
+    /// there is no kept edit, when it is what is installed, or when the user
+    /// has since made a new one: the installed source differing from the
+    /// pristine copy *is* the current edit, and nothing is pending behind it.
+    pub fn pending(&self, id: &str, version: Option<&str>, current: &[u8]) -> io::Result<Option<Pending>> {
+        let _held = exclusive();
+        let dir = self.dir(id)?;
+        Ok(pending_in(&dir, version.unwrap_or(""), current))
+    }
+
+    /// Carry the kept edit into what is installed: exactly, when AdGuard only
+    /// re-delivered the same version over it, and by a three-way merge when a
+    /// release replaced it ([`crate::script_merge`]). Nothing is written;
+    /// [`Self::put_source`] installs a clean result.
+    ///
+    /// `label` names the installed version in a conflict's markers. `None`
+    /// when nothing is pending.
+    pub fn carry_over(
+        &self,
+        id: &str,
+        version: Option<&str>,
+        current: &[u8],
+        label: &str,
+    ) -> io::Result<Option<Carried>> {
+        let _held = exclusive();
+        let dir = self.dir(id)?;
+        let Some(pending) = pending_in(&dir, version.unwrap_or(""), current) else {
+            return Ok(None);
+        };
+        let mine = fs::read(dir.join(MINE))?;
+        let ancestor = match pending {
+            // Upstream did not move: the copy the edit was made on is the one
+            // installed, and the merge is the edit itself.
+            Pending::Overwritten => current.to_vec(),
+            Pending::SetAside => fs::read(dir.join(MINE_ANCESTOR))?,
+        };
+        let (Ok(ancestor), Ok(mine), Ok(upstream)) = (
+            std::str::from_utf8(&ancestor),
+            std::str::from_utf8(&mine),
+            std::str::from_utf8(current),
+        ) else {
+            return Ok(Some(Carried::Unmergeable));
+        };
+        Ok(Some(match crate::script_merge::merge(ancestor, mine, upstream, label) {
+            crate::script_merge::Merged::Clean(text) => Carried::Clean(text.into_bytes()),
+            crate::script_merge::Merged::Conflict { marked, conflicts } => {
+                Carried::Conflict { marked, conflicts }
+            }
+        }))
+    }
+
+    /// Install `bytes` as the script's source at `target` — a merge, or the
+    /// kept edit itself — **only if the source is still `expected`**, the bytes
+    /// the merge was made against. `Ok(false)` when it moved in between: an
+    /// editor's save or another update got there first, and writing over it
+    /// would lose that instead.
+    ///
+    /// Staged and renamed with the target's permissions, as [`Self::revert`]
+    /// does. The copies are left to [`Self::observe`], which files what is
+    /// now installed as the edit on top of the current version — dropping the
+    /// ancestor, which no longer belongs to anything.
+    pub fn put_source(&self, id: &str, target: &Path, expected: &[u8], bytes: &[u8]) -> io::Result<bool> {
+        let _held = exclusive();
+        // For the id's check alone: the write is to AdGuard's file.
+        self.dir(id)?;
+        if fs::read(target)? != expected {
+            return Ok(false);
+        }
+        let permissions = fs::metadata(target).ok().map(|meta| meta.permissions());
+        write_atomically_with(target, bytes, permissions)?;
+        Ok(true)
+    }
+
+    /// The kept edit, for *Keep my version*: [`Self::put_source`] it to put it
+    /// back as it was, the release's changes left out.
+    pub fn kept_edit(&self, id: &str) -> io::Result<Vec<u8>> {
+        let _held = exclusive();
+        fs::read(self.dir(id)?.join(MINE))
+    }
+
+    /// Keep a conflicted merge where the user can open it, and say where.
+    ///
+    /// In this application's directory, never AdGuard's: AdGuard would take a
+    /// `.user.js` there for a script, and one with markers in it does not run.
+    /// Dropped with the edit ([`EDIT_FILES`]).
+    pub fn write_merge(&self, id: &str, marked: &str) -> io::Result<PathBuf> {
+        let _held = exclusive();
+        let path = self.dir(id)?.join(MERGE);
+        write_atomically(&path, marked.as_bytes())?;
+        Ok(path)
     }
 
     /// Delete everything kept for a script that has been removed.
@@ -472,6 +723,34 @@ impl Copies {
     }
 }
 
+/// [`Copies::pending`], for a directory already chosen and locked.
+fn pending_in(dir: &Path, version: &str, current: &[u8]) -> Option<Pending> {
+    // Not yet observed at this version: nothing here describes `current`.
+    if read_text(&dir.join(BASE_VERSION)).as_deref() != Some(version) {
+        return None;
+    }
+    let base = fs::read(dir.join(BASE)).ok()?;
+    if base != current {
+        // An edit is installed — the kept one, or a newer one. Either way it
+        // is what runs, and nothing is missing.
+        return None;
+    }
+    let mine = fs::read(dir.join(MINE)).ok()?;
+    if mine == base {
+        return None;
+    }
+    // The ancestor first, at any version. [`Copies::rebase`] sets one aside
+    // for a same-version re-fetch whose bytes changed, and restoring the edit
+    // exactly there would drop the author's change; only a merge keeps both.
+    if dir.join(MINE_ANCESTOR).is_file() {
+        Some(Pending::SetAside)
+    } else if read_text(&dir.join(MINE_VERSION)).as_deref() == Some(version) {
+        Some(Pending::Overwritten)
+    } else {
+        None
+    }
+}
+
 /// AdGuard delivered `current` at `version`, replacing `base` at `recorded`:
 /// set the kept edit aside with the copy it was made on, then record the new
 /// pristine copy.
@@ -497,9 +776,9 @@ fn new_release(
     } else {
         // No edit, or one without the copy it was made on — nothing a merge
         // could use.
-        remove_if_present(&dir.join(MINE))?;
-        remove_if_present(&dir.join(MINE_VERSION))?;
-        remove_if_present(&dir.join(MINE_ANCESTOR))?;
+        for file in EDIT_FILES {
+            remove_if_present(&dir.join(file))?;
+        }
     }
     write_base(dir, version, current)
 }
@@ -632,6 +911,7 @@ mod tests {
             version: None,
             homepage: None,
             download_url: None,
+            update_url: None,
             enabled: false,
             ambiguous: false,
             alias: None,
@@ -988,4 +1268,185 @@ mod tests {
             Some(PathBuf::from("/x"))
         );
     }
+
+    /// The installed `.user.js` of a test script, in a directory of its own.
+    fn installed(sandbox: &Sandbox, id: &str, bytes: &[u8]) -> PathBuf {
+        let dir = sandbox.dir.join("adguard");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("{id}.user.js"));
+        fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    const V1: &str = "// ==UserScript==\n// @version 1.0\n// ==/UserScript==\nconst a = 1;\nconst b = 2;\nconst c = 3;\n";
+
+    /// `check-update` re-delivering the same version over an edit — the
+    /// empty-`updateURL` case — leaves the edit pending, and carrying it over
+    /// gives back exactly the edit.
+    #[test]
+    fn an_edit_overwritten_at_the_same_version_comes_back_exactly() {
+        let sandbox = Sandbox::new("overwritten");
+        let copies = sandbox.copies();
+        let edited = V1.replace("c = 3", "c = 30");
+        copies.observe("s", Some("1.0"), V1.as_bytes()).unwrap();
+        assert!(copies.observe("s", Some("1.0"), edited.as_bytes()).unwrap());
+        assert_eq!(copies.pending("s", Some("1.0"), edited.as_bytes()).unwrap(), None, "the edit is installed");
+
+        // AdGuard puts its copy back.
+        assert!(!copies.observe("s", Some("1.0"), V1.as_bytes()).unwrap());
+        assert_eq!(copies.pending("s", Some("1.0"), V1.as_bytes()).unwrap(), Some(Pending::Overwritten));
+        assert_eq!(
+            copies.carry_over("s", Some("1.0"), V1.as_bytes(), "1.0").unwrap(),
+            Some(Carried::Clean(edited.clone().into_bytes()))
+        );
+
+        let target = installed(&sandbox, "s", V1.as_bytes());
+        assert!(copies.put_source("s", &target, V1.as_bytes(), edited.as_bytes()).unwrap());
+        assert_eq!(fs::read(&target).unwrap(), edited.as_bytes());
+        assert!(copies.observe("s", Some("1.0"), edited.as_bytes()).unwrap(), "edited again");
+        assert_eq!(copies.pending("s", Some("1.0"), edited.as_bytes()).unwrap(), None);
+    }
+
+    /// A release over an edit: the edit is set aside with its ancestor, and
+    /// carried into the release by a merge that keeps both sides' changes.
+    #[test]
+    fn an_edit_set_aside_by_a_release_is_merged_into_it() {
+        let sandbox = Sandbox::new("set-aside");
+        let copies = sandbox.copies();
+        let edited = V1.replace("c = 3", "c = 30");
+        let v2 = V1.replace("@version 1.0", "@version 2.0").replace("a = 1", "a = 10");
+        copies.observe("s", Some("1.0"), V1.as_bytes()).unwrap();
+        copies.observe("s", Some("1.0"), edited.as_bytes()).unwrap();
+        copies.observe("s", Some("2.0"), v2.as_bytes()).unwrap();
+
+        assert_eq!(copies.pending("s", Some("2.0"), v2.as_bytes()).unwrap(), Some(Pending::SetAside));
+        let Some(Carried::Clean(merged)) = copies.carry_over("s", Some("2.0"), v2.as_bytes(), "2.0").unwrap() else {
+            panic!("different lines, so a clean merge");
+        };
+        let merged = String::from_utf8(merged).unwrap();
+        assert!(merged.contains("@version 2.0") && merged.contains("a = 10") && merged.contains("c = 30"));
+
+        let target = installed(&sandbox, "s", v2.as_bytes());
+        assert!(copies.put_source("s", &target, v2.as_bytes(), merged.as_bytes()).unwrap());
+        assert!(copies.observe("s", Some("2.0"), merged.as_bytes()).unwrap());
+        assert_eq!(sandbox.kept("s", MINE_ANCESTOR), None, "the old ancestor goes once the edit sits on 2.0");
+        assert_eq!(copies.pending("s", Some("2.0"), merged.as_bytes()).unwrap(), None);
+    }
+
+    #[test]
+    fn a_clash_is_a_conflict_and_its_merge_file_goes_with_the_edit() {
+        let sandbox = Sandbox::new("conflict");
+        let copies = sandbox.copies();
+        let edited = V1.replace("b = 2", "b = 'mine'");
+        let v2 = V1.replace("@version 1.0", "@version 2.0").replace("b = 2", "b = 'theirs'");
+        copies.observe("s", Some("1.0"), V1.as_bytes()).unwrap();
+        copies.observe("s", Some("1.0"), edited.as_bytes()).unwrap();
+        copies.observe("s", Some("2.0"), v2.as_bytes()).unwrap();
+
+        let Some(Carried::Conflict { marked, conflicts }) =
+            copies.carry_over("s", Some("2.0"), v2.as_bytes(), "2.0").unwrap()
+        else {
+            panic!("both changed line b");
+        };
+        assert_eq!(conflicts, 1);
+        let path = copies.write_merge("s", &marked).unwrap();
+        assert!(path.is_file());
+        assert_eq!(copies.kept_edit("s").unwrap(), edited.as_bytes());
+
+        copies.discard_edit("s").unwrap();
+        assert!(!path.exists(), "dropped with the edit");
+        assert_eq!(copies.pending("s", Some("2.0"), v2.as_bytes()).unwrap(), None);
+    }
+
+    /// The author changed the script without a version bump and it was
+    /// fetched again: the edit is merged into the changed copy rather than
+    /// restored over it, so the author's change is not lost.
+    #[test]
+    fn a_same_version_change_is_merged_not_overwritten() {
+        let sandbox = Sandbox::new("same-version-merge");
+        let copies = sandbox.copies();
+        let edited = V1.replace("c = 3", "c = 30");
+        let changed = V1.replace("a = 1", "a = 10");
+        copies.observe("s", Some("1.0"), V1.as_bytes()).unwrap();
+        copies.observe("s", Some("1.0"), edited.as_bytes()).unwrap();
+        copies.rebase("s", Some("1.0"), changed.as_bytes()).unwrap();
+
+        assert_eq!(copies.pending("s", Some("1.0"), changed.as_bytes()).unwrap(), Some(Pending::SetAside));
+        let Some(Carried::Clean(merged)) = copies.carry_over("s", Some("1.0"), changed.as_bytes(), "1.0").unwrap()
+        else {
+            panic!("different lines, so a clean merge");
+        };
+        let merged = String::from_utf8(merged).unwrap();
+        assert!(merged.contains("a = 10") && merged.contains("c = 30"), "{merged}");
+    }
+
+    /// The installed-file forms read the script where it is. `check-update`
+    /// re-delivering the same bytes over an edit, recorded as a delivery,
+    /// leaves it pending; carrying puts it back; and a script the run did
+    /// not touch is not recorded at all.
+    #[test]
+    fn a_recorded_delivery_and_carry_bring_an_edit_back() {
+        let sandbox = Sandbox::new("recorded-delivery");
+        let installed = sandbox.dir.join("adguard-cli/userscripts");
+        fs::create_dir_all(&installed).unwrap();
+        for id in ["s", "untouched"] {
+            fs::write(installed.join(format!("{id}.meta.json")), r#"{"name": "S", "version": "1.0"}"#).unwrap();
+            fs::write(installed.join(format!("{id}.user.js")), V1).unwrap();
+        }
+        let copies = sandbox.copies();
+        let edited = V1.replace("c = 3", "c = 30");
+        for id in ["s", "untouched"] {
+            copies.observe_installed(&installed, id).unwrap();
+            fs::write(installed.join(format!("{id}.user.js")), &edited).unwrap();
+            assert!(copies.observe_installed(&installed, id).unwrap().edited);
+        }
+
+        // The run re-downloads `s` with the author's same-version change —
+        // metadata and source, as AdGuard writes them — never reaches
+        // `untouched`, and an editor saves `saved` meanwhile.
+        fs::write(installed.join("saved.meta.json"), r#"{"name": "S", "version": "1.0"}"#).unwrap();
+        fs::write(installed.join("saved.user.js"), V1).unwrap();
+        copies.observe_installed(&installed, "saved").unwrap();
+        // Coarse filesystem clocks: let the metadata rewrite land on a later tick.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let changed = V1.replace("a = 1", "a = 10");
+        copies.recording_delivery(&installed, || {
+            fs::write(installed.join("s.meta.json"), r#"{"name": "S", "version": "1.0"}"#).unwrap();
+            fs::write(installed.join("s.user.js"), &changed).unwrap();
+            fs::write(installed.join("saved.user.js"), &edited).unwrap();
+        });
+
+        assert!(copies.observe_installed(&installed, "untouched").unwrap().edited, "not recorded as pristine");
+        assert!(
+            copies.observe_installed(&installed, "saved").unwrap().edited,
+            "an editor's save during the run is the user's, not AdGuard's"
+        );
+        assert_eq!(copies.pending_installed(&installed, "s").unwrap(), Some(Pending::SetAside));
+        assert_eq!(copies.carry_installed(&installed, "s").unwrap(), Carry::Kept);
+        let now = fs::read_to_string(installed.join("s.user.js")).unwrap();
+        assert!(now.contains("a = 10") && now.contains("c = 30"), "{now}");
+        assert_eq!(copies.carry_installed(&installed, "s").unwrap(), Carry::Nothing);
+    }
+
+    /// A source that moved since the merge was made is not written over.
+    #[test]
+    fn put_source_refuses_a_source_that_moved() {
+        let sandbox = Sandbox::new("moved");
+        let copies = sandbox.copies();
+        let target = installed(&sandbox, "s", b"saved by an editor meanwhile");
+        assert!(!copies.put_source("s", &target, V1.as_bytes(), b"merged").unwrap());
+        assert_eq!(fs::read(&target).unwrap(), b"saved by an editor meanwhile");
+    }
+
+    /// No kept edit, or the kept edit installed, is nothing pending.
+    #[test]
+    fn nothing_is_pending_without_a_missing_edit() {
+        let sandbox = Sandbox::new("nothing");
+        let copies = sandbox.copies();
+        copies.observe("s", Some("1.0"), V1.as_bytes()).unwrap();
+        assert_eq!(copies.pending("s", Some("1.0"), V1.as_bytes()).unwrap(), None);
+        assert_eq!(copies.carry_over("s", Some("1.0"), V1.as_bytes(), "1.0").unwrap(), None);
+        assert_eq!(copies.pending("never-seen", Some("1.0"), V1.as_bytes()).unwrap(), None);
+    }
+
 }
