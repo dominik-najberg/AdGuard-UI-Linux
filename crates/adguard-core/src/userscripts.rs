@@ -103,11 +103,6 @@ pub fn source_path(dir: &Path, id: &str) -> std::path::PathBuf {
     dir.join(format!("{id}{SOURCE_SUFFIX}"))
 }
 
-/// Where a script's metadata file is, beside its source.
-pub fn meta_path(dir: &Path, id: &str) -> std::path::PathBuf {
-    dir.join(format!("{id}{META_SUFFIX}"))
-}
-
 /// The pages a script runs on: its metadata's `match` and `include` lists,
 /// in that order, as AdGuard recorded them at install.
 ///
