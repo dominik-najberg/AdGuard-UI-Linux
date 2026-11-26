@@ -526,7 +526,10 @@ pub fn present_settings(parent: &impl IsA<gtk::Widget>, on_closed: impl Fn() + '
             .title("AI agents")
             .search_enabled(false)
             .build(),
-        page: adw::PreferencesPage::new(),
+        page: adw::PreferencesPage::builder()
+            .title("Agents")
+            .icon_name("system-run-symbolic")
+            .build(),
         agents: adw::PreferencesGroup::builder()
             .title("Agents")
             .description(
@@ -562,11 +565,19 @@ struct SettingsWindow {
 }
 
 impl SettingsWindow {
+    /// Two pages, so neither has to scroll: on one page the prompt editor
+    /// alone pushed the window past the height of the main window, which is
+    /// as tall as a dialog over it can be.
     fn build(self: &Rc<Self>) {
         self.page.add(&self.agents);
         self.rebuild_agents();
         self.page.add(&self.terminal_group());
-        self.page.add(&self.prompt_group());
+        let prompt = adw::PreferencesPage::builder()
+            .title("Prompt")
+            .icon_name("document-edit-symbolic")
+            .build();
+        prompt.add(&self.prompt_group());
+        self.dialog.add(&prompt);
     }
 
     /// Save, and report a failure where the user is looking.
@@ -879,6 +890,7 @@ impl SettingsWindow {
         let scroller = gtk::ScrolledWindow::builder()
             .child(&view)
             .min_content_height(220)
+            .vexpand(true)
             .hscrollbar_policy(gtk::PolicyType::Never)
             .build();
         scroller.add_css_class("card");
