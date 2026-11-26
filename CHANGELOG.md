@@ -11,6 +11,36 @@ This file is the one changelog.
 
 ---
 
+## 1.15.0 — 26 November 2026
+
+### Updates for your userscripts
+
+AdGuard CLI never updates a userscript on its own. Measured from its logs, a script changes only when AdGuard CLI checks for updates, which here is the About page's button. The Extensions page now checks each script itself: once a day, and when you press **Check now** above the list, it asks the script's own server for the latest version. A newer one shows beside the version, and **Update to …** comes first in the script's cog menu. Scripts you switched off are checked too, which AdGuard's own check skips.
+
+### Edit a userscript, and keep your edits
+
+**Edit source…** in the cog opens the script in your text editor. AdGuard keeps a script in memory, so after you save, the page has AdGuard read it again, and the change applies on the next page you load. The row then says *Edited*, and **Revert to original** puts back the author's version.
+
+Your edits survive updates. *Update to …* carries them into the new version. If they clash with what the author changed, a window asks whether to keep your version, use the update, or open both in your editor. An enabled script with a download address but no update address is downloaded again every time AdGuard checks for updates, which used to undo an edit without a word. The page now notices and puts your edit back.
+
+### Edit a userscript with AI
+
+**Edit with AI…** in the cog takes one line about what should change. It opens Claude Code, Codex, opencode or Gemini CLI, whichever you have, in a terminal, with a prompt that names the script's file and tells the agent to leave the `==UserScript==` block alone. **Copy with source** copies the prompt with the script in it, for a chat in the browser, and **Paste from clipboard** takes the answer back. Before writing anything, it shows the line count before and after, and warns if the metadata block changed. **Configure agents…** chooses which agents are offered and in what order, and lets you edit their commands and the prompt, change the terminal, or add an agent of your own. The commands run without a shell, and a script's name goes to the agent as one argument, so it cannot turn into a command of its own unless you write a shell into a command yourself.
+
+### Update userscripts automatically, if you want
+
+A switch below the list installs new versions as soon as they are found. It is off unless you switch it on, because a userscript runs inside every page it matches. Even when it is on, it updates only scripts that are switched on and that you have not edited. It also leaves alone a script that you opened for editing in the last hour or that was saved in the last 15 minutes.
+
+### Where a script came from, and a name of your own
+
+**Script page** in the cog opens the page you installed the script from: Greasy Fork, Sleazy Fork, OpenUserJS, GitHub or a gist. **Author's homepage** opens the author's own page, when that is somewhere else. **Rename…** gives a script a name of your own, and so does the install dialog. AdGuard has no rename, so the name is kept by AdGuard UI, and `adguard-cli` goes on showing the original.
+
+### A script that breaks AdGuard's update check is named
+
+An enabled userscript that names neither `@updateURL` nor `@downloadURL` makes AdGuard CLI crash while it checks for updates. Safe Browsing, CRLite and the application check never run. The About page used to show the first line of the report as if it were an error. It now says AdGuard CLI crashed and names the script, and that script's row on the Extensions page warns about it.
+
+---
+
 ## 1.14.1 — 1 November 2026
 
 ### No false warning on the Activity page after a crash

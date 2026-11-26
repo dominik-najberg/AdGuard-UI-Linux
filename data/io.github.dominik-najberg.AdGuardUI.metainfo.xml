@@ -53,6 +53,12 @@
     application is its first release.
   -->
   <releases>
+    <release version="1.15.0" type="stable" date="2026-11-26">
+      <url type="details">https://github.com/dominik-najberg/AdGuard-UI-Linux/releases/tag/v1.15.0</url>
+      <description>
+        <p>The Extensions page checks each userscript for a newer version and updates it when you ask, carrying your own edits into the new version. Scripts can be edited in your text editor or with an AI agent on this computer, renamed, and opened at the page they were installed from. An optional switch updates unedited scripts automatically. A userscript that makes AdGuard's update check crash is now named instead of reported as an error.</p>
+      </description>
+    </release>
     <release version="1.14.1" type="stable" date="2026-11-01">
       <url type="details">https://github.com/dominik-najberg/AdGuard-UI-Linux/releases/tag/v1.14.1</url>
       <description>
